@@ -32,7 +32,7 @@ usage is deliberately absent because telemetre does not collect it.
                        "empty" for a successful sample with no windows
                        "error" for a failed sample (no windows, sanitized error)
     time_anomaly     = "future_sampled_at" when the centre flagged the sample
-    error_summary    = sanitized ``error_kind: error_detail`` for failures
+    error_summary    = safe error code only for failures (never raw detail)
 
 AGY windows use the upstream model group as ``bucket_id`` and the upstream
 bucket id (``five-hour``, ``weekly``, ...) as ``slot``. Codex windows use
@@ -66,7 +66,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -110,7 +109,6 @@ SUPPORTED_PROVIDERS = ("agy", "codex")
 DEFAULT_DATABASE = "~/.local/state/telemetre/quota.sqlite3"
 DEFAULT_STATE_NAME = ".bilan-telemetre-state.json"
 MAX_BATCH_SEQ = 2**31 - 1
-MAX_ERROR_SUMMARY = 512
 MAX_META_JSON = 2048
 MAX_LABEL = 128
 MAX_BUCKET_ID = 128
@@ -231,17 +229,45 @@ def _json_list(value: Any) -> list[str]:
     return [item for item in loaded if isinstance(item, str) and item]
 
 
-def _sanitize_summary(kind: Any, detail: Any) -> str:
-    """Build a short, control-character-free error summary."""
+SAFE_ERROR_CODES = frozenset(
+    {
+        "timeout",
+        "http_error",
+        "transport_error",
+        "invalid_response",
+        "unknown",
+        "upstream_error",
+    }
+)
+ERROR_CODE_ALIASES = {
+    "spawn_error": "transport_error",
+    "not_authenticated": "upstream_error",
+    "provider_error": "upstream_error",
+    "exit_code": "upstream_error",
+    "invalid_json": "invalid_response",
+    "unrecognized_structure": "invalid_response",
+    "protocol_error": "invalid_response",
+    "invalid_window": "invalid_response",
+    "invalid_observation": "invalid_response",
+    "unsupported_provider": "upstream_error",
+    "invalid_sampled_at": "invalid_response",
+    "unrecognized_status": "invalid_response",
+}
 
-    parts = []
-    for value in (kind, detail):
-        if isinstance(value, str) and value.strip():
-            parts.append(value.strip())
-    text = ": ".join(parts) if parts else "quota observation failed"
-    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return (text or "quota observation failed")[:MAX_ERROR_SUMMARY]
+
+def _safe_error_code(kind: Any) -> str:
+    """Map telemetre's failure kind to a bounded, non-sensitive category.
+
+    Raw ``error_detail`` text is deliberately never sent: DESIGN §9 requires
+    operational errors in ``quota_observations.error_summary`` to be sanitized
+    so upstream response bodies and secrets cannot leak into D1.
+    """
+
+    code = kind.strip().lower() if isinstance(kind, str) else ""
+    if not code:
+        return "unknown"
+    mapped = ERROR_CODE_ALIASES.get(code, code)
+    return mapped if mapped in SAFE_ERROR_CODES else "upstream_error"
 
 
 def _time_anomaly(value: Any) -> Optional[str]:
@@ -483,7 +509,7 @@ def _map_observation(
             "interval_seconds": interval,
             "status": "error",
             "time_anomaly": "invalid_sampled_at",
-            "error_summary": _sanitize_summary("invalid_sampled_at", None),
+            "error_summary": _safe_error_code("invalid_sampled_at"),
             "windows": [],
         }
 
@@ -498,7 +524,7 @@ def _map_observation(
             "interval_seconds": interval,
             "status": "error",
             "time_anomaly": _time_anomaly(row["time_anomaly"]),
-            "error_summary": _sanitize_summary(row["error_kind"], row["error_detail"]),
+            "error_summary": _safe_error_code(row["error_kind"]),
             "windows": [],
         }
 
@@ -517,9 +543,7 @@ def _map_observation(
             "interval_seconds": interval,
             "status": "error",
             "time_anomaly": _time_anomaly(row["time_anomaly"]),
-            "error_summary": _sanitize_summary(
-                "unrecognized_status", raw_status or None
-            ),
+            "error_summary": _safe_error_code("unrecognized_status"),
             "windows": [],
         }
 

@@ -215,6 +215,13 @@ export interface UsageBreakdownRow extends UsageCounters {
   partial_columns: Array<UsageTokenColumn>;
 }
 
+export interface UsageSourceFreshness {
+  source: string;
+  latest_bucket_start: string | null;
+  data_age_seconds: number | null;
+  is_stale: boolean;
+}
+
 export interface MonthlyUsage {
   timezone: string;
   month: string;
@@ -223,6 +230,7 @@ export interface MonthlyUsage {
   latest_bucket_start: string | null;
   data_age_seconds: number | null;
   is_stale: boolean;
+  source_freshness: Array<UsageSourceFreshness>;
   rows: Array<UsageBreakdownRow>;
 }
 

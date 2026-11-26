@@ -726,12 +726,12 @@ class TelemetreShipperTests(unittest.TestCase):
 
         failed = by_id["failure-timeout"]
         self.assertEqual(failed["status"], "error")
-        self.assertEqual(
-            failed["error_summary"],
-            "timeout: provider did not finish within 60s second line",
-        )
+        self.assertEqual(failed["error_summary"], "timeout")
         self.assertEqual(failed["windows"], [])
         self.assertIsNone(failed["time_anomaly"])
+        serialized = json.dumps(payload)
+        self.assertNotIn("provider did not finish", serialized)
+        self.assertNotIn("second line", serialized)
 
         empty = by_id["empty-agy"]
         self.assertEqual(empty["status"], "empty")

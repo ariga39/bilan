@@ -447,6 +447,10 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     writeJsonl(path.join(usageDir, `${usageDay}.jsonl`), [
       usageRecord(usageAt(30), "fp_a", 42.5, true, "go-key-1"),
       usageRecord(usageAt(35), "fp_a", 43.5, false, "go-key-1"),
+      // Equivalent repeated poll lines must be deduplicated before the shipper
+      // batch is split; otherwise the public ingest boundary rejects the batch.
+      usageRecord(usageAt(35), "fp_a", 43.5, false, "go-key-1"),
+      usageRecord(usageAt(31), "fp_b", 90, true),
       usageRecord(usageAt(31), "fp_b", 90, true),
     ]);
 
@@ -894,8 +898,9 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(agyError?.latest_valid).toBeNull();
     expect(agyError?.latest_attempt).toMatchObject({
       status: "error",
-      error_summary: "timeout: provider did not finish within 60s",
+      error_summary: "timeout",
     });
+    expect(overviewResponse.body).not.toContain("provider did not finish");
 
     const codexEmpty = subjectMap.get("codex\u0000codex-empty");
     expect(codexEmpty?.latest_valid).toBeNull();

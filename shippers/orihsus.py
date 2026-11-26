@@ -238,39 +238,16 @@ def _canonical_audit_record(raw: bytes) -> Optional[dict[str, Any]]:
     return record
 
 
-def _read_audit_records_to_extent(audit_path: str, extent: int) -> list[dict[str, Any]]:
-    """Read canonical records from the captured complete-line extent only."""
+def _records_from_snapshot(snapshot: bytes, extent: int) -> list[dict[str, Any]]:
+    """Parse canonical records from a coherent in-memory extent snapshot."""
 
-    try:
-        size = os.path.getsize(audit_path)
-    except FileNotFoundError as exc:
-        raise ShipperError("audit log disappeared while aggregating") from exc
-    if extent > size:
-        raise ShipperError(
-            "audit log is shorter than the captured extent; "
-            "refusing to aggregate a replacement"
-        )
-    remaining = extent
-    buffer = b""
     records: list[dict[str, Any]] = []
-    with open(audit_path, "rb") as handle:
-        while remaining > 0:
-            chunk = handle.read(min(1024 * 1024, remaining))
-            if not chunk:
-                raise ShipperError(
-                    "audit log ended before the captured extent; "
-                    "refusing to aggregate a replacement"
-                )
-            remaining -= len(chunk)
-            buffer += chunk
-            while True:
-                newline = buffer.find(b"\n")
-                if newline < 0:
-                    break
-                raw, buffer = buffer[:newline], buffer[newline + 1 :]
-                record = _canonical_audit_record(raw)
-                if record is not None:
-                    records.append(record)
+    for raw in snapshot[:extent].split(b"\n"):
+        if not raw:
+            continue
+        record = _canonical_audit_record(raw)
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -357,27 +334,34 @@ def _require_audit_log(audit_path: str) -> None:
         raise ShipperError("audit log path is not a file")
 
 
+def _hash_prefix_handle(handle: Any, size: int) -> str:
+    """Hash exactly one prefix from an already-open audit handle."""
+
+    handle.seek(0)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining > 0:
+        chunk = handle.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ShipperError(
+                "audit log ended before the saved cursor; "
+                "refusing to replay complete hourly totals"
+            )
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+
 def _prefix_sha256(audit_path: str, size: int) -> str:
     """Hash exactly the consumed audit prefix so rewrites fail closed."""
 
-    digest = hashlib.sha256()
-    remaining = size
     try:
         with open(audit_path, "rb") as handle:
-            while remaining > 0:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    raise ShipperError(
-                        "audit log ended before the saved cursor; "
-                        "refusing to replay complete hourly totals"
-                    )
-                digest.update(chunk)
-                remaining -= len(chunk)
+            return _hash_prefix_handle(handle, size)
     except FileNotFoundError as exc:
         raise ShipperError(
             "audit log disappeared; refusing to replay complete hourly totals"
         ) from exc
-    return digest.hexdigest()
 
 
 def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
@@ -400,42 +384,111 @@ def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
         )
 
 
-def _read_appended_audit(
-    audit_path: str,
-    cursor: int,
-) -> tuple[list[dict[str, Any]], int, str]:
-    """Read complete appended audit lines and return (records, new_cursor, new_hash)."""
+def _read_audit_snapshot(audit_path: str) -> bytes:
+    """Read one coherent audit snapshot and reject a replaced or truncated file."""
 
     try:
-        size = os.path.getsize(audit_path)
+        with open(audit_path, "rb") as handle:
+            stat_before = os.fstat(handle.fileno())
+            snapshot = handle.read()
+            stat_after = os.fstat(handle.fileno())
     except FileNotFoundError as exc:
         raise ShipperError("audit log disappeared while reading") from exc
-    if cursor > size:
+    except OSError as exc:
+        raise ShipperError("audit log could not be inspected") from exc
+
+    try:
+        path_stat = os.stat(audit_path)
+    except FileNotFoundError as exc:
+        raise ShipperError("audit log disappeared during capture") from exc
+    if (path_stat.st_dev, path_stat.st_ino) != (stat_before.st_dev, stat_before.st_ino):
+        raise ShipperError(
+            "audit log was replaced during capture; refusing to trust the new extent"
+        )
+    if stat_after.st_size < len(snapshot):
+        raise ShipperError(
+            "audit log changed during capture; refusing to trust the new extent"
+        )
+    return snapshot
+
+
+def _snapshot_prefix_sha256(snapshot: bytes, size: int) -> str:
+    if size < 0 or size > len(snapshot):
+        raise ShipperError("audit snapshot is shorter than the required extent")
+    return hashlib.sha256(snapshot[:size]).hexdigest()
+
+
+def _capture_audit_extent(
+    audit_path: str,
+    ack_cursor: int,
+    ack_prefix: str,
+    inflight_cursor: Optional[int],
+    inflight_prefix: Optional[str],
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Verify, parse, and aggregate from one coherent audit snapshot.
+
+    All protected boundaries are checked against the same bytes that identify
+    touched hours and produce the next digest. A single path recheck after the
+    snapshot ties that digest back to the file before it is persisted or sent.
+    """
+
+    snapshot = _read_audit_snapshot(audit_path)
+
+    if len(snapshot) < ack_cursor:
         raise ShipperError(
             "audit log shrank below the saved cursor; refusing to replay because "
             "complete hourly totals could be overwritten"
         )
+    if _snapshot_prefix_sha256(snapshot, ack_cursor) != ack_prefix:
+        raise ShipperError(
+            "audit log prefix changed below the saved cursor; refusing to replay because "
+            "complete hourly totals could be overwritten"
+        )
 
-    try:
-        with open(audit_path, "rb") as handle:
-            handle.seek(cursor)
-            appended = handle.read()
-    except FileNotFoundError as exc:
-        raise ShipperError("audit log disappeared while reading") from exc
+    if inflight_cursor is not None:
+        if inflight_prefix is None or inflight_cursor > len(snapshot):
+            raise ShipperError(
+                "audit log no longer contains the in-flight extent; "
+                "refusing to aggregate a replacement"
+            )
+        if _snapshot_prefix_sha256(snapshot, inflight_cursor) != inflight_prefix:
+            raise ShipperError(
+                "audit log prefix changed within the in-flight extent; "
+                "refusing to aggregate a replacement"
+            )
 
-    last_newline = appended.rfind(b"\n")
-    if last_newline < 0:
-        return [], cursor, _prefix_sha256(audit_path, cursor)
-    complete = appended[: last_newline + 1]
-    records = []
-    for raw in complete.split(b"\n"):
-        if not raw:
-            continue
-        record = _canonical_audit_record(raw)
-        if record is not None:
-            records.append(record)
-    next_cursor = cursor + len(complete)
-    return records, next_cursor, _prefix_sha256(audit_path, next_cursor)
+    last_newline = snapshot.rfind(b"\n")
+    next_cursor = last_newline + 1 if last_newline >= 0 else 0
+    if next_cursor < ack_cursor:
+        raise ShipperError(
+            "audit log no longer contains the acknowledged extent; "
+            "refusing to aggregate a replacement"
+        )
+    if inflight_cursor is not None and next_cursor < inflight_cursor:
+        raise ShipperError(
+            "audit log no longer contains the in-flight extent; "
+            "refusing to aggregate a replacement"
+        )
+
+    next_prefix = _snapshot_prefix_sha256(snapshot, next_cursor)
+    appended_records = _records_from_snapshot(
+        snapshot[ack_cursor:next_cursor],
+        next_cursor - ack_cursor,
+    )
+    touched_hours = {_record_hour(record) for record in appended_records}
+    if touched_hours:
+        usage_rows = aggregate_audit_records(
+            _records_from_snapshot(snapshot, next_cursor),
+            touched_hours,
+        )
+    else:
+        usage_rows = []
+
+    # The snapshot and its parsed rows are coherent. Before returning (and
+    # before run_once persists an extent or sends), confirm the path still
+    # matches that digest. Appends beyond next_cursor are permitted.
+    _verify_audit_prefix(audit_path, next_cursor, next_prefix)
+    return usage_rows, next_cursor, next_prefix
 
 
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
@@ -612,6 +665,7 @@ def _read_usage_backlog(
     """Read every daily file from its own cursor, covering an offline backlog."""
 
     observations: list[dict[str, Any]] = []
+    seen_sample_ids: set[str] = set()
     updated = dict(cursors)
     reset_days: list[str] = []
     for day, path in _usage_files(usage_dir):
@@ -624,7 +678,14 @@ def _read_usage_backlog(
         updated[day] = next_cursor
         if reset:
             reset_days.append(day)
-        observations.extend(records)
+        for record in records:
+            sample_id = record["sample_id"]
+            if sample_id in seen_sample_ids:
+                # Equivalent repeated poll lines resolve to the first immutable
+                # observation; cursors still advance past every consumed line.
+                continue
+            seen_sample_ids.add(sample_id)
+            observations.append(record)
     observations.sort(key=lambda item: (item["sampled_at"], item["sample_id"]))
     return observations, updated, reset_days
 
@@ -718,6 +779,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             or pending_extent_cursor < pending_audit_cursor
             or not _is_sha256_hex(pending_extent_prefix)
             or not isinstance(payload, dict)
+            or (inflight_cursor is not None and pending_extent_cursor < inflight_cursor)
         ):
             raise ShipperError("invalid pending outbox in shipper state")
         _validate_cursors(pending.get("usage_cursors_after"), "usage_cursors_after")
@@ -936,14 +998,6 @@ def run_once(
 ) -> bool:
     _require_audit_log(audit_path)
     state = _load_state(state_path, producer_id)
-    _verify_audit_prefix(audit_path, state["audit_cursor"], state["audit_prefix_sha256"])
-    inflight_cursor = state["audit_inflight_extent_cursor"]
-    if inflight_cursor is not None:
-        _verify_audit_prefix(
-            audit_path,
-            inflight_cursor,
-            state["audit_inflight_extent_sha256"],
-        )
 
     pending_acked = False
     if state["pending"] is not None:
@@ -951,34 +1005,20 @@ def run_once(
             return False
         pending_acked = True
 
-    records, next_audit_cursor, next_audit_prefix = _read_appended_audit(
-        audit_path, state["audit_cursor"]
-    )
     inflight_cursor = state["audit_inflight_extent_cursor"]
-    if inflight_cursor is not None and next_audit_cursor < inflight_cursor:
-        raise ShipperError(
-            "audit log no longer covers the in-flight extent; refusing to aggregate a replacement"
-        )
+    usage_rows, next_audit_cursor, next_audit_prefix = _capture_audit_extent(
+        audit_path,
+        state["audit_cursor"],
+        state["audit_prefix_sha256"],
+        inflight_cursor,
+        state["audit_inflight_extent_sha256"],
+    )
     if next_audit_cursor != state["audit_cursor"] or inflight_cursor is not None:
-        # Persist the full extent before aggregation so a crash after a partial
+        # Persist the full extent before sending so a crash after a partial
         # multi-chunk ACK still protects every already-committed batch.
-        _verify_audit_prefix(audit_path, next_audit_cursor, next_audit_prefix)
         state["audit_inflight_extent_cursor"] = next_audit_cursor
         state["audit_inflight_extent_sha256"] = next_audit_prefix
         _save_state(state_path, state)
-    touched_hours = {_record_hour(record) for record in records}
-    usage_rows = (
-        aggregate_audit_records(
-            _read_audit_records_to_extent(audit_path, next_audit_cursor),
-            touched_hours,
-        )
-        if touched_hours
-        else []
-    )
-    if touched_hours:
-        # The source may have been rewritten while rows were aggregated. Never
-        # send a possibly incomplete complete-hour total in that case.
-        _verify_audit_prefix(audit_path, next_audit_cursor, next_audit_prefix)
 
     observations, next_usage_cursors, reset_days = _read_usage_backlog(
         usage_dir,

@@ -90,7 +90,7 @@ const quota: QuotaResponse = {
         sample_id: "fp_a-error",
         sampled_at: "2026-11-27T11:58:00Z",
         status: "error",
-        error_summary: "upstream HTTP 500",
+        error_summary: "http_error",
       }),
       anomalies: [
         attempt({
@@ -152,7 +152,7 @@ const quota: QuotaResponse = {
         sampled_at: "2026-11-27T11:57:00Z",
         sample_age_seconds: 180,
         status: "error",
-        error_summary: "upstream HTTP 503",
+        error_summary: "upstream_error",
       }),
       anomalies: [],
     },
@@ -272,8 +272,8 @@ describe("B3/B4 quota dashboard section", () => {
     expect(screen.getByText("Limited")).toBeTruthy();
 
     expect(screen.getAllByText("Latest attempt failed").length).toBeGreaterThan(0);
-    expect(screen.getByText("upstream HTTP 500")).toBeTruthy();
-    expect(screen.getByText("upstream HTTP 503")).toBeTruthy();
+    expect(screen.getByText("http_error")).toBeTruthy();
+    expect(screen.getByText("upstream_error")).toBeTruthy();
     expect(screen.getByText("Latest attempt was empty")).toBeTruthy();
     expect(screen.getAllByText("Clock anomaly detected").length).toBeGreaterThan(0);
     expect(screen.getByText("clock_skew")).toBeTruthy();

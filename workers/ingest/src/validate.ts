@@ -100,6 +100,27 @@ const quotaWindowSchema = z.object({
 
 export type QuotaWindowInput = z.infer<typeof quotaWindowSchema>;
 
+const SAFE_QUOTA_ERROR_CODES = new Set([
+  "timeout",
+  "http_error",
+  "transport_error",
+  "invalid_response",
+  "unknown",
+  "upstream_error",
+]);
+const GENERIC_QUOTA_ERROR_CODE = "upstream_error";
+
+function normalizedQuotaErrorSummary(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const code = value.trim();
+  if (!code) {
+    return null;
+  }
+  return SAFE_QUOTA_ERROR_CODES.has(code) ? code : GENERIC_QUOTA_ERROR_CODE;
+}
+
 const quotaObservationSchema = z
   .object({
     sample_id: z.string().min(1).max(512),
@@ -128,7 +149,14 @@ const quotaObservationSchema = z
       }
       seen.add(key);
     });
-  });
+  })
+  .transform((observation) => ({
+    ...observation,
+    error_summary:
+      observation.status === "error"
+        ? normalizedQuotaErrorSummary(observation.error_summary)
+        : null,
+  }));
 
 export type QuotaObservationInput = z.infer<typeof quotaObservationSchema>;
 

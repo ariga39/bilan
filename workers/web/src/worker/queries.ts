@@ -99,7 +99,8 @@ interface UsageBucketRow extends UsageAggregateRow {
   bucket_start: string;
 }
 
-interface LatestUsageRow {
+interface SourceLatestUsageRow {
+  source: string;
   latest: string | null;
 }
 
@@ -330,7 +331,7 @@ async function loadMonthlyUsage(
   const range = monthRangeUtc(month, timezone);
   const attribution = bucketAttributionForRange(timezone, range);
   const nowIso = utcSecondIso(now);
-  const [usage, latest] = await Promise.all([
+  const [usage, latestPerSource] = await Promise.all([
     db
       .prepare(
         `SELECT source, accounting_basis, unit_kind, actor_kind, actor_id, model, effort,
@@ -356,13 +357,35 @@ async function loadMonthlyUsage(
       .bind(range.start, range.end)
       .all<UsageAggregateRow>(),
     db
-      .prepare("SELECT MAX(bucket_start) AS latest FROM usage_buckets WHERE bucket_start <= ?")
+      .prepare(
+        `SELECT source, MAX(bucket_start) AS latest
+         FROM usage_buckets
+         WHERE bucket_start <= ?
+         GROUP BY source
+         ORDER BY source`,
+      )
       .bind(nowIso)
-      .first<LatestUsageRow>(),
+      .all<SourceLatestUsageRow>(),
   ]);
 
   const rows: Array<UsageBreakdownRow> = usage.results.map((row) => withCompleteness(row));
-  const latestBucketStart = latest?.latest ?? null;
+  const sourceFreshness = latestPerSource.results.map((row) => {
+    const age = row.latest === null ? null : ageSeconds(now.getTime(), row.latest);
+    return {
+      source: row.source,
+      latest_bucket_start: row.latest,
+      data_age_seconds: age,
+      is_stale: age === null || age > USAGE_STALE_AFTER_SECONDS,
+    };
+  });
+  const latestBucketStart = sourceFreshness.reduce<string | null>((latest, source) => {
+    if (source.latest_bucket_start === null) {
+      return latest;
+    }
+    return latest === null || source.latest_bucket_start > latest
+      ? source.latest_bucket_start
+      : latest;
+  }, null);
   const dataAge = latestBucketStart === null ? null : ageSeconds(now.getTime(), latestBucketStart);
 
   return {
@@ -372,6 +395,7 @@ async function loadMonthlyUsage(
     latest_bucket_start: latestBucketStart,
     data_age_seconds: dataAge,
     is_stale: dataAge === null || dataAge > USAGE_STALE_AFTER_SECONDS,
+    source_freshness: sourceFreshness,
     rows,
   };
 }
