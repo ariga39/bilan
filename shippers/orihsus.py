@@ -357,27 +357,34 @@ def _require_audit_log(audit_path: str) -> None:
         raise ShipperError("audit log path is not a file")
 
 
+def _hash_prefix_handle(handle: Any, size: int) -> str:
+    """Hash exactly one prefix from an already-open audit handle."""
+
+    handle.seek(0)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining > 0:
+        chunk = handle.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ShipperError(
+                "audit log ended before the saved cursor; "
+                "refusing to replay complete hourly totals"
+            )
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+
 def _prefix_sha256(audit_path: str, size: int) -> str:
     """Hash exactly the consumed audit prefix so rewrites fail closed."""
 
-    digest = hashlib.sha256()
-    remaining = size
     try:
         with open(audit_path, "rb") as handle:
-            while remaining > 0:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    raise ShipperError(
-                        "audit log ended before the saved cursor; "
-                        "refusing to replay complete hourly totals"
-                    )
-                digest.update(chunk)
-                remaining -= len(chunk)
+            return _hash_prefix_handle(handle, size)
     except FileNotFoundError as exc:
         raise ShipperError(
             "audit log disappeared; refusing to replay complete hourly totals"
         ) from exc
-    return digest.hexdigest()
 
 
 def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
@@ -403,39 +410,76 @@ def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
 def _read_appended_audit(
     audit_path: str,
     cursor: int,
+    expected_prefix: str,
 ) -> tuple[list[dict[str, Any]], int, str]:
-    """Read complete appended audit lines and return (records, new_cursor, new_hash)."""
+    """Capture appended records and a new digest from one stable file view.
+
+    The previous checkpoint and the new extent must be tied to the same
+    verified content. The old prefix is checked on the open handle before the
+    append is read and again after the new digest is computed. A replacement
+    between the caller's checkpoint check and this capture therefore cannot
+    become a trusted new digest.
+    """
 
     try:
-        size = os.path.getsize(audit_path)
-    except FileNotFoundError as exc:
-        raise ShipperError("audit log disappeared while reading") from exc
-    if cursor > size:
-        raise ShipperError(
-            "audit log shrank below the saved cursor; refusing to replay because "
-            "complete hourly totals could be overwritten"
-        )
-
-    try:
-        with open(audit_path, "rb") as handle:
-            handle.seek(cursor)
-            appended = handle.read()
+        handle = open(audit_path, "rb")
     except FileNotFoundError as exc:
         raise ShipperError("audit log disappeared while reading") from exc
 
-    last_newline = appended.rfind(b"\n")
-    if last_newline < 0:
-        return [], cursor, _prefix_sha256(audit_path, cursor)
-    complete = appended[: last_newline + 1]
-    records = []
-    for raw in complete.split(b"\n"):
-        if not raw:
-            continue
-        record = _canonical_audit_record(raw)
-        if record is not None:
-            records.append(record)
-    next_cursor = cursor + len(complete)
-    return records, next_cursor, _prefix_sha256(audit_path, next_cursor)
+    with handle:
+        try:
+            stat_before = os.fstat(handle.fileno())
+        except OSError as exc:
+            raise ShipperError("audit log could not be inspected") from exc
+        if cursor > stat_before.st_size:
+            raise ShipperError(
+                "audit log shrank below the saved cursor; refusing to replay because "
+                "complete hourly totals could be overwritten"
+            )
+        if _hash_prefix_handle(handle, cursor) != expected_prefix:
+            raise ShipperError(
+                "audit log prefix changed before capture; refusing to replay because "
+                "complete hourly totals could be overwritten"
+            )
+
+        handle.seek(cursor)
+        appended = handle.read()
+        last_newline = appended.rfind(b"\n")
+        if last_newline < 0:
+            records: list[dict[str, Any]] = []
+            next_cursor = cursor
+        else:
+            complete = appended[: last_newline + 1]
+            records = []
+            for raw in complete.split(b"\n"):
+                if not raw:
+                    continue
+                record = _canonical_audit_record(raw)
+                if record is not None:
+                    records.append(record)
+            next_cursor = cursor + len(complete)
+
+        next_prefix = _hash_prefix_handle(handle, next_cursor)
+        if _hash_prefix_handle(handle, cursor) != expected_prefix:
+            raise ShipperError(
+                "audit log prefix changed during capture; refusing to replay because "
+                "complete hourly totals could be overwritten"
+            )
+
+        try:
+            path_stat = os.stat(audit_path)
+        except FileNotFoundError as exc:
+            raise ShipperError("audit log disappeared during capture") from exc
+        if (path_stat.st_dev, path_stat.st_ino) != (stat_before.st_dev, stat_before.st_ino):
+            raise ShipperError(
+                "audit log was replaced during capture; refusing to trust the new extent"
+            )
+        if os.fstat(handle.fileno()).st_size < next_cursor:
+            raise ShipperError(
+                "audit log changed during capture; refusing to trust the new extent"
+            )
+
+        return records, next_cursor, next_prefix
 
 
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
@@ -952,7 +996,9 @@ def run_once(
         pending_acked = True
 
     records, next_audit_cursor, next_audit_prefix = _read_appended_audit(
-        audit_path, state["audit_cursor"]
+        audit_path,
+        state["audit_cursor"],
+        state["audit_prefix_sha256"],
     )
     inflight_cursor = state["audit_inflight_extent_cursor"]
     if inflight_cursor is not None and next_audit_cursor < inflight_cursor:

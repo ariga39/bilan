@@ -1077,9 +1077,9 @@ class OrihsusShipperTests(unittest.TestCase):
         real_read = shipper_module._read_appended_audit
         appended = False
 
-        def capture_then_append(path: str, cursor: int):
+        def capture_then_append(path: str, cursor: int, expected_prefix: str):
             nonlocal appended
-            records, next_cursor, next_hash = real_read(path, cursor)
+            records, next_cursor, next_hash = real_read(path, cursor, expected_prefix)
             if not appended:
                 appended = True
                 self.write_audit([late], append=True)
@@ -1116,6 +1116,70 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(len(payload["usage_buckets"]), 1)
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
         self.assertEqual(self.read_state()["audit_cursor"], os.path.getsize(self.audit_path))
+
+    def test_replacement_between_saved_check_and_capture_fails_closed(self) -> None:
+        self.write_audit(
+            [audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")]
+        )
+        self.assert_ok(self.run_cli())
+        key = (
+            "opencode",
+            "default",
+            "identity",
+            "laptop-key",
+            "deepseek-chat",
+            "",
+            "2026-11-26T14:00:00Z",
+        )
+        self.assertEqual(self.ingest.snapshot_usage_rows()[key]["unit_count"], 1)
+        self.assertEqual(self.ingest.snapshot_usage_rows()[key]["input_tokens"], 100)
+        state_before = self.read_state()
+        request_count = len(self.ingest.snapshot_requests())
+
+        late = audit_record("2026-11-26T14:35:00.000Z", gateway_key="laptop-key")
+        self.write_audit([late], append=True)
+        with open(self.audit_path, "rb") as handle:
+            original = handle.read()
+        replacement = original.replace(b'"input_tokens":100', b'"input_tokens":999', 1)
+        self.assertEqual(len(replacement), len(original))
+
+        real_verify = shipper_module._verify_audit_prefix
+        replaced = False
+
+        def verify_then_replace(path: str, cursor: int, expected: str):
+            nonlocal replaced
+            real_verify(path, cursor, expected)
+            if not replaced:
+                replaced = True
+                with open(path, "wb") as handle:
+                    handle.write(replacement)
+
+        with mock.patch.object(
+            shipper_module,
+            "_verify_audit_prefix",
+            side_effect=verify_then_replace,
+        ):
+            with self.assertRaises(shipper_module.ShipperError):
+                shipper_module.run_once(
+                    audit_path=self.audit_path,
+                    usage_dir=self.usage_dir,
+                    state_path=self.state_path,
+                    producer_id="orihsus-main",
+                    endpoint=self.endpoint,
+                    token=TOKEN,
+                    interval_seconds=300,
+                    observer_machine="gateway-a",
+                    heartbeat=True,
+                    timeout=5,
+                    quiet=True,
+                )
+
+        self.assertTrue(replaced)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        rows = self.ingest.snapshot_usage_rows()
+        self.assertEqual(rows[key]["unit_count"], 1)
+        self.assertEqual(rows[key]["input_tokens"], 100)
+        self.assertEqual(self.read_state(), state_before)
 
     # -- durable replay / ACK / heartbeat ---------------------------------
 
