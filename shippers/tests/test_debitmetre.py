@@ -19,6 +19,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
+from unittest import mock
+
+from shippers import debitmetre as shipper_module
 
 SHIPPER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "debitmetre.py"))
 INGEST_PATH = "/api/v1/ingest"
@@ -771,6 +774,50 @@ class DebitmetreShipperTests(unittest.TestCase):
         payload = self.ingest.snapshot_requests()[-1]["payload"]
         self.assertEqual(payload["batch_seq"], 2)
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+
+    def test_incremental_aggregation_is_bounded_to_captured_extent(self) -> None:
+        first = audit_record("2026-11-01T16:05:00Z", machine_id="machine-a")
+        self.write_records([first])
+        captured_extent = os.path.getsize(self.usage_path)
+        late = audit_record("2026-11-01T16:35:00Z", machine_id="machine-a")
+        real_read = shipper_module._read_appended_records
+        appended = False
+
+        def capture_then_append(path: str, cursor: int):
+            nonlocal appended
+            records, next_cursor = real_read(path, cursor)
+            if not appended:
+                appended = True
+                self.write_records([late], append=True)
+            return records, next_cursor
+
+        with mock.patch.object(
+            shipper_module, "_read_appended_records", side_effect=capture_then_append
+        ):
+            ok = shipper_module.run_once(
+                usage_path=self.usage_path,
+                state_path=self.state_path,
+                producer_id="debitmetre-main",
+                endpoint=self.endpoint,
+                token=TOKEN,
+                backfill=False,
+                heartbeat=True,
+                timeout=5,
+                quiet=True,
+            )
+
+        self.assertTrue(ok)
+        payload = self.ingest.snapshot_requests()[0]["payload"]
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 1)
+        state = self.read_state()
+        self.assertEqual(state["cursor"], captured_extent)
+        self.assertEqual(state["source_extent"], captured_extent)
+
+        # The concurrent append is picked up by the next run.
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
+        self.assertEqual(self.read_state()["cursor"], os.path.getsize(self.usage_path))
 
     def test_interrupted_backfill_resumes_remaining_chunks_on_normal_run(self) -> None:
         start = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)

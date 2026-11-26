@@ -157,26 +157,6 @@ def _record_hour(record: dict[str, Any]) -> str:
     return utc_hour_start(parse_utc_timestamp(record["timestamp"]))
 
 
-def _iter_file_records(usage_path: str) -> Iterable[dict[str, Any]]:
-    """Yield canonical records from only newline-terminated lines.
-
-    Debitmetre always terminates every JSONL record with ``\\n``. An unfinished
-    trailing line may be a concurrent write, so it is left for a later tick.
-    """
-
-    try:
-        handle = open(usage_path, "rb")
-    except FileNotFoundError:
-        return
-    with handle:
-        for raw in handle:
-            if not raw.endswith(b"\n"):
-                break
-            record = _canonical_record(raw)
-            if record is not None:
-                yield record
-
-
 def aggregate_records(
     records: Iterable[dict[str, Any]],
     touched_hours: Optional[set[str]] = None,
@@ -244,8 +224,10 @@ def aggregate_records(
     return rows
 
 
-def build_touched_hour_rows(usage_path: str, touched_hours: set[str]) -> list[dict[str, Any]]:
-    return aggregate_records(_iter_file_records(usage_path), touched_hours)
+def build_touched_hour_rows(
+    usage_path: str, extent: int, touched_hours: set[str]
+) -> list[dict[str, Any]]:
+    return aggregate_records(_read_records_to_extent(usage_path, extent), touched_hours)
 
 
 def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str, Any]], int]:
@@ -832,7 +814,11 @@ def run_once(
     source_extent = max(state["source_extent"], next_cursor)
 
     touched_hours = {_record_hour(record) for record in records}
-    rows = build_touched_hour_rows(usage_path, touched_hours) if touched_hours else []
+    rows = (
+        build_touched_hour_rows(usage_path, next_cursor, touched_hours)
+        if touched_hours
+        else []
+    )
 
     if rows:
         return _send_rows(

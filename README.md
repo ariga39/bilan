@@ -4,12 +4,13 @@ Personal AI consumption aggregator on Cloudflare Workers + D1. This checkout
 implements **B2**: multi-machine Codex token usage pushed by `debitmetre`,
 alongside the B1 OpenRouter and DeepSeek balance path.
 
-- Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest`,
-  scheduled pull adapters, D1 writes, and per-provider failure isolation. No
-  read or UI routes.
-- Read Worker (`bilan-web`): read-only JSON API plus the React dashboard.
-  No write routes and no upstream credentials. `workers_dev` and preview URLs
-  are disabled.
+- Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest` on
+  its own HTTPS hostname, plus scheduled pull adapters, D1 writes, and
+  per-provider failure isolation. Zero read or UI routes.
+- Read Worker (`bilan-web`): read-only JSON API plus the React dashboard,
+  served exclusively on a separate Access-protected HTTPS hostname. No write
+  routes and no upstream/ingest credentials. `workers_dev` and preview URLs are
+  disabled.
 - Shared D1 database: `producers`, `balance_snapshots`, and `usage_buckets`.
 - Dashboard: producer heartbeat health, balances, 7d/30d net balance change,
   OpenRouter reported usage delta, and Codex token usage broken down by
@@ -76,9 +77,10 @@ python -m unittest discover -s shippers/tests -v
 
 The Python suite covers synthetic CLI runs against a local replay-safe ingest
 mock, including missing/empty logs, full-extent continuity, truncation and
-same-size replacement, pending suffix continuity, interrupted multi-chunk
-backfill resume, backfill-first extents, lost ACKs, login redirects, `202`,
-exact 200-only ACKs, cursor safety, and migration.
+same-size replacement, pending suffix continuity, bounded incremental capture
+with concurrent appends, interrupted multi-chunk backfill resume, backfill-first
+extents, lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety,
+and migration.
 
 ## Local development against one D1 database
 
@@ -219,11 +221,18 @@ sequence before writing again.
    logical `producer_id` and copy the exact shipper state when moving it to
    another host; see “Migrating a shipper to another host” above.
 
-4. Before attaching a custom domain to `bilan-web`, create the Cloudflare
-   Access self-hosted application for that exact hostname and all paths with a
-   restricted Allow policy. Then attach the custom domain. See
+4. Attach a separate HTTPS hostname for `bilan-ingest` (for example
+   `ingest.example.com`) and expose only `POST /api/v1/ingest` there. Do not
+   attach the dashboard hostname or Access login flow to the ingest hostname;
+   its authorization boundary is the scoped Bearer token. The Worker itself
+   returns 404 for every other method/path, so it has zero read/UI routes.
+
+5. Before attaching a custom domain to `bilan-web`, create the Cloudflare
+   Access self-hosted application for that exact dashboard hostname and all
+   paths with a restricted Allow policy. Then attach that separate custom
+   domain. Never share the dashboard and ingest hostnames. See
    [docs/ACCESS.md](docs/ACCESS.md).
-5. Deploying is outside B2 authority; the commands above are the intended
+6. Deploying is outside B2 authority; the commands above are the intended
    handoff for the operator.
 
 ## Data rules enforced by B2
