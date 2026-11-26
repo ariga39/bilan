@@ -253,7 +253,7 @@ export function App() {
             <SectionHeading
               icon={Gauge}
               title="Quota windows"
-              description="Latest valid sample per OpenCode Go key or Codex account. Missing windows disappear rather than carrying forward; failed, empty, and anomalous attempts are shown separately."
+              description="Latest valid sample per OpenCode Go key, AGY account, or Codex account. Missing windows disappear rather than carrying forward; failed, empty, and anomalous attempts are shown separately. AGY token usage is not collected."
             />
             {overview ? (
               <QuotaSection quota={overview.quotas} />

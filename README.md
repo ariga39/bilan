@@ -1,9 +1,10 @@
 # bilan
 
 Personal AI consumption aggregator on Cloudflare Workers + D1. This checkout
-implements **B2 and B3**: multi-machine Codex token usage pushed by
-`debitmetre`, plus OpenCode Go usage and per-key quota windows pushed by
-`orihsus`, alongside the B1 OpenRouter and DeepSeek balance path.
+implements **B2, B3, and B4**: multi-machine Codex token usage pushed by
+`debitmetre`, OpenCode Go usage and per-key quota windows pushed by `orihsus`,
+and AGY plus Codex quota windows pushed by `telemetre`, alongside the B1
+OpenRouter and DeepSeek balance path.
 
 - Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest` on
   its own HTTPS hostname, plus scheduled pull adapters, D1 writes, and
@@ -15,14 +16,15 @@ implements **B2 and B3**: multi-machine Codex token usage pushed by
 - Shared D1 database: `producers`, `balance_snapshots`, `usage_buckets`, `quota_observations`, and `quota_windows`.
 - Dashboard: producer heartbeat health, balances, 7d/30d net balance change,
   OpenRouter reported usage delta, Codex machine and OpenCode Go identity token
-  usage, and latest-valid per-key quota windows.
-- Host shippers: `shippers/debitmetre.py` for Codex usage and
-  `shippers/orihsus.py` for OpenCode Go usage plus quota history. Both use the
-  Python 3 standard library only, durable cursors/outboxes, monotonic
-  `batch_seq`, and idle heartbeats.
+  usage, and latest-valid OpenCode Go, AGY, and Codex quota windows with
+  failed/empty/clock-anomaly callouts.
+- Host shippers: `shippers/debitmetre.py` for Codex usage,
+  `shippers/orihsus.py` for OpenCode Go usage plus quota history, and
+  `shippers/telemetre.py` for AGY and Codex quota history. All use the Python 3
+  standard library only, durable cursors/outboxes, monotonic `batch_seq`, and
+  idle heartbeats.
 
-AGY token usage, Codex/AGY quota via `telemetre`, pricing, and alerting remain
-out of scope.
+AGY token usage, pricing, and alerting remain out of scope.
 
 ## Layout
 
@@ -54,7 +56,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-pnpm test:e2e   # requires pnpm build; starts local Workers and the real shipper
+pnpm test:e2e   # requires pnpm build; starts local Workers and the real shippers
 ```
 
 `pnpm test` runs:
@@ -65,13 +67,14 @@ pnpm test:e2e   # requires pnpm build; starts local Workers and the real shipper
   absence of read routes.
 - `bilan-web` worker-pool tests: balance overview/history behavior, timezone
   month and daily usage slicing (including non-whole-hour offset disclosure),
-  per-column completeness flags, latest-valid per-key quota selection,
-  identity/machine usage separation, push-to-read integration over one D1
-  binding, and the absence of write routes.
+  per-column completeness flags, latest-valid per-key quota selection, AGY and
+  Codex quota subjects without AGY token usage, future-clock anomaly exclusion
+  from windows and freshness, identity/machine usage separation, push-to-read
+  integration over one D1 binding, and the absence of write routes.
 - `bilan-web` jsdom tests: currency labels, partial-history labels, delayed
   samples, usage timezone/month controls, selection safety, initial-load retry,
-  machine/identity/model/effort rows, per-key quota windows and warnings, daily
-  rows, and partial-counter rendering.
+  machine/identity/model/effort rows, OpenCode Go/AGY/Codex quota windows and
+  warnings, daily rows, and partial-counter rendering.
 
 `pnpm test` does **not** run the Python shipper suite. Run it separately:
 
@@ -84,7 +87,8 @@ mock, including missing/empty logs, full-extent continuity, truncation and
 same-size replacement, pending suffix continuity, bounded incremental capture
 with concurrent appends, interrupted multi-chunk backfill resume, backfill-first
 extents, lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety,
-per-key quota windows, and migration.
+per-key quota windows, AGY/Codex quota windows with late and same-second
+samples, clock anomalies, and migration.
 
 ## Local development against one D1 database
 
@@ -299,6 +303,93 @@ pnpm test:e2e
 
 The E2E uses only synthetic gateway keys, fingerprints, machine names, and
 logs.
+
+## B4: AGY and Codex quota via telemetre
+
+B4 adds `shippers/telemetre.py` and reuses the existing B3 quota ingestion, read
+API, and dashboard:
+
+- The shipper reads telemetre's centre SQLite database read-only and pushes
+  only `(agy, quota_observations)` and `(codex, quota_observations)`. It never
+  pushes AGY token usage.
+- Observations are consumed in centre insertion order, so late-arriving older
+  `sampled_at` values and same-second samples are not dropped. `error`,
+  `empty`, and `time_anomaly` samples are preserved explicitly.
+- Each `(source, account)` shows windows only from its single latest valid
+  (`status = 'ok'`, non-anomalous) observation. Failed/empty attempts and clock
+  anomalies are separate warnings; a future-clock sample cannot replace the
+  current reading or pin freshness, even when the upstream anomaly flag is
+  absent.
+- AGY is quota-only on the dashboard and is omitted from token usage totals
+  (never rendered as `0`).
+
+The existing local migration already includes the B3 quota schema:
+
+```sh
+pnpm db:migrate:local
+```
+
+Add a `telemetre-quota` entry to `INGEST_PRODUCERS_JSON` with exactly the two
+quota scopes, and no usage scopes:
+
+```json
+{
+  "telemetre-quota": {
+    "token_sha256": "<sha256-hex-of-your-local-telemetre-token>",
+    "display_name": "telemetre (AGY + Codex quota)",
+    "expected_interval_seconds": 1800,
+    "scopes": [
+      { "source": "agy", "kind": "quota_observations" },
+      { "source": "codex", "kind": "quota_observations" }
+    ]
+  }
+}
+```
+
+The example `.dev.vars.example` includes a `telemetre-quota` entry using
+`replace-with-local-telemetre-token`. Generate a different hash with:
+
+```sh
+python -c "import hashlib; print(hashlib.sha256(b'your-local-telemetre-token').hexdigest())"
+```
+
+Run the shipper against telemetre's centre database:
+
+```sh
+python shippers/telemetre.py \
+  --database ~/.local/state/telemetre/quota.sqlite3 \
+  --producer-id telemetre-quota \
+  --endpoint http://127.0.0.1:8787/api/v1/ingest \
+  --token replace-with-local-telemetre-token
+```
+
+`--state-file` defaults next to the centre database; use an explicit durable
+path on a production host. The shipper persists the exact in-flight envelope,
+retries it after a lost ACK, and advances its insertion-order cursor only on an
+exact HTTP 200. `--no-heartbeat` disables idle liveness pushes. The centre
+database is opened read-only; telemetre itself is never modified.
+
+The normal overview and focused quota endpoint expose the same data:
+
+```sh
+curl "http://127.0.0.1:8788/api/v1/overview?tz=UTC&month=2026-11"
+curl "http://127.0.0.1:8788/api/v1/quotas"
+```
+
+`overview.quotas.subjects` contains AGY and Codex accounts alongside OpenCode Go
+key fingerprints. `GET /api/v1/quotas` returns the same quota block for focused
+consumers.
+
+The focused E2E runs the real `telemetre.py` CLI against a synthetic centre
+SQLite database, including late-arriving and same-second AGY/Codex samples, then
+validates the overview and renders the quota cards:
+
+```sh
+pnpm build
+pnpm test:e2e
+```
+
+The E2E uses only synthetic accounts, machine names, quota windows, and logs.
 
 ## Production configuration
 

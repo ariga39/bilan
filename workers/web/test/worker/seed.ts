@@ -2,6 +2,8 @@ import { env } from "cloudflare:test";
 
 export async function clearDatabase(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM quota_windows"),
+    env.DB.prepare("DELETE FROM quota_observations"),
     env.DB.prepare("DELETE FROM usage_buckets"),
     env.DB.prepare("DELETE FROM balance_snapshots"),
     env.DB.prepare("DELETE FROM producers"),

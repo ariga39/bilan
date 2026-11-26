@@ -184,28 +184,82 @@ const quota: QuotaResponse = {
       }),
       anomalies: [],
     },
+    {
+      source: "agy",
+      account: "agy-main",
+      latest_valid: observation({
+        sample_id: "agy-valid",
+        sampled_at: "2026-11-27T11:56:00Z",
+        sample_age_seconds: 240,
+        observer_machine: "studio-a",
+        windows: [
+          windowView({
+            bucket_id: "Gemini",
+            slot: "five-hour",
+            label: "5h",
+            used_percent: 40,
+            remaining_percent: 60,
+            resets_at: "2026-11-27T16:00:00Z",
+            reset_in_seconds: 14_400,
+            window_duration_mins: 300,
+          }),
+          windowView({
+            bucket_id: "Gemini",
+            slot: "weekly",
+            label: "7d",
+            used_percent: 20,
+            remaining_percent: 80,
+            resets_at: "2026-12-03T00:00:00Z",
+            reset_in_seconds: 432_000,
+            window_duration_mins: 10_080,
+          }),
+        ],
+      }),
+      latest_attempt: attempt({
+        sample_id: "agy-valid",
+        sampled_at: "2026-11-27T11:56:00Z",
+        sample_age_seconds: 240,
+        observer_machine: "studio-a",
+      }),
+      anomalies: [
+        attempt({
+          sample_id: "agy-future",
+          sampled_at: "2099-01-01T00:00:00Z",
+          sample_age_seconds: 0,
+          time_anomaly: "future_clock_skew",
+        }),
+      ],
+    },
   ],
 };
 
-describe("B3 quota dashboard section", () => {
+describe("B3/B4 quota dashboard section", () => {
   it("renders latest valid windows per key with age, countdown, and separate warnings", () => {
     render(<QuotaSection quota={quota} />);
 
     expect(screen.getByText("Quota windows")).toBeTruthy();
     expect(screen.getAllByText("OpenCode Go").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Codex").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("AGY").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Key").length).toBeGreaterThan(0);
     expect(screen.getByText("fp_a")).toBeTruthy();
     expect(screen.getByText("codex-main")).toBeTruthy();
+    expect(screen.getByText("agy-main")).toBeTruthy();
     expect(screen.queryByText("Machine")).toBeNull();
+    expect(screen.getByText(/AGY tokens are not collected/u)).toBeTruthy();
 
     expect(screen.getByLabelText("Quota windows for OpenCode Go fp_a")).toBeTruthy();
     expect(screen.getByLabelText("Quota windows for Codex codex-main")).toBeTruthy();
+    expect(screen.getByLabelText("Quota windows for AGY agy-main")).toBeTruthy();
+    expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
+    expect(screen.getByText("five-hour")).toBeTruthy();
+    expect(screen.getByText("7d")).toBeTruthy();
+    expect(screen.getByText("future_clock_skew")).toBeTruthy();
 
     // Only the latest valid sample's windows are visible; no older monthly ghost.
     expect(screen.getAllByText("rolling").length).toBeGreaterThan(0);
     expect(screen.getByText("go-key-1")).toBeTruthy();
-    expect(screen.getByText("weekly")).toBeTruthy();
+    expect(screen.getAllByText("weekly").length).toBeGreaterThan(0);
     expect(screen.queryByText("monthly")).toBeNull();
     expect(screen.getByText("42.5%")).toBeTruthy();
     expect(screen.getByText("57.5%")).toBeTruthy();
@@ -214,14 +268,14 @@ describe("B3 quota dashboard section", () => {
 
     expect(screen.getByText("Stale sample")).toBeTruthy();
     expect(screen.getByText("Reset time passed")).toBeTruthy();
-    expect(screen.getByText("5h")).toBeTruthy();
+    expect(screen.getAllByText("5h").length).toBeGreaterThan(0);
     expect(screen.getByText("Limited")).toBeTruthy();
 
     expect(screen.getAllByText("Latest attempt failed").length).toBeGreaterThan(0);
     expect(screen.getByText("http_error")).toBeTruthy();
     expect(screen.getByText("upstream_error")).toBeTruthy();
     expect(screen.getByText("Latest attempt was empty")).toBeTruthy();
-    expect(screen.getByText("Clock anomaly detected")).toBeTruthy();
+    expect(screen.getAllByText("Clock anomaly detected").length).toBeGreaterThan(0);
     expect(screen.getByText("clock_skew")).toBeTruthy();
     expect(screen.getByText(/No valid quota sample yet/u)).toBeTruthy();
     expect(screen.getByText(/No windows in the latest valid sample/u)).toBeTruthy();

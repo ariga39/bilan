@@ -16,12 +16,22 @@ import type { UpstreamMock } from "./mock-upstream";
 import { clearDatabase } from "./seed";
 
 const INGEST_TOKEN = "test-debitmetre-token";
+const TELEMETRE_TOKEN = "test-telemetre-token";
 const INGEST_PRODUCERS_JSON = JSON.stringify({
   "debitmetre-main": {
     token_sha256: "c6c726663d39185c46966f2075416a8b8348523b809c7e09f1ea984631e98a9b",
     display_name: "debitmetre (Codex usage)",
     expected_interval_seconds: 3600,
     scopes: [{ source: "codex", kind: "usage_buckets" }],
+  },
+  "telemetre-quota": {
+    token_sha256: "da822ee843c11c977d04fa8914d6ddd33161258e734b46853aac031d2e63e403",
+    display_name: "telemetre (AGY + Codex quota)",
+    expected_interval_seconds: 1800,
+    scopes: [
+      { source: "agy", kind: "quota_observations" },
+      { source: "codex", kind: "quota_observations" },
+    ],
   },
 });
 
@@ -85,7 +95,7 @@ async function usageOverview(): Promise<OverviewResponse> {
   return body;
 }
 
-async function push(payload: unknown): Promise<void> {
+async function push(payload: unknown, token: string = INGEST_TOKEN): Promise<void> {
   const ingestEnv: IngestEnv = {
     DB: env.DB,
     INGEST_PRODUCERS_JSON,
@@ -95,7 +105,7 @@ async function push(payload: unknown): Promise<void> {
     new Request("https://bilan-ingest.example/api/v1/ingest", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${INGEST_TOKEN}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),
@@ -106,6 +116,10 @@ async function push(payload: unknown): Promise<void> {
   await waitOnExecutionContext(ctx);
   const responseBody = await response.text();
   expect(response.status, responseBody).toBe(200);
+}
+
+function utcSecond(timestamp: number): string {
+  return new Date(Math.floor(timestamp / 1000) * 1000).toISOString().replace(/\.000Z$/u, "Z");
 }
 
 function usageBucket(overrides: Partial<UsageBucketInput> = {}): UsageBucketInput {
@@ -262,5 +276,60 @@ describe("push usage to read API integration", () => {
     expect(afterBackfill.usage.latest_bucket_start).toBe("2026-11-01T00:00:00Z");
     expect(afterBackfill.usage.rows).toHaveLength(1);
     expect(afterBackfill.usage.rows[0]?.actor_id).toBe("machine-a");
+  });
+});
+
+describe("push quota to read API integration", () => {
+  it("uses insertion order for same-batch, same-second quota ties", async () => {
+    const sampledAt = utcSecond(Date.now() - 60_000);
+    const observation = (sampleId: string, usedPercent: number) => ({
+      sample_id: sampleId,
+      source: "agy",
+      account: "agy-same-batch",
+      observer_machine: "studio-a",
+      sampled_at: sampledAt,
+      interval_seconds: 300,
+      status: "ok",
+      time_anomaly: null,
+      error_summary: null,
+      windows: [
+        {
+          bucket_id: "Gemini",
+          slot: "five-hour",
+          label: "5h",
+          used_percent: usedPercent,
+          remaining_percent: 100 - usedPercent,
+          status: null,
+          resets_at: null,
+          window_duration_mins: 300,
+          meta_json: null,
+        },
+      ],
+    });
+
+    // Both rows share sampled_at and the batch's ingested_at. The later row has
+    // a lexicographically smaller id, so only insertion order (rowid) can make
+    // it the latest valid sample and latest attempt.
+    await push(
+      {
+        schema_version: 1,
+        batch_seq: 1,
+        usage_buckets: [],
+        quota_observations: [observation("z-first", 10), observation("a-second", 20)],
+        balance_snapshots: [],
+      },
+      TELEMETRE_TOKEN,
+    );
+
+    const body = await overview();
+    const subject = body.quotas.subjects.find(
+      (candidate) => candidate.source === "agy" && candidate.account === "agy-same-batch",
+    );
+    expect(subject?.latest_valid).toMatchObject({
+      sample_id: "a-second",
+      sampled_at: sampledAt,
+    });
+    expect(subject?.latest_valid?.windows[0]?.used_percent).toBe(20);
+    expect(subject?.latest_attempt).toMatchObject({ sample_id: "a-second" });
   });
 });
