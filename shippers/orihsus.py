@@ -238,20 +238,40 @@ def _canonical_audit_record(raw: bytes) -> Optional[dict[str, Any]]:
     return record
 
 
-def _iter_audit_records(audit_path: str) -> Iterable[dict[str, Any]]:
-    """Yield canonical records from only newline-terminated lines."""
+def _read_audit_records_to_extent(audit_path: str, extent: int) -> list[dict[str, Any]]:
+    """Read canonical records from the captured complete-line extent only."""
 
     try:
-        handle = open(audit_path, "rb")
-    except FileNotFoundError:
-        return
-    with handle:
-        for raw in handle:
-            if not raw.endswith(b"\n"):
-                break
-            record = _canonical_audit_record(raw)
-            if record is not None:
-                yield record
+        size = os.path.getsize(audit_path)
+    except FileNotFoundError as exc:
+        raise ShipperError("audit log disappeared while aggregating") from exc
+    if extent > size:
+        raise ShipperError(
+            "audit log is shorter than the captured extent; "
+            "refusing to aggregate a replacement"
+        )
+    remaining = extent
+    buffer = b""
+    records: list[dict[str, Any]] = []
+    with open(audit_path, "rb") as handle:
+        while remaining > 0:
+            chunk = handle.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise ShipperError(
+                    "audit log ended before the captured extent; "
+                    "refusing to aggregate a replacement"
+                )
+            remaining -= len(chunk)
+            buffer += chunk
+            while True:
+                newline = buffer.find(b"\n")
+                if newline < 0:
+                    break
+                raw, buffer = buffer[:newline], buffer[newline + 1 :]
+                record = _canonical_audit_record(raw)
+                if record is not None:
+                    records.append(record)
+    return records
 
 
 def _record_hour(record: dict[str, Any]) -> str:
@@ -948,7 +968,10 @@ def run_once(
         _save_state(state_path, state)
     touched_hours = {_record_hour(record) for record in records}
     usage_rows = (
-        aggregate_audit_records(_iter_audit_records(audit_path), touched_hours)
+        aggregate_audit_records(
+            _read_audit_records_to_extent(audit_path, next_audit_cursor),
+            touched_hours,
+        )
         if touched_hours
         else []
     )

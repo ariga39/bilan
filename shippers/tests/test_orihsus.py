@@ -21,6 +21,9 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
+from unittest import mock
+
+from shippers import orihsus as shipper_module
 
 SHIPPER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "orihsus.py"))
 INGEST_PATH = "/api/v1/ingest"
@@ -1065,6 +1068,54 @@ class OrihsusShipperTests(unittest.TestCase):
         state_after = self.read_state()
         self.assertEqual(state_after["audit_cursor"], 0)
         self.assertEqual(state_after["audit_inflight_extent_sha256"], full_hash)
+
+    def test_incremental_aggregation_is_bounded_to_captured_extent(self) -> None:
+        first = audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")
+        self.write_audit([first])
+        captured_extent = os.path.getsize(self.audit_path)
+        late = audit_record("2026-11-26T14:35:00.000Z", gateway_key="laptop-key")
+        real_read = shipper_module._read_appended_audit
+        appended = False
+
+        def capture_then_append(path: str, cursor: int):
+            nonlocal appended
+            records, next_cursor, next_hash = real_read(path, cursor)
+            if not appended:
+                appended = True
+                self.write_audit([late], append=True)
+            return records, next_cursor, next_hash
+
+        with mock.patch.object(
+            shipper_module,
+            "_read_appended_audit",
+            side_effect=capture_then_append,
+        ):
+            ok = shipper_module.run_once(
+                audit_path=self.audit_path,
+                usage_dir=self.usage_dir,
+                state_path=self.state_path,
+                producer_id="orihsus-main",
+                endpoint=self.endpoint,
+                token=TOKEN,
+                interval_seconds=300,
+                observer_machine="gateway-a",
+                heartbeat=True,
+                timeout=5,
+                quiet=True,
+            )
+
+        self.assertTrue(ok)
+        payload = self.ingest.snapshot_requests()[0]["payload"]
+        self.assertEqual(len(payload["usage_buckets"]), 1)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 1)
+        self.assertEqual(self.read_state()["audit_cursor"], captured_extent)
+
+        # The concurrent append is picked up by the next normal run.
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(len(payload["usage_buckets"]), 1)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
+        self.assertEqual(self.read_state()["audit_cursor"], os.path.getsize(self.audit_path))
 
     # -- durable replay / ACK / heartbeat ---------------------------------
 
