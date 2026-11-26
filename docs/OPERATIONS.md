@@ -185,13 +185,14 @@ stores its cursor/outbox beside its own state path, retries the identical
 
 `producer_id` identifies the dataset. Move the dataset, not a new identity.
 
-1. **Quiesce the actual source writers as well as the shipper.** Stop and
-   disable the service that writes this collector's input, or redirect it to the
-   new host: `debitmetre`'s `usage.jsonl` writer, `orihsus`'s `audit.jsonl` and
-   `usage/*.jsonl` writer, or `telemetre`'s centre quota sampler/database writer.
-   Wait for in-flight writes to finish and confirm file sizes/mtimes stop
-   changing. A pre-seed copy is fine for speed, but the final snapshot must be
-   taken while the source is quiesced.
+1. **Pause the actual source writers as well as the shipper.** Stop and disable
+   the service that writes this collector's input: `debitmetre`'s `usage.jsonl`
+   writer, `orihsus`'s `audit.jsonl` and `usage/*.jsonl` writer, or `telemetre`'s
+   centre quota sampler/database writer. If writes must continue, buffer them
+   **away from both the old and new dataset paths**; do not point writers at the
+   destination yet. Wait for in-flight writes to finish and confirm file
+   sizes/mtimes stop changing. A pre-seed copy is fine for speed, but the final
+   snapshot must be taken while the source is paused.
 2. Stop the old shipper process and disable its timer/unit. Confirm no manual or
    scheduled run can still push from the old host. Never let old and new
    shippers write the same `producer_id` at once.
@@ -204,17 +205,20 @@ stores its cursor/outbox beside its own state path, retries the identical
    | :--- | :--- | :--- |
    | `debitmetre` | `usage.jsonl` | The explicit `--state-file` path, or the default `.bilan-debitmetre-state.json` beside the log. |
    | `orihsus` | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl` file** | The explicit `--state-file` path, or the default `.bilan-orihsus-state.json` beside `audit.jsonl`. A missing usage file is treated as empty, so omitting it drops unsent quota observations. |
-   | `telemetre` | A consistent SQLite backup of the centre quota database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. Stop telemetre and copy the database, use SQLite's backup API, or include `-wal` and `-shm` in a consistent live snapshot; the cursor must match the restored database. |
+   | `telemetre` | A SQLite backup of the centre quota database made with the SQLite backup API/CLI, or a verified offline backup after stopping the database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. For example: `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"`; do not casually copy a live database or rely on ad-hoc `-wal`/`-shm` copies. |
 
    Copy the token file too (or perform the coordinated rotation above).
 
 4. **Final catch-up and cutover.** Start the new host first with the same
-   `producer_id`, the same token (or its rotated replacement), and the copied
-   state file. Run it once and verify the producer heartbeat updates, the
-   sequence advances, any pending batch is retried, and totals do not double.
-   Only after that succeeds, resume or redirect the source writers to the new
-   host. Resume order is: new shipper first, then source writers. Leave the old
-   shipper disabled and the old state file untouched; never resume both sides.
+   `producer_id`, the same token (or its rotated replacement), and restore the
+   copied state file to its final `--state-file` path. Run it once and complete
+   the first HTTP `200` ACK; verify the producer heartbeat updates, the sequence
+   advances, any pending batch is retried, and totals do not double. Only after
+   that ACK succeeds, restore any
+   buffered writes and enable/redirect the source writers at the destination.
+   Resume order is: new shipper first, completed ACK, buffered writes, then
+   source writers. Leave the old shipper disabled and the old state file
+   untouched; never resume both sides.
 
 Never reset `batch_seq` to `1`, never edit the state file, and never replay a
 truncated/replaced source log. The shipper verifies a digest over the consumed

@@ -189,30 +189,34 @@ it with a partial file.
 A migrated shipper must retain the same logical dataset and sequence, so moving
 only `usage.jsonl` is not enough:
 
-1. Quiesce or redirect the actual source writer (debitmetre/orihsus log writer
-   or telemetre database sampler), then stop the old shipper and disable its
-   timer/systemd unit. Confirm no scheduled or manual run can still push from
-   the old host.
+1. Pause the actual source writer (debitmetre/orihsus log writer or telemetre
+   database sampler), or buffer its writes away from both dataset paths. Do not
+   point writers at the destination yet. Then stop the old shipper and disable
+   its timer/systemd unit; confirm no scheduled or manual run can still push
+   from the old host.
 2. Copy all of that collector's inputs and the **exact** state/outbox file from
    the stable snapshot together. If a batch is pending, the state file contains
    the identical payload and `batch_seq` that must be retried on the new host.
 
-   | Collector    | Copy with the state file                                | State file                                                                    |
-   | :----------- | :------------------------------------------------------ | :---------------------------------------------------------------------------- |
-   | `debitmetre` | `usage.jsonl`                                           | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
-   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**    | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
-   | `telemetre`  | A consistent SQLite backup of the centre quota database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
+   | Collector    | Copy with the state file                                                             | State file                                                                    |
+   | :----------- | :----------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
+   | `debitmetre` | `usage.jsonl`                                                                        | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
+   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `telemetre`  | SQLite backup API/CLI backup, or verified offline backup after stopping the database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
 
    Omitting `orihsus` daily usage files treats them as empty and drops unsent
-   observations. For a live telemetre database, stop the writer or use SQLite's
-   backup API; a raw file copy must include `-wal` and `-shm` consistently.
+   observations. Use `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"` or a
+   verified offline backup; do not casually copy a live database or rely on
+   ad-hoc `-wal`/`-shm` copies.
 
 3. Start the new shipper first with the same `--producer-id` and copied state
-   file, run its final catch-up, and verify HTTP `200` plus a non-double-counted
-   total. Then resume/redirect the source writers. Resume order is new shipper
-   first, then source writers; leave the old shipper disabled. Do not run old
-   and new writers concurrently. Exact paths, permissions, and token rotation
-   are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+   restored at its final `--state-file` path. Run its final catch-up and
+   complete the first HTTP `200` ACK before enabling writers at the destination.
+   Verify a non-double-counted total, then restore buffered writes and
+   resume/redirect the source writers. Resume order is new shipper, completed
+   ACK, buffered writes, then source writers; leave the old shipper disabled.
+   Do not run old and new writers concurrently. Exact paths, permissions, and
+   token rotation are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 The shipper verifies a content checkpoint over the consumed or aggregated
 source extent, including any in-flight batch. If the log has been truncated or
