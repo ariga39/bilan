@@ -1062,7 +1062,7 @@ class OrihsusShipperTests(unittest.TestCase):
         blocked = self.run_cli()
 
         self.assertNotEqual(blocked.returncode, 0)
-        self.assertIn("refusing to replay", blocked.stderr)
+        self.assertIn("refusing to", blocked.stderr)
         self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
         self.assertEqual(len(self.ingest.snapshot_usage_rows()), row_count)
         state_after = self.read_state()
@@ -1074,21 +1074,21 @@ class OrihsusShipperTests(unittest.TestCase):
         self.write_audit([first])
         captured_extent = os.path.getsize(self.audit_path)
         late = audit_record("2026-11-26T14:35:00.000Z", gateway_key="laptop-key")
-        real_read = shipper_module._read_appended_audit
+        real_snapshot = shipper_module._read_audit_snapshot
         appended = False
 
-        def capture_then_append(path: str, cursor: int, expected_prefix: str):
+        def snapshot_then_append(path: str):
             nonlocal appended
-            records, next_cursor, next_hash = real_read(path, cursor, expected_prefix)
+            snapshot = real_snapshot(path)
             if not appended:
                 appended = True
                 self.write_audit([late], append=True)
-            return records, next_cursor, next_hash
+            return snapshot
 
         with mock.patch.object(
             shipper_module,
-            "_read_appended_audit",
-            side_effect=capture_then_append,
+            "_read_audit_snapshot",
+            side_effect=snapshot_then_append,
         ):
             ok = shipper_module.run_once(
                 audit_path=self.audit_path,
@@ -1117,7 +1117,7 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
         self.assertEqual(self.read_state()["audit_cursor"], os.path.getsize(self.audit_path))
 
-    def test_replacement_between_saved_check_and_capture_fails_closed(self) -> None:
+    def test_replacement_between_snapshot_and_path_check_fails_closed(self) -> None:
         self.write_audit(
             [audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")]
         )
@@ -1143,21 +1143,22 @@ class OrihsusShipperTests(unittest.TestCase):
         replacement = original.replace(b'"input_tokens":100', b'"input_tokens":999', 1)
         self.assertEqual(len(replacement), len(original))
 
-        real_verify = shipper_module._verify_audit_prefix
+        real_snapshot = shipper_module._read_audit_snapshot
         replaced = False
 
-        def verify_then_replace(path: str, cursor: int, expected: str):
+        def snapshot_then_replace(path: str):
             nonlocal replaced
-            real_verify(path, cursor, expected)
+            snapshot = real_snapshot(path)
             if not replaced:
                 replaced = True
                 with open(path, "wb") as handle:
                     handle.write(replacement)
+            return snapshot
 
         with mock.patch.object(
             shipper_module,
-            "_verify_audit_prefix",
-            side_effect=verify_then_replace,
+            "_read_audit_snapshot",
+            side_effect=snapshot_then_replace,
         ):
             with self.assertRaises(shipper_module.ShipperError):
                 shipper_module.run_once(
@@ -1179,6 +1180,101 @@ class OrihsusShipperTests(unittest.TestCase):
         rows = self.ingest.snapshot_usage_rows()
         self.assertEqual(rows[key]["unit_count"], 1)
         self.assertEqual(rows[key]["input_tokens"], 100)
+        self.assertEqual(self.read_state(), state_before)
+
+    def test_partial_multichunk_ack_rejects_in_place_modification_after_snapshot(
+        self,
+    ) -> None:
+        base = datetime(2026, 1, 1)
+        records = [
+            audit_record(
+                (base + timedelta(hours=index)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                gateway_key="partial-race-%03d" % index,
+            )
+            for index in range(501)
+        ]
+        self.write_audit(records)
+        with open(self.audit_path, "rb") as handle:
+            original = handle.read()
+        full_size = len(original)
+        full_hash = hashlib.sha256(original).hexdigest()
+
+        # Chunk 1 commits but its ACK is lost. Remove the pending chunk to model
+        # a crash after the first chunk ACK before the next pending is persisted.
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
+        state = self.read_state()
+        self.assertEqual(state["audit_cursor"], 0)
+        self.assertEqual(state["audit_inflight_extent_cursor"], full_size)
+        self.assertEqual(state["audit_inflight_extent_sha256"], full_hash)
+        self.assertIsNotNone(state["pending"])
+        state["pending"] = None
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        state_before = self.read_state()
+        request_count = len(self.ingest.snapshot_requests())
+
+        modified = original.replace(b'"input_tokens":100', b'"input_tokens":999', 1)
+        self.assertEqual(len(modified), len(original))
+        self.assertNotEqual(hashlib.sha256(modified).hexdigest(), full_hash)
+
+        real_snapshot = shipper_module._read_audit_snapshot
+        modified_on_disk = False
+
+        def snapshot_then_modify(path: str):
+            nonlocal modified_on_disk
+            snapshot = real_snapshot(path)
+            if not modified_on_disk:
+                modified_on_disk = True
+                with open(path, "wb") as handle:
+                    handle.write(modified)
+            return snapshot
+
+        with mock.patch.object(
+            shipper_module,
+            "_read_audit_snapshot",
+            side_effect=snapshot_then_modify,
+        ):
+            with self.assertRaises(shipper_module.ShipperError):
+                shipper_module.run_once(
+                    audit_path=self.audit_path,
+                    usage_dir=self.usage_dir,
+                    state_path=self.state_path,
+                    producer_id="orihsus-main",
+                    endpoint=self.endpoint,
+                    token=TOKEN,
+                    interval_seconds=300,
+                    observer_machine="gateway-a",
+                    heartbeat=True,
+                    timeout=5,
+                    quiet=True,
+                )
+
+        self.assertTrue(modified_on_disk)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        rows = self.ingest.snapshot_usage_rows()
+        self.assertEqual(len(rows), 500)
+        first_key = (
+            "opencode",
+            "default",
+            "identity",
+            "partial-race-000",
+            "deepseek-chat",
+            "",
+            "2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(rows[first_key]["input_tokens"], 100)
+        self.assertEqual(self.read_state(), state_before)
+
+        # A normal run against the already-modified on-disk file must fail at
+        # the in-flight boundary itself, without touching state or the server.
+        blocked_normal = self.run_cli()
+        self.assertNotEqual(blocked_normal.returncode, 0)
+        self.assertIn("in-flight extent", blocked_normal.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
         self.assertEqual(self.read_state(), state_before)
 
     # -- durable replay / ACK / heartbeat ---------------------------------
