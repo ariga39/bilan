@@ -601,6 +601,41 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(heartbeat["quota_observations"], [])
         self.assertEqual(len(self.ingest.snapshot_observations()), 3)
 
+    def test_quota_windows_use_optional_key_alias_and_never_raw_keys(self) -> None:
+        aliased = usage_record(
+            "2026-11-26T14:30:00.000Z",
+            key_fingerprint="fp_a",
+            rolling=window(),
+            weekly=window(),
+            monthly=window(),
+        )
+        aliased["key_alias"] = "go-key-1"
+        unlabelled = usage_record(
+            "2026-11-26T14:31:00.000Z",
+            key_fingerprint="fp_b",
+            rolling=window(),
+            weekly=window(),
+            monthly=window(),
+        )
+        # An unrelated raw-key field must never become a display label.
+        unlabelled["key"] = "sk-raw-secret-must-not-leak"
+        self.write_usage("2026-11-26", [aliased, unlabelled])
+
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[0]["payload"]
+        observations = {
+            observation["account"]: observation for observation in payload["quota_observations"]
+        }
+        self.assertEqual(
+            {window_row["label"] for window_row in observations["fp_a"]["windows"]},
+            {"go-key-1"},
+        )
+        self.assertEqual(
+            {window_row["label"] for window_row in observations["fp_b"]["windows"]},
+            {None},
+        )
+        self.assertNotIn("sk-raw-secret-must-not-leak", json.dumps(payload))
+
     def test_disappeared_monthly_window_is_not_carried_forward(self) -> None:
         self.write_usage(
             "2026-11-26",
@@ -927,6 +962,110 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(state_after["audit_cursor"], state_before["audit_cursor"])
         self.assertEqual(state_after["audit_prefix_sha256"], state_before["audit_prefix_sha256"])
 
+    def test_multichunk_pending_verifies_full_audit_extent_before_retry(self) -> None:
+        base = datetime(2026, 1, 1)
+        records = [
+            audit_record(
+                (base + timedelta(hours=index)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                gateway_key="identity-%03d" % index,
+            )
+            for index in range(501)
+        ]
+        self.write_audit(records)
+        with open(self.audit_path, "rb") as handle:
+            original = handle.read()
+        full_size = len(original)
+        full_hash = hashlib.sha256(original).hexdigest()
+
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 1)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 0)
+        self.assertEqual(state["audit_cursor"], 0)
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+        self.assertEqual(state["pending"]["audit_cursor_after"], 0)
+        self.assertEqual(state["pending"]["audit_extent_cursor"], full_size)
+        self.assertEqual(state["pending"]["audit_extent_sha256"], full_hash)
+        self.assertEqual(state["audit_inflight_extent_cursor"], full_size)
+        self.assertEqual(state["audit_inflight_extent_sha256"], full_hash)
+
+        # The pending first chunk was derived from the full 501-row extent.
+        # A truncated replacement must block the retry, not just the cursor.
+        with open(self.audit_path, "wb") as handle:
+            handle.write(original[:-10])
+        state_before = self.read_state()
+        blocked = self.run_cli()
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("refusing to replay", blocked.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 1)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
+        state_after = self.read_state()
+        self.assertEqual(state_after["batch_seq"], state_before["batch_seq"])
+        self.assertEqual(state_after["pending"], state_before["pending"])
+        self.assertEqual(
+            state_after["audit_inflight_extent_sha256"],
+            state_before["audit_inflight_extent_sha256"],
+        )
+
+        # Restoring the exact extent allows the duplicate retry, then the
+        # remaining chunk and the full cursor advance.
+        with open(self.audit_path, "wb") as handle:
+            handle.write(original)
+        self.assert_ok(self.run_cli())
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 501)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 3)
+        self.assertEqual(state["audit_cursor"], full_size)
+        self.assertEqual(state["audit_prefix_sha256"], full_hash)
+        self.assertIsNone(state["audit_inflight_extent_cursor"])
+        self.assertIsNone(state["audit_inflight_extent_sha256"])
+        self.assertIsNone(state["pending"])
+
+    def test_inflight_extent_blocks_aggregating_a_replacement_after_partial_chunk(self) -> None:
+        base = datetime(2026, 1, 1)
+        records = [
+            audit_record(
+                (base + timedelta(hours=index)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                gateway_key="partial-%03d" % index,
+            )
+            for index in range(501)
+        ]
+        self.write_audit(records)
+        with open(self.audit_path, "rb") as handle:
+            original = handle.read()
+        full_size = len(original)
+        full_hash = hashlib.sha256(original).hexdigest()
+        self.assert_ok(self.run_cli())
+        request_count = len(self.ingest.snapshot_requests())
+        row_count = len(self.ingest.snapshot_usage_rows())
+        self.assertEqual(row_count, 501)
+
+        # Simulate a crash after a non-last chunk ACK: the source cursor has not
+        # advanced yet, but the complete consumed extent is durably protected.
+        state = self.read_state()
+        state["audit_cursor"] = 0
+        state["audit_prefix_sha256"] = hashlib.sha256(b"").hexdigest()
+        state["audit_inflight_extent_cursor"] = full_size
+        state["audit_inflight_extent_sha256"] = full_hash
+        state["pending"] = None
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+
+        with open(self.audit_path, "wb") as handle:
+            handle.write(original[:-10])
+        blocked = self.run_cli()
+
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("refusing to replay", blocked.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), row_count)
+        state_after = self.read_state()
+        self.assertEqual(state_after["audit_cursor"], 0)
+        self.assertEqual(state_after["audit_inflight_extent_sha256"], full_hash)
+
     # -- durable replay / ACK / heartbeat ---------------------------------
 
     def test_lost_ack_retries_identical_batch_then_heartbeats(self) -> None:
@@ -959,6 +1098,10 @@ class OrihsusShipperTests(unittest.TestCase):
         with open(self.audit_path, "rb") as handle:
             audit_hash = hashlib.sha256(handle.read()).hexdigest()
         self.assertEqual(state["pending"]["audit_prefix_sha256_after"], audit_hash)
+        self.assertEqual(state["pending"]["audit_extent_cursor"], os.path.getsize(self.audit_path))
+        self.assertEqual(state["pending"]["audit_extent_sha256"], audit_hash)
+        self.assertEqual(state["audit_inflight_extent_cursor"], os.path.getsize(self.audit_path))
+        self.assertEqual(state["audit_inflight_extent_sha256"], audit_hash)
         self.assertEqual(
             state["pending"]["usage_cursors_after"],
             {"2026-11-26": os.path.getsize(os.path.join(self.usage_dir, "2026-11-26.jsonl"))},
@@ -979,6 +1122,8 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(state["batch_seq"], 1)
         self.assertEqual(state["audit_cursor"], os.path.getsize(self.audit_path))
         self.assertEqual(state["audit_prefix_sha256"], audit_hash)
+        self.assertIsNone(state["audit_inflight_extent_cursor"])
+        self.assertIsNone(state["audit_inflight_extent_sha256"])
         self.assertEqual(
             state["usage_cursors"],
             {"2026-11-26": os.path.getsize(os.path.join(self.usage_dir, "2026-11-26.jsonl"))},

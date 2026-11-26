@@ -109,7 +109,7 @@ else:
         utc_now_iso,
     )
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 DEFAULT_PRODUCER_ID = "orihsus-main"
 SOURCE = "opencode"
 ACCOUNTING_BASIS = "orihsus-audit-v1"
@@ -421,7 +421,27 @@ def _read_appended_audit(
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
 
 
-def _window_row(fingerprint: str, slot: str, window: dict[str, Any]) -> Optional[dict[str, Any]]:
+def _key_alias(value: Any) -> Optional[str]:
+    """Return the upstream display alias, never key material.
+
+    ``usage/YYYY-MM-DD.jsonl`` contains a redacted key fingerprint and may
+    optionally carry ``key_alias``. Raw keys are never read or accepted here.
+    """
+
+    if not isinstance(value, str):
+        return None
+    alias = value.strip()
+    if not alias or len(alias) > 128:
+        return None
+    return alias
+
+
+def _window_row(
+    fingerprint: str,
+    slot: str,
+    window: dict[str, Any],
+    label: Optional[str],
+) -> Optional[dict[str, Any]]:
     """Map one upstream window, or return ``None`` when it was not reported."""
 
     used = _percent(window.get("percent"))
@@ -434,7 +454,7 @@ def _window_row(fingerprint: str, slot: str, window: dict[str, Any]) -> Optional
     return {
         "bucket_id": fingerprint,
         "slot": slot,
-        "label": None,
+        "label": label,
         "used_percent": used,
         "remaining_percent": None if used is None else round(100.0 - used, 6),
         "status": status,
@@ -479,13 +499,14 @@ def _parse_usage_line(
         sampled_at = _iso_seconds(parse_utc_timestamp(record.get("timestamp")))
     except ValueError:
         return None
+    label = _key_alias(record.get("key_alias"))
 
     windows = []
     for slot in WINDOW_SLOTS:
         window = record.get(slot)
         if not isinstance(window, dict):
             continue
-        row = _window_row(fingerprint, slot, window)
+        row = _window_row(fingerprint, slot, window, label)
         if row is not None:
             windows.append(row)
 
@@ -617,6 +638,8 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "batch_seq": 0,
             "audit_cursor": 0,
             "audit_prefix_sha256": EMPTY_SHA256,
+            "audit_inflight_extent_cursor": None,
+            "audit_inflight_extent_sha256": None,
             "usage_cursors": {},
             "pending": None,
         }
@@ -638,6 +661,18 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         raise ShipperError("invalid audit_prefix_sha256 in shipper state")
     if audit_cursor == 0 and audit_prefix != EMPTY_SHA256:
         raise ShipperError("audit_prefix_sha256 does not match the empty cursor")
+    inflight_cursor = raw.get("audit_inflight_extent_cursor")
+    inflight_hash = raw.get("audit_inflight_extent_sha256")
+    if (inflight_cursor is None) != (inflight_hash is None):
+        raise ShipperError("invalid audit in-flight extent in shipper state")
+    if inflight_cursor is not None:
+        if (
+            isinstance(inflight_cursor, bool)
+            or not isinstance(inflight_cursor, int)
+            or inflight_cursor < audit_cursor
+            or not _is_sha256_hex(inflight_hash)
+        ):
+            raise ShipperError("invalid audit in-flight extent in shipper state")
     _validate_cursors(raw.get("usage_cursors"), "usage_cursors")
 
     pending = raw.get("pending")
@@ -647,6 +682,8 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         pending_seq = pending.get("batch_seq")
         pending_audit_cursor = pending.get("audit_cursor_after")
         pending_audit_prefix = pending.get("audit_prefix_sha256_after")
+        pending_extent_cursor = pending.get("audit_extent_cursor")
+        pending_extent_prefix = pending.get("audit_extent_sha256")
         payload = pending.get("payload")
         if (
             isinstance(pending_seq, bool)
@@ -656,6 +693,10 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             or not isinstance(pending_audit_cursor, int)
             or pending_audit_cursor < 0
             or not _is_sha256_hex(pending_audit_prefix)
+            or isinstance(pending_extent_cursor, bool)
+            or not isinstance(pending_extent_cursor, int)
+            or pending_extent_cursor < pending_audit_cursor
+            or not _is_sha256_hex(pending_extent_prefix)
             or not isinstance(payload, dict)
         ):
             raise ShipperError("invalid pending outbox in shipper state")
@@ -667,6 +708,11 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
 
 def _save_state(state_path: str, state: Dict[str, Any]) -> None:
     atomic_write_json(state_path, state)
+
+
+def _clear_audit_inflight(state: Dict[str, Any]) -> None:
+    state["audit_inflight_extent_cursor"] = None
+    state["audit_inflight_extent_sha256"] = None
 
 
 def _envelope(
@@ -717,6 +763,7 @@ def _send_once(endpoint: str, token: str, payload: Dict[str, Any], timeout: floa
 
 
 def _send_pending(
+    audit_path: str,
     endpoint: str,
     token: str,
     state_path: str,
@@ -726,6 +773,13 @@ def _send_pending(
 ) -> bool:
     pending = state["pending"]
     sequence = pending["batch_seq"]
+    # The payload was built from the full consumed audit extent. It must still
+    # be the same source before a retry can be sent.
+    _verify_audit_prefix(
+        audit_path,
+        pending["audit_extent_cursor"],
+        pending["audit_extent_sha256"],
+    )
     try:
         _send_once(endpoint, token, pending["payload"], timeout)
     except HTTPPushError as exc:
@@ -734,9 +788,23 @@ def _send_pending(
             file=sys.stderr,
         )
         return False
+    # Do not advance to an extent that changed after the request was sent.
+    _verify_audit_prefix(
+        audit_path,
+        pending["audit_extent_cursor"],
+        pending["audit_extent_sha256"],
+    )
     state["batch_seq"] = sequence
     state["audit_cursor"] = pending["audit_cursor_after"]
     state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
+    if (
+        state["audit_cursor"] == pending["audit_extent_cursor"]
+        and state["audit_prefix_sha256"] == pending["audit_extent_sha256"]
+    ):
+        _clear_audit_inflight(state)
+    else:
+        state["audit_inflight_extent_cursor"] = pending["audit_extent_cursor"]
+        state["audit_inflight_extent_sha256"] = pending["audit_extent_sha256"]
     state["usage_cursors"] = dict(pending["usage_cursors_after"])
     state["pending"] = None
     _save_state(state_path, state)
@@ -755,10 +823,11 @@ def _send_pending(
 
 
 def _send_rows(
+    audit_path: str,
     usage_rows: list[dict[str, Any]],
     observations: list[dict[str, Any]],
-    audit_cursor_after: int,
-    audit_prefix_sha256_after: str,
+    audit_extent_cursor: int,
+    audit_extent_sha256: str,
     usage_cursors_after: Dict[str, int],
     endpoint: str,
     token: str,
@@ -776,10 +845,17 @@ def _send_rows(
         pending = {
             "batch_seq": sequence,
             "payload": _envelope(sequence, usage_chunk, observation_chunk),
-            "audit_cursor_after": audit_cursor_after if is_last else state["audit_cursor"],
-            "audit_prefix_sha256_after": (
-                audit_prefix_sha256_after if is_last else state["audit_prefix_sha256"]
+            "audit_cursor_after": (
+                audit_extent_cursor if is_last else state["audit_cursor"]
             ),
+            "audit_prefix_sha256_after": (
+                audit_extent_sha256 if is_last else state["audit_prefix_sha256"]
+            ),
+            # Every chunk was derived from the same full consumed extent. Persist
+            # and verify that extent even when this chunk does not advance the
+            # cursor yet, so a lost ACK cannot retry against a changed source.
+            "audit_extent_cursor": audit_extent_cursor,
+            "audit_extent_sha256": audit_extent_sha256,
             "usage_cursors_after": (
                 dict(usage_cursors_after) if is_last else dict(state["usage_cursors"])
             ),
@@ -789,6 +865,7 @@ def _send_rows(
         # Persist the exact in-flight batch before the first network attempt.
         _save_state(state_path, state)
 
+        _verify_audit_prefix(audit_path, audit_extent_cursor, audit_extent_sha256)
         try:
             _send_once(endpoint, token, pending["payload"], timeout)
         except HTTPPushError as exc:
@@ -797,10 +874,19 @@ def _send_rows(
                 file=sys.stderr,
             )
             return False
+        _verify_audit_prefix(audit_path, audit_extent_cursor, audit_extent_sha256)
 
         state["batch_seq"] = sequence
         state["audit_cursor"] = pending["audit_cursor_after"]
         state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
+        if (
+            state["audit_cursor"] == audit_extent_cursor
+            and state["audit_prefix_sha256"] == audit_extent_sha256
+        ):
+            _clear_audit_inflight(state)
+        else:
+            state["audit_inflight_extent_cursor"] = audit_extent_cursor
+            state["audit_inflight_extent_sha256"] = audit_extent_sha256
         state["usage_cursors"] = dict(pending["usage_cursors_after"])
         state["pending"] = None
         _save_state(state_path, state)
@@ -831,16 +917,35 @@ def run_once(
     _require_audit_log(audit_path)
     state = _load_state(state_path, producer_id)
     _verify_audit_prefix(audit_path, state["audit_cursor"], state["audit_prefix_sha256"])
+    inflight_cursor = state["audit_inflight_extent_cursor"]
+    if inflight_cursor is not None:
+        _verify_audit_prefix(
+            audit_path,
+            inflight_cursor,
+            state["audit_inflight_extent_sha256"],
+        )
 
     pending_acked = False
     if state["pending"] is not None:
-        if not _send_pending(endpoint, token, state_path, state, timeout, quiet):
+        if not _send_pending(audit_path, endpoint, token, state_path, state, timeout, quiet):
             return False
         pending_acked = True
 
     records, next_audit_cursor, next_audit_prefix = _read_appended_audit(
         audit_path, state["audit_cursor"]
     )
+    inflight_cursor = state["audit_inflight_extent_cursor"]
+    if inflight_cursor is not None and next_audit_cursor < inflight_cursor:
+        raise ShipperError(
+            "audit log no longer covers the in-flight extent; refusing to aggregate a replacement"
+        )
+    if next_audit_cursor != state["audit_cursor"] or inflight_cursor is not None:
+        # Persist the full extent before aggregation so a crash after a partial
+        # multi-chunk ACK still protects every already-committed batch.
+        _verify_audit_prefix(audit_path, next_audit_cursor, next_audit_prefix)
+        state["audit_inflight_extent_cursor"] = next_audit_cursor
+        state["audit_inflight_extent_sha256"] = next_audit_prefix
+        _save_state(state_path, state)
     touched_hours = {_record_hour(record) for record in records}
     usage_rows = (
         aggregate_audit_records(_iter_audit_records(audit_path), touched_hours)
@@ -867,6 +972,7 @@ def run_once(
 
     if usage_rows or observations:
         return _send_rows(
+            audit_path,
             usage_rows,
             observations,
             next_audit_cursor,
@@ -882,6 +988,7 @@ def run_once(
     # An ACKed pending batch already refreshed producer liveness for this run.
     if heartbeat and not pending_acked:
         return _send_rows(
+            audit_path,
             [],
             [],
             next_audit_cursor,

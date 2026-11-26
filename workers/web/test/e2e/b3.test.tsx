@@ -126,6 +126,7 @@ interface UsageWindowRecord {
 interface UsageHistoryRecord {
   timestamp: string;
   key_fingerprint: string;
+  key_alias?: string;
   rolling: UsageWindowRecord;
   weekly: UsageWindowRecord;
   monthly?: UsageWindowRecord;
@@ -136,6 +137,7 @@ function usageRecord(
   keyFingerprint: string,
   rollingPercent: number,
   includeMonthly: boolean,
+  keyAlias?: string,
 ): UsageHistoryRecord {
   const record: UsageHistoryRecord = {
     timestamp,
@@ -151,6 +153,9 @@ function usageRecord(
       resetsAt: "2026-12-01T00:00:00Z",
     },
   };
+  if (keyAlias) {
+    record.key_alias = keyAlias;
+  }
   if (includeMonthly) {
     record.monthly = {
       status: "ok",
@@ -240,8 +245,8 @@ describe("B3 shipper to dashboard E2E", () => {
       auditRecord("2026-11-26T14:20:00.000Z", "req-failed", 500, false),
     ]);
     writeJsonl(path.join(usageDir, "2026-11-26.jsonl"), [
-      usageRecord("2026-11-26T14:30:00.000Z", "fp_a", 42.5, true),
-      usageRecord("2026-11-26T14:35:00.000Z", "fp_a", 43.5, false),
+      usageRecord("2026-11-26T14:30:00.000Z", "fp_a", 42.5, true, "go-key-1"),
+      usageRecord("2026-11-26T14:35:00.000Z", "fp_a", 43.5, false, "go-key-1"),
       usageRecord("2026-11-26T14:31:00.000Z", "fp_b", 90, true),
     ]);
 
@@ -389,6 +394,7 @@ describe("B3 shipper to dashboard E2E", () => {
     expect(fpAHtml).toContain("Quota windows for OpenCode Go fp_a");
     expect(fpAHtml).toContain("rolling");
     expect(fpAHtml).toContain("43.5%");
+    expect(fpAHtml).toContain("go-key-1");
     expect(fpAHtml).not.toContain("monthly");
 
     const quotaHtml = renderToStaticMarkup(<QuotaSection quota={overview.quotas} />);

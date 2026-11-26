@@ -212,7 +212,9 @@ B3 adds the `orihsus` shipper and two read surfaces:
 - Per-key quota history from `usage/YYYY-MM-DD.jsonl`. Each key fingerprint is
   its own `(source, account)` subject, and only the single latest valid
   observation (`status = 'ok'` and `time_anomaly IS NULL`) supplies current
-  windows.
+  windows. Window labels use the optional redacted upstream `key_alias` when
+  present; the account remains the key fingerprint and raw key fields are never
+  read.
 - The dashboard shows Codex machine rows and OpenCode Go identity rows in
   separate usage tables, plus a quota section with sample age, reset countdowns,
   and separate failed/empty/anomaly callouts.
@@ -266,10 +268,12 @@ Audit log safety:
 - A missing audit log fails closed before any heartbeat.
 - If the audit file shrinks or its already-consumed prefix changes (truncation,
   rotation, or replacement), the shipper exits non-zero **without sending** and
-  without advancing its cursor. This prevents an incomplete replay from
-  overwriting an already-shipped complete hourly total.
-- Restore the original audit log/state pair, or recover the recorded sequence
-  and log deliberately, before running again.
+  without advancing its cursor. This also applies when retrying an in-flight
+  multi-chunk batch: every durable batch persists and verifies the full audit
+  extent it consumed, not just its cursor at the last ACK.
+- This prevents an incomplete replay from overwriting an already-shipped
+  complete hourly total. Restore the original audit log/state pair, or recover
+  the recorded sequence and log deliberately, before running again.
 
 The dashboard and read API expose:
 
