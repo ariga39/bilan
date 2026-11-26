@@ -6,6 +6,7 @@ import {
   currentMonthInTimeZone,
   localDateInTimeZone,
   monthRangeUtc,
+  utcSecondIso,
 } from "@bilan/shared";
 import type {
   BalanceHistoryResponse,
@@ -325,6 +326,7 @@ async function loadMonthlyUsage(
   now: Date,
 ): Promise<MonthlyUsage> {
   const range = monthRangeUtc(month, timezone);
+  const nowIso = utcSecondIso(now);
   const [usage, latest] = await Promise.all([
     db
       .prepare(
@@ -350,7 +352,10 @@ async function loadMonthlyUsage(
       )
       .bind(range.start, range.end)
       .all<UsageAggregateRow>(),
-    db.prepare("SELECT MAX(bucket_start) AS latest FROM usage_buckets").first<LatestUsageRow>(),
+    db
+      .prepare("SELECT MAX(bucket_start) AS latest FROM usage_buckets WHERE bucket_start <= ?")
+      .bind(nowIso)
+      .first<LatestUsageRow>(),
   ]);
 
   const rows: Array<UsageBreakdownRow> = usage.results.map((row) => withCompleteness(row));

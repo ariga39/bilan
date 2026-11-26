@@ -216,13 +216,15 @@ export function UsageSection({
   daily,
   timezone,
   month,
+  loading = false,
   onTimezoneChange,
   onMonthChange,
 }: {
-  usage: MonthlyUsage;
+  usage: MonthlyUsage | null;
   daily: UsageDailyResponse | null;
   timezone: string;
   month: string;
+  loading?: boolean;
   onTimezoneChange: (timezone: string) => void;
   onMonthChange: (month: string) => void;
 }) {
@@ -280,12 +282,21 @@ export function UsageSection({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            <Clock3 className="size-3.5" />
-            Data through {formatDateTime(usage.latest_bucket_start)} ·{" "}
-            {formatAge(usage.data_age_seconds)}
-          </span>
-          {usage.is_stale ? (
+          {usage ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Clock3 className="size-3.5" />
+              Data through {formatDateTime(usage.latest_bucket_start)} ·{" "}
+              {formatAge(usage.data_age_seconds)}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <Clock3 className="size-3.5" />
+              {loading
+                ? `Loading usage for ${month} in ${timezone}…`
+                : `Usage for ${month} in ${timezone} is unavailable.`}
+            </span>
+          )}
+          {usage?.is_stale ? (
             <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
               Delayed
             </Badge>
@@ -296,34 +307,53 @@ export function UsageSection({
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
-        {usage.rows.length > 0 ? (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium">Monthly breakdown</h3>
-            <MonthlyUsageTable rows={usage.rows} />
-          </div>
-        ) : (
+        {usage === null ? (
           <div className="rounded-lg border border-dashed px-4 py-8 text-center">
-            <p className="font-medium">No Codex usage for this month</p>
+            <p className="font-medium">
+              {loading ? "Loading token usage" : "Usage could not be loaded"}
+            </p>
             <p className="mt-1 text-sm text-muted-foreground">
-              A row appears after debitmetre pushes a complete UTC-hour bucket that falls inside the
-              selected timezone month.
+              {loading
+                ? "The selected month and timezone will appear after the read API responds."
+                : "Old rows from another month or timezone are intentionally hidden."}
             </p>
           </div>
-        )}
+        ) : (
+          <>
+            {usage.rows.length > 0 ? (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Monthly breakdown</h3>
+                <MonthlyUsageTable rows={usage.rows} />
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed px-4 py-8 text-center">
+                <p className="font-medium">No Codex usage for this month</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  A row appears after debitmetre pushes a complete UTC-hour bucket that falls inside
+                  the selected timezone month.
+                </p>
+              </div>
+            )}
 
-        <div className="space-y-2">
-          <h3 className="flex items-center gap-1.5 text-sm font-medium">
-            <CalendarDays className="size-4 text-muted-foreground" />
-            Daily view
-          </h3>
-          {daily && daily.rows.length > 0 ? (
-            <DailyUsageTable rows={daily.rows} />
-          ) : (
-            <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-              No daily usage for this month.
+            <div className="space-y-2">
+              <h3 className="flex items-center gap-1.5 text-sm font-medium">
+                <CalendarDays className="size-4 text-muted-foreground" />
+                Daily view
+              </h3>
+              {daily === null ? (
+                <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+                  Daily usage for this selection is unavailable.
+                </div>
+              ) : daily.rows.length > 0 ? (
+                <DailyUsageTable rows={daily.rows} />
+              ) : (
+                <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+                  No daily usage for this month.
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

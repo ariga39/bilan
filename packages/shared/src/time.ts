@@ -20,6 +20,11 @@ export function isValidMonth(value: string): boolean {
   return month >= 1 && month <= 12;
 }
 
+/** Canonical second-precision UTC ISO form, matching bucket_start strings. */
+export function utcSecondIso(date: Date): string {
+  return `${date.toISOString().slice(0, 19)}Z`;
+}
+
 export function currentMonthInTimeZone(now: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,

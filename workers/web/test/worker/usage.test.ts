@@ -1,7 +1,7 @@
 import type { OverviewResponse, UsageDailyResponse } from "@bilan/shared";
 import { currentMonthInTimeZone } from "@bilan/shared";
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { app } from "../../src/worker/app";
 import { clearDatabase, seedProducer, seedUsageBucket } from "./seed";
@@ -28,8 +28,14 @@ beforeEach(async () => {
   await clearDatabase();
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("GET /api/v1/overview usage", () => {
   it("slices the exact UTC+8 month and keeps machine, model, effort and partial counters distinct", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2027-01-15T12:00:00Z"));
     await seedProducer({
       producerId: "debitmetre-main",
       displayName: "debitmetre (Codex usage)",
@@ -164,6 +170,35 @@ describe("GET /api/v1/overview usage", () => {
     const body = await overview();
     expect(body.usage.timezone).toBe("Asia/Shanghai");
     expect(body.usage.month).toBe(currentMonthInTimeZone(new Date(), "Asia/Shanghai"));
+  });
+
+  it("excludes future buckets from data age and compares at second precision", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-27T12:00:00.000Z"));
+      await seedUsageBucket({
+        bucketStart: "2026-11-27T12:00:00Z",
+        actorId: "machine-current",
+        unitCount: 1,
+        inputTokens: 10,
+        inputCounted: 1,
+      });
+      await seedUsageBucket({
+        bucketStart: "2026-12-01T00:00:00Z",
+        actorId: "machine-future",
+        unitCount: 9,
+        inputTokens: 900,
+        inputCounted: 9,
+      });
+
+      const body = await overview("?tz=UTC&month=2026-11");
+
+      expect(body.usage.latest_bucket_start).toBe("2026-11-27T12:00:00Z");
+      expect(body.usage.data_age_seconds).toBe(0);
+      expect(body.usage.rows.some((row) => row.actor_id === "machine-future")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -145,6 +145,23 @@ redirects and other 2xx responses leave the identical payload queued for retry.
 Run `--backfill` to replay the whole log without moving the incremental cursor.
 An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
 
+### Migrating a shipper to another host
+
+A migrated shipper must retain the same logical dataset and sequence, so moving
+only `usage.jsonl` is not enough:
+
+1. Stop the old shipper process and disable its timer/systemd unit. Confirm no
+   scheduled or manual run can still push from the old host.
+2. Copy the source log and the **exact** state/outbox file together. If a batch
+   is pending, the state file contains the identical payload and `batch_seq`
+   that must be retried on the new host.
+3. Start the new host with the same `--producer-id` and the copied state file.
+   Do not run the old and new writers concurrently.
+
+If the state file is lost, the new host cannot safely infer the producer's last
+accepted `batch_seq`; a restart from `1` will be rejected as stale. Preserve the
+state/outbox with the log.
+
 ## Production configuration
 
 1. Create one D1 database and replace the placeholder `database_id` in both
@@ -165,7 +182,8 @@ An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
    ```
 
    Use one scoped producer entry per independently written shard. Keep the same
-   logical `producer_id` when moving a shipper to another host.
+   logical `producer_id` and copy the exact shipper state when moving it to
+   another host; see “Migrating a shipper to another host” above.
 
 4. Before attaching a custom domain to `bilan-web`, create the Cloudflare
    Access self-hosted application for that exact hostname and all paths with a
