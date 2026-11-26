@@ -662,6 +662,65 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
         self.assertEqual(self.read_state()["cursor"], os.path.getsize(self.usage_path))
 
+    def test_truncated_source_fails_closed_and_recovers_after_restore(self) -> None:
+        records = [
+            audit_record("2026-11-01T10:05:00Z", machine_id="machine-a"),
+            audit_record("2026-11-01T10:25:00Z", machine_id="machine-a"),
+        ]
+        full_size = self.write_records(records)
+        self.assert_ok(self.run_cli())
+        shipped_state = self.read_state()
+        self.assertEqual(shipped_state["batch_seq"], 1)
+        self.assertEqual(shipped_state["cursor"], full_size)
+        shipped_requests = len(self.ingest.snapshot_requests())
+
+        # A shorter source must not be replayed from zero and replace the
+        # complete already-shipped hour with partial usage.
+        self.write_records(records[:1])
+        truncated = self.run_cli()
+        self.assertNotEqual(truncated.returncode, 0)
+        self.assertIn("restore the complete source log", truncated.stderr.lower())
+        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
+        after_truncation = self.read_state()
+        self.assertEqual(after_truncation["batch_seq"], 1)
+        self.assertEqual(after_truncation["cursor"], full_size)
+
+        # Backfill must not bypass the same guard.
+        backfill = self.run_cli(extra=["--backfill"])
+        self.assertNotEqual(backfill.returncode, 0)
+        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
+        self.assertEqual(self.read_state()["cursor"], full_size)
+
+        # Restoring the complete log plus a new line resumes normally with a
+        # complete touched-hour correction.
+        self.write_records(
+            records + [audit_record("2026-11-01T10:45:00Z", machine_id="machine-a")]
+        )
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(len(payload["usage_buckets"]), 1)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+
+    def test_replaced_source_with_different_content_fails_closed(self) -> None:
+        self.write_records([audit_record("2026-11-01T11:05:00Z", machine_id="machine-a")])
+        self.assert_ok(self.run_cli())
+        shipped_state = self.read_state()
+        shipped_requests = len(self.ingest.snapshot_requests())
+
+        self.write_records(
+            [
+                audit_record("2026-11-01T12:05:00Z", machine_id="machine-z"),
+                audit_record("2026-11-01T12:15:00Z", machine_id="machine-z"),
+            ]
+        )
+        replaced = self.run_cli()
+        self.assertNotEqual(replaced.returncode, 0)
+        self.assertIn("restore the complete source log", replaced.stderr.lower())
+        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
+        self.assertEqual(self.read_state()["cursor"], shipped_state["cursor"])
+        self.assertEqual(self.read_state()["batch_seq"], shipped_state["batch_seq"])
+
     def test_migrated_host_keeps_logical_producer_and_sequence(self) -> None:
         self.write_records([audit_record("2026-11-02T01:05:00Z", machine_id="machine-a")])
         self.assert_ok(self.run_cli())

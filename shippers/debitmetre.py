@@ -33,6 +33,7 @@ host can keep the same dataset identity.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -251,19 +252,18 @@ def build_all_rows(usage_path: str) -> list[dict[str, Any]]:
     return aggregate_records(_iter_file_records(usage_path))
 
 
-def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str, Any]], int, bool]:
-    """Read complete appended lines and return (records, new_cursor, reset)."""
+def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str, Any]], int]:
+    """Read complete appended lines and return (records, new_cursor).
 
-    try:
-        size = os.path.getsize(usage_path)
-    except FileNotFoundError:
-        return [], cursor, False
-    reset = False
+    A source that is shorter than the saved cursor is never replayed from zero:
+    doing so could replace a complete already-shipped hour with partial usage.
+    """
+
+    size = os.path.getsize(usage_path)
     if cursor > size:
-        # The log was rotated or truncated; safely replay the replacement.
-        cursor = 0
-        reset = True
-        size = os.path.getsize(usage_path)
+        raise ShipperError(
+            "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+        )
 
     with open(usage_path, "rb") as handle:
         handle.seek(cursor)
@@ -271,7 +271,7 @@ def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str,
 
     last_newline = appended.rfind(b"\n")
     if last_newline < 0:
-        return [], cursor, reset
+        return [], cursor
     complete = appended[: last_newline + 1]
     records = []
     for raw in complete.split(b"\n"):
@@ -280,7 +280,7 @@ def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str,
         record = _canonical_record(raw)
         if record is not None:
             records.append(record)
-    return records, cursor + len(complete), reset
+    return records, cursor + len(complete)
 
 
 def _default_state_path(usage_path: str) -> str:
@@ -294,6 +294,78 @@ def _require_usage_log(usage_path: str) -> None:
         raise ShipperError("usage log path is not a file")
 
 
+SOURCE_FINGERPRINT_BYTES = 64 * 1024
+
+
+def _fingerprint_start(cursor: int) -> int:
+    return max(0, cursor - SOURCE_FINGERPRINT_BYTES)
+
+
+def _fingerprint_window(usage_path: str, cursor: int) -> tuple[str, int]:
+    start = _fingerprint_start(cursor)
+    remaining = cursor - start
+    digest = hashlib.sha256()
+    try:
+        with open(usage_path, "rb") as handle:
+            handle.seek(start)
+            while remaining > 0:
+                chunk = handle.read(min(64 * 1024, remaining))
+                if not chunk:
+                    raise ShipperError(
+                        "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+                    )
+                digest.update(chunk)
+                remaining -= len(chunk)
+    except FileNotFoundError as exc:
+        raise ShipperError(
+            "usage log not found; restore the complete source log before retrying"
+        ) from exc
+    return digest.hexdigest(), cursor - start
+
+
+def _source_checkpoint(usage_path: str, cursor: int) -> Dict[str, Any]:
+    digest, window_bytes = _fingerprint_window(usage_path, cursor)
+    return {"cursor": cursor, "window_bytes": window_bytes, "digest": digest}
+
+
+def _verify_source_checkpoint(usage_path: str, state: Dict[str, Any]) -> None:
+    cursor = state["cursor"]
+    size = os.path.getsize(usage_path)
+    if cursor > size:
+        raise ShipperError(
+            "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+        )
+
+    checkpoint = state.get("source_checkpoint")
+    if checkpoint is None:
+        # Old state files predate the content checkpoint. The size guard above
+        # still catches truncation; the next successful save records a digest.
+        return
+
+    expected_cursor = checkpoint.get("cursor")
+    expected_window = checkpoint.get("window_bytes")
+    expected_digest = checkpoint.get("digest")
+    expected_window_bytes = cursor - _fingerprint_start(cursor)
+    if (
+        isinstance(expected_cursor, bool)
+        or not isinstance(expected_cursor, int)
+        or expected_cursor != cursor
+        or isinstance(expected_window, bool)
+        or not isinstance(expected_window, int)
+        or expected_window != expected_window_bytes
+        or not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+    ):
+        raise ShipperError("invalid source checkpoint in shipper state")
+
+    actual_digest, _ = _fingerprint_window(usage_path, cursor)
+    if actual_digest != expected_digest:
+        raise ShipperError(
+            "usage log no longer matches the saved cursor; it may have been truncated or replaced. "
+            "Restore the complete source log before retrying"
+        )
+
+
 def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
     raw = load_json_file(state_path)
     if raw is None:
@@ -303,6 +375,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "batch_seq": 0,
             "cursor": 0,
             "pending": None,
+            "source_checkpoint": None,
         }
     if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
         raise ShipperError("unsupported shipper state version")
@@ -336,10 +409,30 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             raise ShipperError("invalid pending outbox in shipper state")
         if payload.get("batch_seq") != pending_seq:
             raise ShipperError("pending outbox batch_seq does not match its payload")
+
+    checkpoint = raw.get("source_checkpoint")
+    if checkpoint is not None:
+        if not isinstance(checkpoint, dict):
+            raise ShipperError("invalid source checkpoint in shipper state")
+        checkpoint_cursor = checkpoint.get("cursor")
+        checkpoint_window = checkpoint.get("window_bytes")
+        checkpoint_digest = checkpoint.get("digest")
+        if (
+            isinstance(checkpoint_cursor, bool)
+            or not isinstance(checkpoint_cursor, int)
+            or checkpoint_cursor != cursor
+            or isinstance(checkpoint_window, bool)
+            or not isinstance(checkpoint_window, int)
+            or checkpoint_window != cursor - _fingerprint_start(cursor)
+            or not isinstance(checkpoint_digest, str)
+            or len(checkpoint_digest) != 64
+        ):
+            raise ShipperError("invalid source checkpoint in shipper state")
     return raw
 
 
-def _save_state(state_path: str, state: Dict[str, Any]) -> None:
+def _save_state(state_path: str, state: Dict[str, Any], usage_path: str) -> None:
+    state["source_checkpoint"] = _source_checkpoint(usage_path, state["cursor"])
     atomic_write_json(state_path, state)
 
 
@@ -351,6 +444,7 @@ def _send_pending(
     endpoint: str,
     token: str,
     state_path: str,
+    usage_path: str,
     state: Dict[str, Any],
     timeout: float,
     quiet: bool,
@@ -368,7 +462,7 @@ def _send_pending(
     state["batch_seq"] = sequence
     state["cursor"] = pending["cursor_after"]
     state["pending"] = None
-    _save_state(state_path, state)
+    _save_state(state_path, state, usage_path)
     if not quiet:
         count = len(pending["payload"].get("usage_buckets") or [])
         if count:
@@ -384,6 +478,7 @@ def _send_rows(
     endpoint: str,
     token: str,
     state_path: str,
+    usage_path: str,
     state: Dict[str, Any],
     timeout: float,
     quiet: bool,
@@ -402,7 +497,7 @@ def _send_rows(
         }
         state["pending"] = pending
         # Persist the exact in-flight batch before the first network attempt.
-        _save_state(state_path, state)
+        _save_state(state_path, state, usage_path)
 
         try:
             _send_once(endpoint, token, pending["payload"], timeout)
@@ -416,7 +511,7 @@ def _send_rows(
         state["batch_seq"] = sequence
         state["cursor"] = pending["cursor_after"]
         state["pending"] = None
-        _save_state(state_path, state)
+        _save_state(state_path, state, usage_path)
         if not quiet:
             if batch:
                 print(
@@ -441,10 +536,11 @@ def run_once(
 ) -> bool:
     _require_usage_log(usage_path)
     state = _load_state(state_path, producer_id)
+    _verify_source_checkpoint(usage_path, state)
 
     pending_acked = False
     if state["pending"] is not None:
-        if not _send_pending(endpoint, token, state_path, state, timeout, quiet):
+        if not _send_pending(endpoint, token, state_path, usage_path, state, timeout, quiet):
             return False
         pending_acked = True
 
@@ -460,17 +556,13 @@ def run_once(
             endpoint,
             token,
             state_path,
+            usage_path,
             state,
             timeout,
             quiet,
         )
 
-    records, next_cursor, reset = _read_appended_records(usage_path, state["cursor"])
-    if reset:
-        print(
-            "debitmetre-shipper: usage file shrank below the saved cursor; replaying it",
-            file=sys.stderr,
-        )
+    records, next_cursor = _read_appended_records(usage_path, state["cursor"])
 
     touched_hours = {_record_hour(record) for record in records}
     rows = build_touched_hour_rows(usage_path, touched_hours) if touched_hours else []
@@ -482,6 +574,7 @@ def run_once(
             endpoint,
             token,
             state_path,
+            usage_path,
             state,
             timeout,
             quiet,
@@ -494,6 +587,7 @@ def run_once(
             endpoint,
             token,
             state_path,
+            usage_path,
             state,
             timeout,
             quiet,
