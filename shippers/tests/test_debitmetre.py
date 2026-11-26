@@ -73,21 +73,41 @@ class _IngestState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.requests: list[dict[str, Any]] = []
+        self.get_requests: list[str] = []
         self.rows: dict[tuple[Any, ...], dict[str, Any]] = {}
         self.last_seq = 0
         self.commits = 0
         self.duplicates = 0
         self.conflicts = 0
         self.drop_next_response = False
+        self.fail_next_status: Optional[int] = None
+        self.fail_next_location: Optional[str] = None
 
     def receive(
         self,
         body: bytes,
         authorization: Optional[str],
         path: str,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int, bool, Optional[str]]:
         with self.lock:
             payload = json.loads(body.decode("utf-8"))
+            if self.fail_next_status is not None:
+                status = self.fail_next_status
+                location = self.fail_next_location
+                self.fail_next_status = None
+                self.fail_next_location = None
+                self.requests.append(
+                    {
+                        "body": body,
+                        "payload": payload,
+                        "authorization": authorization,
+                        "path": path,
+                        "status": status,
+                        "dropped": False,
+                    }
+                )
+                return status, False, location
+
             sequence = payload["batch_seq"]
             status: int
             if sequence < self.last_seq:
@@ -125,11 +145,19 @@ class _IngestState:
                     "dropped": drop,
                 }
             )
-            return status, drop
+            return status, drop, None
+
+    def record_get(self, path: str) -> None:
+        with self.lock:
+            self.get_requests.append(path)
 
     def snapshot_requests(self) -> list[dict[str, Any]]:
         with self.lock:
             return list(self.requests)
+
+    def snapshot_gets(self) -> list[str]:
+        with self.lock:
+            return list(self.get_requests)
 
     def snapshot_rows(self) -> dict[tuple[Any, ...], dict[str, Any]]:
         with self.lock:
@@ -149,7 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        status, drop = self.server.ingest.receive(  # type: ignore[attr-defined]
+        status, drop, location = self.server.ingest.receive(  # type: ignore[attr-defined]
             body,
             self.headers.get("Authorization"),
             self.path,
@@ -161,7 +189,17 @@ class _Handler(BaseHTTPRequestHandler):
             return
         response = b"{}"
         self.send_response(status)
+        if location is not None:
+            self.send_header("Location", location)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler name
+        self.server.ingest.record_get(self.path)  # type: ignore[attr-defined]
+        response = b"login"
+        self.send_response(200)
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
         self.wfile.write(response)
@@ -486,6 +524,48 @@ class DebitmetreShipperTests(unittest.TestCase):
         state = self.read_state()
         self.assertEqual(state["batch_seq"], 2)
         self.assertEqual(state["cursor"], os.path.getsize(self.usage_path))
+
+    def test_202_accepted_does_not_clear_pending_before_exact_200(self) -> None:
+        self.write_records([audit_record("2026-11-01T09:05:00Z")])
+        self.ingest.fail_next_status = 202
+
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        last_seq, commits, duplicates, conflicts = self.ingest.stats()
+        self.assertEqual((last_seq, commits, duplicates, conflicts), (0, 0, 0, 0))
+        state = self.read_state()
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+        first_body = self.ingest.snapshot_requests()[0]["body"]
+
+        second = self.run_cli()
+        self.assert_ok(second)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]["body"], first_body)
+        self.assertEqual(self.ingest.stats(), (1, 1, 0, 0))
+        self.assertIsNone(self.read_state()["pending"])
+
+    def test_login_redirect_is_not_followed_and_pending_is_retried(self) -> None:
+        self.write_records([audit_record("2026-11-01T09:05:00Z")])
+        self.ingest.fail_next_status = 302
+        self.ingest.fail_next_location = "/login"
+
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(self.ingest.snapshot_gets(), [])
+        self.assertEqual(self.ingest.stats(), (0, 0, 0, 0))
+        state = self.read_state()
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+        first_body = self.ingest.snapshot_requests()[0]["body"]
+
+        second = self.run_cli()
+        self.assert_ok(second)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]["body"], first_body)
+        self.assertEqual(self.ingest.snapshot_gets(), [])
+        self.assertEqual(self.ingest.stats(), (1, 1, 0, 0))
+        self.assertIsNone(self.read_state()["pending"])
 
     def test_idle_heartbeat_can_be_disabled_without_moving_data_age(self) -> None:
         self.write_records([audit_record("2026-11-01T10:05:00Z")])

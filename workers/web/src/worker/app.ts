@@ -1,14 +1,53 @@
+import {
+  DEFAULT_TIMEZONE,
+  currentMonthInTimeZone,
+  isValidMonth,
+  isValidTimeZone,
+} from "@bilan/shared";
 import { Hono } from "hono";
 
-import { getBalanceHistory, getOverview, isBalanceProvider } from "./queries";
+import { getBalanceHistory, getOverview, getUsageDaily, isBalanceProvider } from "./queries";
 import type { Env } from "./types";
 
 export const app = new Hono<{ Bindings: Env }>();
 
+interface UsageQuery {
+  timezone: string;
+  month: string;
+}
+
+function parseUsageQuery(context: {
+  req: { query: (name: string) => string | undefined };
+}): UsageQuery | null {
+  const timezone = context.req.query("tz") ?? DEFAULT_TIMEZONE;
+  if (!isValidTimeZone(timezone)) {
+    return null;
+  }
+  const month = context.req.query("month") ?? currentMonthInTimeZone(new Date(), timezone);
+  if (!isValidMonth(month)) {
+    return null;
+  }
+  return { timezone, month };
+}
+
 app.get("/api/v1/overview", async (context) => {
-  const overview = await getOverview(context.env.DB);
+  const usageQuery = parseUsageQuery(context);
+  if (usageQuery === null) {
+    return context.json({ error: "invalid_usage_query" }, 400);
+  }
+  const overview = await getOverview(context.env.DB, new Date(), usageQuery);
   context.header("cache-control", "no-store");
   return context.json(overview);
+});
+
+app.get("/api/v1/usage/daily", async (context) => {
+  const usageQuery = parseUsageQuery(context);
+  if (usageQuery === null) {
+    return context.json({ error: "invalid_usage_query" }, 400);
+  }
+  const daily = await getUsageDaily(context.env.DB, usageQuery);
+  context.header("cache-control", "no-store");
+  return context.json(daily);
 });
 
 app.get("/api/v1/balances/history", async (context) => {

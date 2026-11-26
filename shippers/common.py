@@ -200,6 +200,16 @@ class InstanceLock:
             os.close(fd)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: only the exact ingest endpoint may ACK a batch."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def post_envelope(
     endpoint: str,
     token: str,
@@ -208,9 +218,10 @@ def post_envelope(
 ) -> None:
     """POST one envelope with a scoped Bearer token.
 
-    A 2xx response is the only success. 4xx responses are permanent (the same
-    payload should not be retried blindly); 408/429/5xx and transport failures
-    are transient and keep the durable outbox pending.
+    Only an exact HTTP 200 is an ACK. Redirects are never followed, and any
+    other 2xx (for example 202 Accepted) leaves the durable outbox pending so
+    an uncommitted payload cannot be discarded. 4xx responses are permanent;
+    408/429/5xx and transport failures are transient.
     """
 
     body = canonical_json_bytes(payload)
@@ -232,7 +243,7 @@ def post_envelope(
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout_seconds) as response:
             status = response.getcode()
             response.read(64 * 1024)
     except urllib.error.HTTPError as exc:
@@ -244,15 +255,15 @@ def post_envelope(
             transient=transient,
         ) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
-        reason = getattr(exc, "reason", None) or exc.__class__.__name__
+        reason = getattr(getattr(exc, "reason", None), "strerror", None) or exc.__class__.__name__
         raise HTTPPushError(
             "ingest transport failure: %s" % reason,
             status=None,
             transient=True,
         ) from None
-    if not 200 <= status <= 299:
+    if status != 200:
         raise HTTPPushError(
-            "ingest rejected batch with HTTP %d" % status,
+            "ingest returned HTTP %d instead of 200" % status,
             status=status,
             transient=False,
         )

@@ -1,5 +1,10 @@
-import { BALANCE_PROVIDERS } from "@bilan/shared";
-import type { BalanceHistoryResponse, BalanceProvider, OverviewResponse } from "@bilan/shared";
+import { BALANCE_PROVIDERS, DEFAULT_TIMEZONE, currentMonthInTimeZone } from "@bilan/shared";
+import type {
+  BalanceHistoryResponse,
+  BalanceProvider,
+  OverviewResponse,
+  UsageDailyResponse,
+} from "@bilan/shared";
 import {
   Activity,
   AlertTriangle,
@@ -14,9 +19,10 @@ import { useEffect, useState } from "react";
 import { BalanceCard, BalancesEmptyState } from "@/components/balance-card";
 import { BalanceHistoryChart } from "@/components/balance-history-chart";
 import { HealthStrip } from "@/components/health-strip";
+import { UsageSection } from "@/components/usage-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { fetchBalanceHistory, fetchOverview } from "@/lib/api";
+import { fetchBalanceHistory, fetchOverview, fetchUsageDaily } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -62,9 +68,12 @@ function ErrorBanner({ message }: { message: string }) {
 
 export function App() {
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [dailyUsage, setDailyUsage] = useState<UsageDailyResponse | null>(null);
   const [histories, setHistories] = useState<
     Partial<Record<BalanceProvider, BalanceHistoryResponse>>
   >({});
+  const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
+  const [month, setMonth] = useState(() => currentMonthInTimeZone(new Date(), DEFAULT_TIMEZONE));
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
@@ -76,16 +85,24 @@ export function App() {
     async function load(): Promise<void> {
       setLoading(true);
       try {
-        const nextOverview = await fetchOverview(controller.signal);
-        const historyResults = await Promise.allSettled(
-          BALANCE_PROVIDERS.map((provider) => fetchBalanceHistory(provider, 30, controller.signal)),
-        );
+        const nextOverview = await fetchOverview(controller.signal, timezone, month);
+        const [dailyResult, ...historyResults] = await Promise.allSettled([
+          fetchUsageDaily(timezone, month, controller.signal),
+          ...BALANCE_PROVIDERS.map((provider) =>
+            fetchBalanceHistory(provider, 30, controller.signal),
+          ),
+        ]);
 
         if (cancelled) {
           return;
         }
 
         setOverview(nextOverview);
+        if (dailyResult.status === "fulfilled") {
+          setDailyUsage(dailyResult.value);
+        } else {
+          setDailyUsage(null);
+        }
         const nextHistories: Partial<Record<BalanceProvider, BalanceHistoryResponse>> = {};
         let historyError: string | null = null;
 
@@ -102,7 +119,11 @@ export function App() {
         });
 
         setHistories(nextHistories);
-        setError(historyError);
+        if (dailyResult.status === "rejected") {
+          setError("Daily usage could not be loaded.");
+        } else {
+          setError(historyError);
+        }
       } catch (loadError) {
         if (!cancelled && !(loadError instanceof DOMException && loadError.name === "AbortError")) {
           setError(loadError instanceof Error ? loadError.message : "The read API is unavailable.");
@@ -124,7 +145,7 @@ export function App() {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [reloadToken]);
+  }, [reloadToken, timezone, month]);
 
   const historiesToRender = BALANCE_PROVIDERS.flatMap((provider) => {
     const history = histories[provider];
@@ -145,7 +166,7 @@ export function App() {
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">bilan</h1>
               <p className="text-sm text-muted-foreground">
-                Prepaid AI balances and collection health.
+                Prepaid balances, Codex token usage, and collection health.
               </p>
             </div>
           </div>
@@ -217,6 +238,31 @@ export function App() {
 
         <section>
           <SectionHeading
+            icon={Activity}
+            title="Token usage"
+            description="Codex records from debitmetre, broken down by machine, model, and declared reasoning effort. Heartbeat liveness stays separate from the latest usage hour."
+          />
+          {overview ? (
+            <UsageSection
+              usage={overview.usage}
+              daily={dailyUsage}
+              timezone={timezone}
+              month={month}
+              onTimezoneChange={setTimezone}
+              onMonthChange={setMonth}
+            />
+          ) : (
+            <Card className="border-dashed">
+              <CardContent className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+                <RefreshCw className="size-4 animate-spin" />
+                Loading token usage…
+              </CardContent>
+            </Card>
+          )}
+        </section>
+
+        <section>
+          <SectionHeading
             icon={History}
             title="Balance history"
             description="Last 30 days. Each currency gets its own series and axis; values are never combined across currencies."
@@ -245,8 +291,8 @@ export function App() {
         </section>
 
         <footer className="border-t pt-4 text-xs text-muted-foreground">
-          Read-only surface. Balance collection runs on the write Worker schedule; this page
-          refreshes every 60 seconds.
+          Read-only surface. Balance collection runs on the write Worker schedule; Codex usage is
+          pushed by debitmetre. This page refreshes every 60 seconds.
         </footer>
       </div>
     </div>

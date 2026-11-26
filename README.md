@@ -1,39 +1,47 @@
 # bilan
 
 Personal AI consumption aggregator on Cloudflare Workers + D1. This checkout
-implements **B1**: live OpenRouter and DeepSeek balances with collection
-health, the first usable end-to-end data path.
+implements **B2**: multi-machine Codex token usage pushed by `debitmetre`,
+alongside the B1 OpenRouter and DeepSeek balance path.
 
-- Write Worker (`bilan-ingest`): scheduled pull adapters, D1 writes, failure
-  isolation per provider. No read or UI routes.
+- Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest`,
+  scheduled pull adapters, D1 writes, and per-provider failure isolation. No
+  read or UI routes.
 - Read Worker (`bilan-web`): read-only JSON API plus the React dashboard.
   No write routes and no upstream credentials. `workers_dev` and preview URLs
   are disabled.
-- Shared D1 database: `producers` and `balance_snapshots`.
-- Dashboard: producer heartbeat health, current balances per provider and
-  currency, 7d/30d net balance change, OpenRouter reported usage delta, and
-  30-day history charts.
+- Shared D1 database: `producers`, `balance_snapshots`, and `usage_buckets`.
+- Dashboard: producer heartbeat health, balances, 7d/30d net balance change,
+  OpenRouter reported usage delta, and Codex token usage broken down by
+  timezone/month, machine, model, effort, and day, with explicit partial
+  counters.
+- Host shipper (`shippers/debitmetre.py`): Python 3 standard library only,
+  durable cursor/outbox, monotonic `batch_seq`, idle heartbeat, and
+  `--backfill`.
 
-B1 does not include the push ingest endpoint, shippers, token usage, quota
-windows, pricing, or alerting.
+B2 does not include OpenCode Go or AGY token usage, quota windows, pricing,
+alerting, or the `orihsus` / `telemetre` shippers.
 
 ## Layout
 
 ```text
 migrations/                 D1 schema
-packages/shared/            Shared API types and collection constants
-workers/ingest/             Scheduled OpenRouter/DeepSeek pull Worker
+packages/shared/            Shared API types, schemas, and timezone helpers
+workers/ingest/             Scoped Push endpoint + scheduled balance pulls
 workers/web/                Read API + React/Tailwind/shadcn/Recharts SPA
+shippers/                   Standalone Python 3 stdlib host shippers
 docs/                       Design, tasks, and Access guidance
 ```
 
 ## Install and checks
 
-Requires Node.js 22.18+ (or 24+), pnpm 11, and Python is not needed for B1.
+Requires Node.js 22.18+ (or 24+), pnpm 11, and Python 3.9+ for the shipper.
 
 ```sh
 pnpm install
 pnpm check
+pnpm build
+python -m unittest discover -s shippers/tests -v
 ```
 
 Individual checks:
@@ -48,12 +56,19 @@ pnpm build
 
 `pnpm test` runs:
 
-- `bilan-ingest` Vitest worker-pool tests: successful pulls, DeepSeek failure
-  isolation, redirect rejection, no read routes.
-- `bilan-web` worker-pool tests: overview/history behavior, absence of write
-  routes, and scheduled-pull-to-read-API integration over one D1 binding.
+- `bilan-ingest` Vitest worker-pool tests: scheduled pulls, push authentication
+  and scopes, `batch_seq` replay/duplicate/stale behavior (including competing
+  requests), UTC-hour correction, heartbeat liveness, validation, and the
+  absence of read routes.
+- `bilan-web` worker-pool tests: balance overview/history behavior, UTC+8 month
+  and daily usage slicing, per-column completeness flags, push-to-read
+  integration over one D1 binding, and the absence of write routes.
 - `bilan-web` jsdom tests: currency labels, partial-history labels, delayed
-  samples, and error visibility in the rendered components.
+  samples, usage timezone/month controls, machine/model/effort rows, daily
+  rows, and partial-counter rendering.
+- `shippers/tests` Python `unittest`: synthetic CLI runs against a local
+  replay-safe ingest mock, including lost ACKs, login redirects, `202`, exact
+  200-only ACKs, backfill, cursor safety, and migration.
 
 ## Local development against one D1 database
 
@@ -66,9 +81,30 @@ pnpm db:migrate:local
 
 Create `workers/ingest/.dev.vars` from
 `workers/ingest/.dev.vars.example` with local-only values. It is gitignored.
-The scheduled handler skips an adapter when its key is absent. Deterministic
-upstream success and failure behavior is covered by the Vitest suite, which
-stubs outbound `fetch` inside the Workers runtime.
+
+`INGEST_PRODUCERS_JSON` is the authoritative mapping from a scoped Bearer token
+to one logical `producer_id`. Generate a token hash (the token itself is never
+stored in the Worker config):
+
+```sh
+python -c "import hashlib; print(hashlib.sha256(b'your-local-token').hexdigest())"
+```
+
+A minimal local producer entry is:
+
+```json
+{
+  "debitmetre-main": {
+    "token_sha256": "<sha256-hex-of-your-local-token>",
+    "display_name": "debitmetre (Codex usage)",
+    "expected_interval_seconds": 3600,
+    "scopes": [{ "source": "codex", "kind": "usage_buckets" }]
+  }
+}
+```
+
+The `.dev.vars.example` file uses the local example token
+`replace-with-local-shipper-token`, whose hash is already filled in.
 
 Run the Workers in separate terminals:
 
@@ -77,21 +113,37 @@ pnpm dev:ingest   # http://127.0.0.1:8787, test scheduled trigger enabled
 pnpm dev:web      # http://127.0.0.1:8788, builds the SPA first
 ```
 
-Trigger the real scheduled entry point:
+Trigger the real scheduled balance pull:
 
 ```sh
 curl "http://127.0.0.1:8787/__scheduled?cron=*/30+*+*+*+*"
 ```
 
+Push synthetic Codex usage through the shipper:
+
+```sh
+printf '%s\n' '{"schema_version":1,"kind":"request","event_id":"e1","timestamp":"2026-11-01T00:15:00Z","machine_id":"machine-a","operation":"response","upstream_status":200,"outcome":"completed","model":"gpt-5","accounting_quality":"complete","metering_error":null,"reasoning_effort":"high","usage":{"input_total":100,"uncached":40,"cache_read":50,"cache_write":10,"output_total":20,"reasoning":5,"total":125}}' > /tmp/usage.jsonl
+
+python shippers/debitmetre.py \
+  --usage-file /tmp/usage.jsonl \
+  --producer-id debitmetre-main \
+  --endpoint http://127.0.0.1:8787/api/v1/ingest \
+  --token replace-with-local-shipper-token
+```
+
 Then open `http://127.0.0.1:8788` or query:
 
 ```sh
-curl "http://127.0.0.1:8788/api/v1/overview"
+curl "http://127.0.0.1:8788/api/v1/overview?tz=Asia%2FShanghai&month=2026-11"
+curl "http://127.0.0.1:8788/api/v1/usage/daily?tz=Asia%2FShanghai&month=2026-11"
 curl "http://127.0.0.1:8788/api/v1/balances/history?provider=openrouter&days=30"
 ```
 
-The write Worker has no HTTP read route; in deployed use it is driven by the
-cron trigger and, in later B2 work, the scoped push endpoint.
+The shipper keeps its durable cursor/outbox next to `usage.jsonl` by default
+(or use `--state-file`). Only an exact HTTP 200 clears an in-flight batch;
+redirects and other 2xx responses leave the identical payload queued for retry.
+Run `--backfill` to replay the whole log without moving the incremental cursor.
+An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
 
 ## Production configuration
 
@@ -103,40 +155,49 @@ cron trigger and, in later B2 work, the scoped push endpoint.
    pnpm --filter bilan-ingest exec wrangler d1 migrations apply bilan --remote
    ```
 
-3. Put `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY` only on `bilan-ingest`:
+3. Put `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, and `INGEST_PRODUCERS_JSON`
+   only on `bilan-ingest`:
 
    ```sh
    pnpm --filter bilan-ingest exec wrangler secret put OPENROUTER_API_KEY
    pnpm --filter bilan-ingest exec wrangler secret put DEEPSEEK_API_KEY
+   pnpm --filter bilan-ingest exec wrangler secret put INGEST_PRODUCERS_JSON
    ```
+
+   Use one scoped producer entry per independently written shard. Keep the same
+   logical `producer_id` when moving a shipper to another host.
 
 4. Before attaching a custom domain to `bilan-web`, create the Cloudflare
    Access self-hosted application for that exact hostname and all paths with a
    restricted Allow policy. Then attach the custom domain. See
    [docs/ACCESS.md](docs/ACCESS.md).
-5. Deploying is outside B1 authority; the commands above are the intended
+5. Deploying is outside B2 authority; the commands above are the intended
    handoff for the operator.
 
-## Data rules enforced by B1
+## Data rules enforced by B2
 
-- `NULL` is not rendered as `0`; absent values say "Not reported".
-- Balances are grouped by provider, account, and currency. Currencies are
-  never summed or plotted on a shared axis.
-- A balance difference is labeled **Net balance change**. DeepSeek balances
-  are balance-only, so a difference is never labeled spend or burn.
-- OpenRouter `cumulative_usage` differences are labeled **Reported usage
-  delta** and flagged as a discontinuity when any consecutive known value
-  decreases inside the selected window, including a reset that still leaves
-  the endpoint delta positive.
-- A 7d/30d delta is marked full only when the current sample is near now and a
-  baseline sample is near the window boundary. Otherwise the API returns
-  `coverage: "partial"` with the actual interval, and the UI labels it
-  "Partial coverage · actual …". A missing baseline is "Incomplete history".
-- History requests return every sampled point in the supported range; there is
-  no silent row cap that can drop a later currency series.
-- Producer heartbeat time is displayed separately from each balance's
-  `sampled_at`. A successful pull updates liveness; historical data does not
-  become fresh because the collector is alive.
-- Pull failures record a bounded, sanitized `last_error` such as
-  `DeepSeek request failed (HTTP 500)`. Response bodies and API keys are never
-  stored.
+- `NULL` is not rendered as `0`; absent values say "Not reported". An explicitly
+  reported zero remains `0`.
+- Balance differences are labeled **Net balance change**. DeepSeek balances are
+  balance-only, so a difference is never labeled spend or burn. OpenRouter
+  `cumulative_usage` differences are labeled **Reported usage delta**.
+- Token columns are never collapsed into one cross-basis total. Each column has
+  its own `*_counted` value; a column is partial when its counted units are fewer
+  than `unit_count`, or when `coverage_gaps > 0`.
+- Usage is stored in UTC hourly buckets and sliced by the selected timezone and
+  calendar month on the read surface. Defaults are `Asia/Shanghai` and the
+  current month in that timezone.
+- `batch_seq` is persisted per logical producer. `batch_seq < last_batch_seq`
+  returns 409 with zero writes; an equal value returns a 200 no-op ACK; a higher
+  value commits usage rows and the producer sequence atomically.
+- A correction at a higher `batch_seq` replaces the complete touched UTC-hour
+  bucket rather than adding a delta.
+- An empty heartbeat updates only producer liveness. Data freshness is derived
+  from `MAX(usage_buckets.bucket_start)` / balance `sampled_at`, so heartbeats
+  and historical backfills never make old data look fresh.
+- Ingest authenticates a hashed scoped Bearer token and resolves `producer_id`
+  from that token, never from the request body. B2 producers are authorized only
+  for `(codex, usage_buckets)`.
+- Producer heartbeat time is displayed separately from data timestamps. Pull
+  failures record a bounded, sanitized `last_error`; response bodies, tokens, and
+  API keys are never stored.

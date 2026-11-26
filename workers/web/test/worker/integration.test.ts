@@ -9,10 +9,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import ingestWorker from "../../../ingest/src/index";
 import type { Env as IngestEnv } from "../../../ingest/src/types";
+import type { UsageBucketInput } from "../../../ingest/src/validate";
 import { app } from "../../src/worker/app";
 import { mockUpstream } from "./mock-upstream";
 import type { UpstreamMock } from "./mock-upstream";
 import { clearDatabase } from "./seed";
+
+const INGEST_TOKEN = "test-debitmetre-token";
+const INGEST_PRODUCERS_JSON = JSON.stringify({
+  "debitmetre-main": {
+    token_sha256: "c6c726663d39185c46966f2075416a8b8348523b809c7e09f1ea984631e98a9b",
+    display_name: "debitmetre (Codex usage)",
+    expected_interval_seconds: 3600,
+    scopes: [{ source: "codex", kind: "usage_buckets" }],
+  },
+});
 
 let upstream: UpstreamMock | null = null;
 
@@ -61,6 +72,70 @@ async function overview(): Promise<OverviewResponse> {
   expect(response.status).toBe(200);
   const body: OverviewResponse = await response.json();
   return body;
+}
+
+async function usageOverview(): Promise<OverviewResponse> {
+  const response = await app.request(
+    "https://bilan-web.example/api/v1/overview?tz=Asia%2FShanghai&month=2026-11",
+    {},
+    env,
+  );
+  expect(response.status).toBe(200);
+  const body: OverviewResponse = await response.json();
+  return body;
+}
+
+async function push(payload: unknown): Promise<void> {
+  const ingestEnv: IngestEnv = {
+    DB: env.DB,
+    INGEST_PRODUCERS_JSON,
+  };
+  const ctx = createExecutionContext();
+  const response = await ingestWorker.fetch(
+    new Request("https://bilan-ingest.example/api/v1/ingest", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INGEST_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+    ingestEnv,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  const responseBody = await response.text();
+  expect(response.status, responseBody).toBe(200);
+}
+
+function usageBucket(overrides: Partial<UsageBucketInput> = {}): UsageBucketInput {
+  return {
+    source: "codex",
+    account: "default",
+    actor_kind: "machine",
+    actor_id: "machine-a",
+    model: "gpt-5",
+    effort: "high",
+    bucket_start: "2026-11-01T00:00:00Z",
+    unit_kind: "request",
+    unit_count: 2,
+    coverage_gaps: 0,
+    input_tokens: 100,
+    input_counted: 2,
+    cached_tokens: 40,
+    cached_counted: 2,
+    uncached_tokens: 60,
+    uncached_counted: 2,
+    cache_write_tokens: 0,
+    cache_write_counted: 2,
+    output_tokens: 20,
+    output_counted: 2,
+    reasoning_tokens: 5,
+    reasoning_counted: 2,
+    accounting_basis: "debitmetre-audit-v1",
+    source_version: "1",
+    ...overrides,
+  };
 }
 
 const DEEPSEEK_SUCCESS = {
@@ -132,5 +207,60 @@ describe("ingest to read integration", () => {
     });
     expect(JSON.stringify(deepSeek)).not.toContain("super-secret");
     expect(JSON.stringify(deepSeek)).not.toContain("test-deepseek-key");
+  });
+});
+
+describe("push usage to read API integration", () => {
+  it("serves pushed Codex buckets with UTC+8 month rows, then keeps data age stable across heartbeat and backfill", async () => {
+    await push({
+      schema_version: 1,
+      batch_seq: 1,
+      usage_buckets: [usageBucket()],
+      quota_observations: [],
+      balance_snapshots: [],
+    });
+
+    const first = await usageOverview();
+    expect(first.usage.rows).toHaveLength(1);
+    expect(first.usage.rows[0]).toMatchObject({
+      actor_id: "machine-a",
+      model: "gpt-5",
+      effort: "high",
+      unit_count: 2,
+      input_tokens: 100,
+      output_tokens: 20,
+      is_partial: false,
+    });
+    expect(first.usage.latest_bucket_start).toBe("2026-11-01T00:00:00Z");
+
+    await push({
+      schema_version: 1,
+      batch_seq: 2,
+      usage_buckets: [],
+      quota_observations: [],
+      balance_snapshots: [],
+    });
+    const afterHeartbeat = await usageOverview();
+    expect(afterHeartbeat.usage.latest_bucket_start).toBe("2026-11-01T00:00:00Z");
+    expect(afterHeartbeat.usage.rows).toEqual(first.usage.rows);
+    const producer = afterHeartbeat.producers.find((row) => row.producer_id === "debitmetre-main");
+    expect(producer).toMatchObject({ last_status: "ok", mode: "push" });
+
+    await push({
+      schema_version: 1,
+      batch_seq: 3,
+      usage_buckets: [
+        usageBucket({
+          bucket_start: "2026-10-01T00:00:00Z",
+          actor_id: "machine-old",
+        }),
+      ],
+      quota_observations: [],
+      balance_snapshots: [],
+    });
+    const afterBackfill = await usageOverview();
+    expect(afterBackfill.usage.latest_bucket_start).toBe("2026-11-01T00:00:00Z");
+    expect(afterBackfill.usage.rows).toHaveLength(1);
+    expect(afterBackfill.usage.rows[0]?.actor_id).toBe("machine-a");
   });
 });

@@ -1,13 +1,26 @@
-import { BALANCE_PROVIDERS, DELTA_WINDOW_DAYS } from "@bilan/shared";
+import {
+  BALANCE_PROVIDERS,
+  DEFAULT_TIMEZONE,
+  DELTA_WINDOW_DAYS,
+  USAGE_TOKEN_COLUMNS,
+  currentMonthInTimeZone,
+  localDateInTimeZone,
+  monthRangeUtc,
+} from "@bilan/shared";
 import type {
   BalanceHistoryResponse,
   BalanceHistorySeries,
   BalanceProvider,
   BalanceView,
   BalanceWindowDelta,
+  DailyUsageRow,
   DeltaWindowDays,
+  MonthlyUsage,
   OverviewResponse,
   ProducerHealth,
+  UsageBreakdownRow,
+  UsageDailyResponse,
+  UsageTokenColumn,
 } from "@bilan/shared";
 
 interface ProducerRow {
@@ -53,6 +66,62 @@ interface HistoryRow {
 
 interface CumulativeUsageRow {
   cumulative_usage: number | null;
+}
+
+interface UsageAggregateRow {
+  source: string;
+  accounting_basis: string;
+  unit_kind: string;
+  actor_kind: string;
+  actor_id: string;
+  model: string;
+  effort: string;
+  unit_count: number;
+  coverage_gaps: number;
+  input_tokens: number | null;
+  input_counted: number;
+  cached_tokens: number | null;
+  cached_counted: number;
+  uncached_tokens: number | null;
+  uncached_counted: number;
+  cache_write_tokens: number | null;
+  cache_write_counted: number;
+  output_tokens: number | null;
+  output_counted: number;
+  reasoning_tokens: number | null;
+  reasoning_counted: number;
+}
+
+interface UsageBucketRow extends UsageAggregateRow {
+  bucket_start: string;
+}
+
+interface LatestUsageRow {
+  latest: string | null;
+}
+
+const USAGE_STALE_AFTER_SECONDS = 2 * 60 * 60;
+
+const TOKEN_COUNTED_COLUMNS = {
+  input_tokens: "input_counted",
+  cached_tokens: "cached_counted",
+  uncached_tokens: "uncached_counted",
+  cache_write_tokens: "cache_write_counted",
+  output_tokens: "output_counted",
+  reasoning_tokens: "reasoning_counted",
+} as const;
+
+function withCompleteness<T extends UsageAggregateRow>(
+  row: T,
+): T & { is_partial: boolean; partial_columns: Array<UsageTokenColumn> } {
+  const partialColumns = USAGE_TOKEN_COLUMNS.filter(
+    (column) => row[TOKEN_COUNTED_COLUMNS[column]] < row.unit_count,
+  );
+  return {
+    ...row,
+    partial_columns: [...partialColumns],
+    is_partial: row.coverage_gaps > 0 || partialColumns.length > 0,
+  };
 }
 
 const DAY_MS = 86_400_000;
@@ -249,14 +318,166 @@ function toProducerHealth(row: ProducerRow, nowMs: number): ProducerHealth {
   };
 }
 
+async function loadMonthlyUsage(
+  db: D1Database,
+  timezone: string,
+  month: string,
+  now: Date,
+): Promise<MonthlyUsage> {
+  const range = monthRangeUtc(month, timezone);
+  const [usage, latest] = await Promise.all([
+    db
+      .prepare(
+        `SELECT source, accounting_basis, unit_kind, actor_kind, actor_id, model, effort,
+                SUM(unit_count) AS unit_count,
+                SUM(coverage_gaps) AS coverage_gaps,
+                SUM(input_tokens) AS input_tokens,
+                SUM(input_counted) AS input_counted,
+                SUM(cached_tokens) AS cached_tokens,
+                SUM(cached_counted) AS cached_counted,
+                SUM(uncached_tokens) AS uncached_tokens,
+                SUM(uncached_counted) AS uncached_counted,
+                SUM(cache_write_tokens) AS cache_write_tokens,
+                SUM(cache_write_counted) AS cache_write_counted,
+                SUM(output_tokens) AS output_tokens,
+                SUM(output_counted) AS output_counted,
+                SUM(reasoning_tokens) AS reasoning_tokens,
+                SUM(reasoning_counted) AS reasoning_counted
+         FROM usage_buckets
+         WHERE bucket_start >= ? AND bucket_start < ?
+         GROUP BY source, accounting_basis, unit_kind, actor_kind, actor_id, model, effort
+         ORDER BY source, actor_kind, actor_id, model, effort, accounting_basis, unit_kind`,
+      )
+      .bind(range.start, range.end)
+      .all<UsageAggregateRow>(),
+    db.prepare("SELECT MAX(bucket_start) AS latest FROM usage_buckets").first<LatestUsageRow>(),
+  ]);
+
+  const rows: Array<UsageBreakdownRow> = usage.results.map((row) => withCompleteness(row));
+  const latestBucketStart = latest?.latest ?? null;
+  const dataAge = latestBucketStart === null ? null : ageSeconds(now.getTime(), latestBucketStart);
+
+  return {
+    timezone,
+    month,
+    latest_bucket_start: latestBucketStart,
+    data_age_seconds: dataAge,
+    is_stale: dataAge === null || dataAge > USAGE_STALE_AFTER_SECONDS,
+    rows,
+  };
+}
+
+async function loadDailyUsage(
+  db: D1Database,
+  timezone: string,
+  month: string,
+): Promise<Array<DailyUsageRow>> {
+  const range = monthRangeUtc(month, timezone);
+  const result = await db
+    .prepare(
+      `SELECT bucket_start, source, accounting_basis, unit_kind, actor_kind, actor_id,
+              model, effort, unit_count, coverage_gaps,
+              input_tokens, input_counted, cached_tokens, cached_counted,
+              uncached_tokens, uncached_counted, cache_write_tokens, cache_write_counted,
+              output_tokens, output_counted, reasoning_tokens, reasoning_counted
+       FROM usage_buckets
+       WHERE bucket_start >= ? AND bucket_start < ?
+       ORDER BY bucket_start, source, accounting_basis, unit_kind`,
+    )
+    .bind(range.start, range.end)
+    .all<UsageBucketRow>();
+
+  const accumulators = new Map<string, UsageAggregateRow & { date: string }>();
+  for (const bucket of result.results) {
+    const date = localDateInTimeZone(bucket.bucket_start, timezone);
+    const key = `${bucket.source}\u0000${bucket.accounting_basis}\u0000${bucket.unit_kind}\u0000${date}`;
+    let accumulator = accumulators.get(key);
+    if (!accumulator) {
+      accumulator = {
+        source: bucket.source,
+        accounting_basis: bucket.accounting_basis,
+        unit_kind: bucket.unit_kind,
+        actor_kind: "",
+        actor_id: "",
+        model: "",
+        effort: "",
+        unit_count: 0,
+        coverage_gaps: 0,
+        input_tokens: null,
+        input_counted: 0,
+        cached_tokens: null,
+        cached_counted: 0,
+        uncached_tokens: null,
+        uncached_counted: 0,
+        cache_write_tokens: null,
+        cache_write_counted: 0,
+        output_tokens: null,
+        output_counted: 0,
+        reasoning_tokens: null,
+        reasoning_counted: 0,
+        date,
+      };
+      accumulators.set(key, accumulator);
+    }
+
+    accumulator.unit_count += bucket.unit_count;
+    accumulator.coverage_gaps += bucket.coverage_gaps;
+    for (const column of USAGE_TOKEN_COLUMNS) {
+      const countedKey = TOKEN_COUNTED_COLUMNS[column];
+      const value = bucket[column];
+      if (value !== null) {
+        accumulator[column] = (accumulator[column] ?? 0) + value;
+      }
+      accumulator[countedKey] += bucket[countedKey];
+    }
+  }
+
+  return [...accumulators.values()]
+    .map((row) => withCompleteness(row))
+    .map((row) => ({
+      source: row.source,
+      accounting_basis: row.accounting_basis,
+      unit_kind: row.unit_kind,
+      date: row.date,
+      unit_count: row.unit_count,
+      coverage_gaps: row.coverage_gaps,
+      input_tokens: row.input_tokens,
+      input_counted: row.input_counted,
+      cached_tokens: row.cached_tokens,
+      cached_counted: row.cached_counted,
+      uncached_tokens: row.uncached_tokens,
+      uncached_counted: row.uncached_counted,
+      cache_write_tokens: row.cache_write_tokens,
+      cache_write_counted: row.cache_write_counted,
+      output_tokens: row.output_tokens,
+      output_counted: row.output_counted,
+      reasoning_tokens: row.reasoning_tokens,
+      reasoning_counted: row.reasoning_counted,
+      is_partial: row.is_partial,
+      partial_columns: row.partial_columns,
+    }))
+    .sort(
+      (left, right) =>
+        left.date.localeCompare(right.date) ||
+        left.source.localeCompare(right.source) ||
+        left.accounting_basis.localeCompare(right.accounting_basis) ||
+        left.unit_kind.localeCompare(right.unit_kind),
+    );
+}
+
 export async function getOverview(
   db: D1Database,
   now: Date = new Date(),
+  usageQuery: { timezone: string; month: string } = {
+    timezone: DEFAULT_TIMEZONE,
+    month: currentMonthInTimeZone(now, DEFAULT_TIMEZONE),
+  },
 ): Promise<OverviewResponse> {
   const nowMs = now.getTime();
-  const [producerRows, latestBalances] = await Promise.all([
+  const [producerRows, latestBalances, usage] = await Promise.all([
     loadProducers(db),
     loadLatestBalances(db),
+    loadMonthlyUsage(db, usageQuery.timezone, usageQuery.month, now),
   ]);
   const producerIntervals = new Map(
     producerRows.map((row) => [row.producer_id, row.expected_interval_seconds]),
@@ -302,6 +523,18 @@ export async function getOverview(
     generated_at: now.toISOString(),
     producers: producerRows.map((row) => toProducerHealth(row, nowMs)),
     balances,
+    usage,
+  };
+}
+
+export async function getUsageDaily(
+  db: D1Database,
+  options: { timezone: string; month: string },
+): Promise<UsageDailyResponse> {
+  return {
+    timezone: options.timezone,
+    month: options.month,
+    rows: await loadDailyUsage(db, options.timezone, options.month),
   };
 }
 
