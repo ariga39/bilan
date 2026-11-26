@@ -279,6 +279,37 @@ def _read_appended_records(usage_path: str, cursor: int) -> tuple[list[dict[str,
     return records, cursor + len(complete)
 
 
+def _read_records_to_extent(usage_path: str, extent: int) -> list[dict[str, Any]]:
+    """Read canonical records from the complete-line source extent only."""
+
+    size = os.path.getsize(usage_path)
+    if extent > size:
+        raise ShipperError(
+            "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+        )
+    remaining = extent
+    buffer = b""
+    records: list[dict[str, Any]] = []
+    with open(usage_path, "rb") as handle:
+        while remaining > 0:
+            chunk = handle.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise ShipperError(
+                    "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+                )
+            remaining -= len(chunk)
+            buffer += chunk
+            while True:
+                newline = buffer.find(b"\n")
+                if newline < 0:
+                    break
+                raw, buffer = buffer[:newline], buffer[newline + 1 :]
+                record = _canonical_record(raw)
+                if record is not None:
+                    records.append(record)
+    return records
+
+
 def _default_state_path(usage_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(usage_path)), ".bilan-debitmetre-state.json")
 
@@ -290,22 +321,27 @@ def _require_usage_log(usage_path: str) -> None:
         raise ShipperError("usage log path is not a file")
 
 
-SOURCE_FINGERPRINT_BYTES = 64 * 1024
+_FINGERPRINT_CACHE: Dict[tuple[str, int], tuple[tuple[int, int], str]] = {}
 
 
-def _fingerprint_start(cursor: int) -> int:
-    return max(0, cursor - SOURCE_FINGERPRINT_BYTES)
+def _fingerprint_extent(usage_path: str, extent: int) -> str:
+    stat_before = os.stat(usage_path)
+    if extent > stat_before.st_size:
+        raise ShipperError(
+            "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+        )
+    key = (usage_path, extent)
+    signature = (stat_before.st_size, stat_before.st_mtime_ns)
+    cached = _FINGERPRINT_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
 
-
-def _fingerprint_window(usage_path: str, cursor: int) -> tuple[str, int]:
-    start = _fingerprint_start(cursor)
-    remaining = cursor - start
     digest = hashlib.sha256()
+    remaining = extent
     try:
         with open(usage_path, "rb") as handle:
-            handle.seek(start)
             while remaining > 0:
-                chunk = handle.read(min(64 * 1024, remaining))
+                chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk:
                     raise ShipperError(
                         "usage log is shorter than the saved cursor; restore the complete source log before retrying"
@@ -316,41 +352,47 @@ def _fingerprint_window(usage_path: str, cursor: int) -> tuple[str, int]:
         raise ShipperError(
             "usage log not found; restore the complete source log before retrying"
         ) from exc
-    return digest.hexdigest(), cursor - start
+
+    value = digest.hexdigest()
+    stat_after = os.stat(usage_path)
+    if (stat_after.st_size, stat_after.st_mtime_ns) == signature:
+        _FINGERPRINT_CACHE[key] = (signature, value)
+    return value
 
 
 def _valid_checkpoint(checkpoint: Any) -> bool:
     if not isinstance(checkpoint, dict):
         return False
     cursor = checkpoint.get("cursor")
-    window_bytes = checkpoint.get("window_bytes")
     digest = checkpoint.get("digest")
     return (
-        not isinstance(cursor, bool)
+        checkpoint.get("scope") == "full"
+        and not isinstance(cursor, bool)
         and isinstance(cursor, int)
         and cursor >= 0
-        and not isinstance(window_bytes, bool)
-        and isinstance(window_bytes, int)
-        and window_bytes == cursor - _fingerprint_start(cursor)
         and isinstance(digest, str)
         and len(digest) == 64
     )
 
 
-def _source_checkpoint(usage_path: str, cursor: int) -> Dict[str, Any]:
-    digest, window_bytes = _fingerprint_window(usage_path, cursor)
-    return {"cursor": cursor, "window_bytes": window_bytes, "digest": digest}
+def _legacy_checkpoint(checkpoint: Any) -> bool:
+    return (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("scope") is None
+        and "window_bytes" in checkpoint
+        and isinstance(checkpoint.get("cursor"), int)
+        and isinstance(checkpoint.get("digest"), str)
+    )
+
+
+def _source_checkpoint(usage_path: str, extent: int) -> Dict[str, Any]:
+    return {"cursor": extent, "scope": "full", "digest": _fingerprint_extent(usage_path, extent)}
 
 
 def _verify_checkpoint(usage_path: str, checkpoint: Dict[str, Any], extent: int) -> None:
     if not _valid_checkpoint(checkpoint) or checkpoint.get("cursor") != extent:
         raise ShipperError("invalid source checkpoint in shipper state")
-    size = os.path.getsize(usage_path)
-    if extent > size:
-        raise ShipperError(
-            "usage log is shorter than the saved cursor; restore the complete source log before retrying"
-        )
-    actual_digest, _ = _fingerprint_window(usage_path, extent)
+    actual_digest = _fingerprint_extent(usage_path, extent)
     if actual_digest != checkpoint["digest"]:
         raise ShipperError(
             "usage log no longer matches the saved cursor; it may have been truncated or replaced. "
@@ -391,6 +433,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "cursor": 0,
             "source_extent": 0,
             "pending": None,
+            "backfill": None,
             "source_checkpoint": None,
         }
     if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
@@ -408,13 +451,23 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         raise ShipperError("invalid cursor in shipper state")
 
     checkpoint = raw.get("source_checkpoint")
-    if checkpoint is not None and not _valid_checkpoint(checkpoint):
+    legacy_checkpoint = checkpoint if _legacy_checkpoint(checkpoint) else None
+    if checkpoint is not None and not _valid_checkpoint(checkpoint) and legacy_checkpoint is None:
         raise ShipperError("invalid source checkpoint in shipper state")
+    if legacy_checkpoint is not None:
+        # Pre-full-hash state files carry only the final 64 KiB window. Drop it
+        # and let the next successful save establish a full-extent checkpoint.
+        raw["source_checkpoint"] = None
+        checkpoint = None
+
     source_extent = raw.get("source_extent")
     if source_extent is None:
-        source_extent = (
-            checkpoint["cursor"] if isinstance(checkpoint, dict) else cursor
-        )
+        if isinstance(checkpoint, dict):
+            source_extent = checkpoint["cursor"]
+        elif legacy_checkpoint is not None:
+            source_extent = legacy_checkpoint["cursor"]
+        else:
+            source_extent = cursor
         raw["source_extent"] = source_extent
     if (
         isinstance(source_extent, bool)
@@ -452,11 +505,45 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         ):
             raise ShipperError("invalid pending source extent in shipper state")
         pending_checkpoint = pending.get("source_checkpoint")
-        if pending_checkpoint is not None and (
+        if _legacy_checkpoint(pending_checkpoint):
+            pending["source_checkpoint"] = None
+            pending_checkpoint = None
+        elif pending_checkpoint is not None and (
             not _valid_checkpoint(pending_checkpoint)
             or pending_checkpoint.get("cursor") != pending_extent
         ):
             raise ShipperError("invalid pending source checkpoint in shipper state")
+        backfill_index = pending.get("backfill_index")
+        if backfill_index is not None and (
+            isinstance(backfill_index, bool)
+            or not isinstance(backfill_index, int)
+            or backfill_index < 0
+        ):
+            raise ShipperError("invalid pending backfill index in shipper state")
+
+    backfill = raw.get("backfill")
+    if backfill is not None:
+        if not isinstance(backfill, dict):
+            raise ShipperError("invalid backfill state in shipper state")
+        backfill_extent = backfill.get("source_extent")
+        next_batch = backfill.get("next_batch")
+        total_batches = backfill.get("total_batches")
+        if (
+            isinstance(backfill_extent, bool)
+            or not isinstance(backfill_extent, int)
+            or backfill_extent != source_extent
+            or isinstance(next_batch, bool)
+            or not isinstance(next_batch, int)
+            or next_batch < 0
+            or isinstance(total_batches, bool)
+            or not isinstance(total_batches, int)
+            or total_batches < 1
+            or next_batch > total_batches
+        ):
+            raise ShipperError("invalid backfill state in shipper state")
+        pending_index = pending.get("backfill_index") if isinstance(pending, dict) else None
+        if pending_index is not None and pending_index >= total_batches:
+            raise ShipperError("invalid pending backfill index in shipper state")
     return raw
 
 
@@ -468,6 +555,87 @@ def _save_state(state_path: str, state: Dict[str, Any], usage_path: str) -> None
     else:
         _verify_checkpoint(usage_path, checkpoint, extent)
     atomic_write_json(state_path, state)
+
+
+def _backfill_batches(usage_path: str, state: Dict[str, Any]) -> list[list[dict[str, Any]]]:
+    extent = state["source_extent"]
+    checkpoint = state["source_checkpoint"]
+    if checkpoint is None:
+        checkpoint = _source_checkpoint(usage_path, extent)
+        state["source_checkpoint"] = checkpoint
+    _verify_checkpoint(usage_path, checkpoint, extent)
+    return split_payload_rows(aggregate_records(_read_records_to_extent(usage_path, extent)))
+
+
+def _run_backfill(
+    endpoint: str,
+    token: str,
+    state_path: str,
+    usage_path: str,
+    state: Dict[str, Any],
+    timeout: float,
+    quiet: bool,
+    batches: Optional[list[list[dict[str, Any]]]] = None,
+) -> bool:
+    backfill = state.get("backfill")
+    if not isinstance(backfill, dict):
+        return True
+    if backfill["source_extent"] != state["source_extent"]:
+        raise ShipperError("backfill source extent does not match the shipper state")
+    if backfill["next_batch"] >= backfill["total_batches"]:
+        state["backfill"] = None
+        _save_state(state_path, state, usage_path)
+        return True
+
+    if batches is None:
+        batches = _backfill_batches(usage_path, state)
+    if len(batches) != backfill["total_batches"]:
+        raise ShipperError(
+            "backfill source extent changed; restore the complete source log before retrying"
+        )
+    checkpoint = state["source_checkpoint"]
+
+    for index in range(backfill["next_batch"], len(batches)):
+        batch = batches[index]
+        sequence = state["batch_seq"] + 1
+        if sequence > MAX_BATCH_SEQ:
+            raise ShipperError("batch_seq exceeded the supported integer range")
+        pending = {
+            "batch_seq": sequence,
+            "payload": envelope(sequence, batch),
+            "cursor_after": state["cursor"],
+            "source_extent": state["source_extent"],
+            "source_checkpoint": checkpoint,
+            "backfill_index": index,
+            "created_at": utc_now_iso(),
+        }
+        state["pending"] = pending
+        _save_state(state_path, state, usage_path)
+        _verify_checkpoint(usage_path, checkpoint, state["source_extent"])
+
+        try:
+            _send_once(endpoint, token, pending["payload"], timeout)
+        except HTTPPushError as exc:
+            print(
+                "debitmetre-shipper: backfill batch_seq %d (chunk %d/%d) not acknowledged: %s"
+                % (sequence, index + 1, backfill["total_batches"], exc),
+                file=sys.stderr,
+            )
+            return False
+
+        _verify_checkpoint(usage_path, checkpoint, state["source_extent"])
+        state["batch_seq"] = sequence
+        state["pending"] = None
+        backfill["next_batch"] = index + 1
+        if backfill["next_batch"] >= backfill["total_batches"]:
+            state["backfill"] = None
+        _save_state(state_path, state, usage_path)
+        if not quiet:
+            print(
+                "debitmetre-shipper: sent %d usage bucket(s) as backfill batch_seq %d (chunk %d/%d)"
+                % (len(batch), sequence, index + 1, backfill["total_batches"])
+            )
+    return True
 
 
 def _send_once(endpoint: str, token: str, payload: Dict[str, Any], timeout: float) -> None:
@@ -511,6 +679,14 @@ def _send_pending(
     state["cursor"] = pending["cursor_after"]
     state["source_extent"] = pending_extent
     state["source_checkpoint"] = pending_checkpoint
+    backfill_index = pending.get("backfill_index")
+    if backfill_index is not None:
+        backfill = state.get("backfill")
+        if not isinstance(backfill, dict) or backfill.get("source_extent") != pending_extent:
+            raise ShipperError("pending backfill metadata does not match the shipper state")
+        backfill["next_batch"] = max(backfill["next_batch"], backfill_index + 1)
+        if backfill["next_batch"] >= backfill["total_batches"]:
+            state["backfill"] = None
     state["pending"] = None
     _save_state(state_path, state, usage_path)
     if not quiet:
@@ -595,8 +771,10 @@ def run_once(
     quiet: bool = False,
 ) -> bool:
     _require_usage_log(usage_path)
+    _FINGERPRINT_CACHE.clear()
     state = _load_state(state_path, producer_id)
     _verify_source_checkpoint(usage_path, state)
+    had_backfill = state.get("backfill") is not None
 
     pending_acked = False
     if state["pending"] is not None:
@@ -604,18 +782,8 @@ def run_once(
             return False
         pending_acked = True
 
-    if backfill:
-        records, source_extent = _read_appended_records(usage_path, 0)
-        rows = aggregate_records(records)
-        if not rows:
-            print("debitmetre-shipper: backfill found no canonical usage records", file=sys.stderr)
-            return True
-        # Backfill replays the whole file; it never moves the incremental cursor,
-        # but it does checkpoint the complete source extent it aggregated.
-        return _send_rows(
-            rows,
-            state["cursor"],
-            source_extent,
+    if state.get("backfill") is not None:
+        return _run_backfill(
             endpoint,
             token,
             state_path,
@@ -623,6 +791,41 @@ def run_once(
             state,
             timeout,
             quiet,
+        )
+    if had_backfill:
+        # The retried pending batch completed the durable backfill operation.
+        return True
+
+    if backfill:
+        records, source_extent = _read_appended_records(usage_path, 0)
+        rows = aggregate_records(records)
+        if not rows:
+            print("debitmetre-shipper: backfill found no canonical usage records", file=sys.stderr)
+            return True
+        if source_extent < state["source_extent"]:
+            raise ShipperError(
+                "usage log is shorter than the saved cursor; restore the complete source log before retrying"
+            )
+        state["source_extent"] = source_extent
+        state["source_checkpoint"] = _source_checkpoint(usage_path, source_extent)
+        batches = split_payload_rows(rows)
+        state["backfill"] = {
+            "source_extent": source_extent,
+            "next_batch": 0,
+            "total_batches": len(batches),
+        }
+        _save_state(state_path, state, usage_path)
+        # A backfill operation is durable: normal periodic runs resume it until
+        # every chunk of this stable source extent has been acknowledged.
+        return _run_backfill(
+            endpoint,
+            token,
+            state_path,
+            usage_path,
+            state,
+            timeout,
+            quiet,
+            batches=batches,
         )
 
     records, next_cursor = _read_appended_records(usage_path, state["cursor"])

@@ -75,8 +75,9 @@ python -m unittest discover -s shippers/tests -v
 ```
 
 The Python suite covers synthetic CLI runs against a local replay-safe ingest
-mock, including missing/empty logs, truncation/replacement recovery, pending
-suffix continuity, backfill-first extents, lost ACKs, login redirects, `202`,
+mock, including missing/empty logs, full-extent continuity, truncation and
+same-size replacement, pending suffix continuity, interrupted multi-chunk
+backfill resume, backfill-first extents, lost ACKs, login redirects, `202`,
 exact 200-only ACKs, cursor safety, and migration.
 
 ## Local development against one D1 database
@@ -154,14 +155,20 @@ redirects and other 2xx responses leave the identical payload queued for retry.
 Run `--backfill` to replay the whole log without moving the incremental cursor.
 An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
 A missing log path fails closed before any heartbeat, while a real existing empty
-log remains idle and may heartbeat normally. The shipper checkpoints the source
-extent it has consumed or aggregated. If that prefix is shorter or no longer
-matches, it fails closed before pending retry, heartbeat, or backfill and leaves
-the cursor/state unchanged. The same checkpoint is stored with every in-flight
-batch, so an unacknowledged suffix cannot be replaced or regrown before retry.
+log remains idle and may heartbeat normally. The shipper verifies a full
+streaming checkpoint over the source extent it has consumed or aggregated. If
+that extent is shorter or no longer matches, it fails closed before pending
+retry, heartbeat, or backfill and leaves the cursor/state unchanged. The same
+checkpoint is stored with every in-flight batch, so an unacknowledged suffix
+cannot be replaced or regrown before retry.
+
 A backfill-first run checkpoints the extent it aggregated even though the
-incremental cursor remains `0`. Restore the complete source log before retrying;
-never truncate or replace it with a partial file.
+incremental cursor remains `0`, and records durable per-chunk progress. If a
+backfill is interrupted, the next normal periodic run retries any in-flight
+chunk and continues the remaining chunks of that same stable extent; records
+appended later are left for normal incremental processing. Restore the complete
+source log before retrying a failed continuity check; never truncate or replace
+it with a partial file.
 
 ### Migrating a shipper to another host
 

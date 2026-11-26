@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
@@ -69,6 +70,21 @@ def audit_record(
     }
 
 
+def hourly_records(
+    count: int,
+    start: datetime,
+    *,
+    machine_id: str = "machine-a",
+) -> list[dict[str, Any]]:
+    return [
+        audit_record(
+            (start + timedelta(hours=index)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            machine_id=machine_id,
+        )
+        for index in range(count)
+    ]
+
+
 class _IngestState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -80,6 +96,7 @@ class _IngestState:
         self.duplicates = 0
         self.conflicts = 0
         self.drop_next_response = False
+        self.drop_response_at: Optional[int] = None
         self.fail_next_status: Optional[int] = None
         self.fail_next_location: Optional[str] = None
 
@@ -135,6 +152,9 @@ class _IngestState:
             drop = self.drop_next_response
             if drop:
                 self.drop_next_response = False
+            if self.drop_response_at == len(self.requests) + 1:
+                drop = True
+                self.drop_response_at = None
             self.requests.append(
                 {
                     "body": body,
@@ -751,6 +771,90 @@ class DebitmetreShipperTests(unittest.TestCase):
         payload = self.ingest.snapshot_requests()[-1]["payload"]
         self.assertEqual(payload["batch_seq"], 2)
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+
+    def test_interrupted_backfill_resumes_remaining_chunks_on_normal_run(self) -> None:
+        start = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)
+        first = audit_record("2026-01-01T00:05:00Z", machine_id="machine-a")
+        first_size = self.write_records([first])
+        self.assert_ok(self.run_cli())
+        preexisting_cursor = self.read_state()["cursor"]
+        self.assertEqual(preexisting_cursor, first_size)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 1)
+
+        backfill_records = hourly_records(1001, start + timedelta(hours=1))
+        self.write_records([first, *backfill_records])
+        source_extent = os.path.getsize(self.usage_path)
+        self.ingest.drop_response_at = 3  # normal #1, backfill chunk 1 #2, chunk 2 #3
+
+        interrupted = self.run_cli(extra=["--backfill"])
+        self.assertNotEqual(interrupted.returncode, 0)
+        state = self.read_state()
+        self.assertEqual(state["cursor"], preexisting_cursor)
+        self.assertEqual(state["source_extent"], source_extent)
+        self.assertIsNotNone(state["pending"])
+        self.assertEqual(state["pending"]["backfill_index"], 1)
+        self.assertEqual(state["backfill"]["next_batch"], 1)
+        self.assertEqual(state["backfill"]["total_batches"], 3)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 3)
+
+        # Appending beyond the stable backfill extent must not enter this
+        # operation or advance the incremental cursor.
+        after = audit_record("2026-03-15T12:05:00Z", machine_id="machine-after")
+        self.write_records([after], append=True)
+        resumed = self.run_cli()
+        self.assert_ok(resumed)
+        state = self.read_state()
+        self.assertIsNone(state["pending"])
+        self.assertIsNone(state["backfill"])
+        self.assertEqual(state["cursor"], preexisting_cursor)
+        self.assertEqual(state["source_extent"], source_extent)
+        self.assertEqual(state["batch_seq"], 4)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 5)
+        self.assertEqual(len(self.ingest.snapshot_rows()), 1002)
+        self.assertFalse(
+            any(row["actor_id"] == "machine-after" for row in self.ingest.snapshot_rows().values())
+        )
+
+        # The next normal run processes the appended record from the unchanged
+        # cursor, proving the durable backfill did not skip it.
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertEqual(state["cursor"], os.path.getsize(self.usage_path))
+        self.assertEqual(state["source_extent"], state["cursor"])
+        self.assertEqual(len(self.ingest.snapshot_rows()), 1003)
+        self.assertTrue(
+            any(row["actor_id"] == "machine-after" for row in self.ingest.snapshot_rows().values())
+        )
+
+    def test_full_extent_checkpoint_detects_rewrite_beyond_old_window(self) -> None:
+        records = hourly_records(1000, datetime(2026, 1, 1, tzinfo=timezone.utc))
+        size = self.write_records(records)
+        self.assertGreater(size, 128 * 1024)
+        self.assert_ok(self.run_cli())
+        requests_before = len(self.ingest.snapshot_requests())
+        cursor = self.read_state()["cursor"]
+        self.assertEqual(cursor, size)
+
+        offset = 1000
+        self.assertGreater(size - offset, 64 * 1024)
+        with open(self.usage_path, "rb") as handle:
+            original = handle.read()
+        mutated = bytearray(original)
+        mutated[offset] = ord("Z") if mutated[offset] != ord("Z") else ord("Y")
+        with open(self.usage_path, "wb") as handle:
+            handle.write(mutated)
+        self.assertEqual(os.path.getsize(self.usage_path), size)
+
+        rewritten = self.run_cli()
+        self.assertNotEqual(rewritten.returncode, 0)
+        self.assertIn("restore the complete source log", rewritten.stderr.lower())
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
+        self.assertEqual(self.read_state()["cursor"], cursor)
+
+        with open(self.usage_path, "wb") as handle:
+            handle.write(original)
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.read_state()["cursor"], cursor)
 
     def test_truncated_source_fails_closed_and_recovers_after_restore(self) -> None:
         records = [
