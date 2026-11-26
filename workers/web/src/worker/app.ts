@@ -7,6 +7,7 @@ import {
 import { Hono } from "hono";
 
 import { getBalanceHistory, getOverview, getUsageDaily, isBalanceProvider } from "./queries";
+import { quotaRoutes } from "./quota";
 import type { Env } from "./types";
 
 export const app = new Hono<{ Bindings: Env }>();
@@ -70,6 +71,8 @@ app.get("/api/v1/balances/history", async (context) => {
   context.header("cache-control", "no-store");
   return context.json(history);
 });
+
+app.route("/", quotaRoutes);
 
 app.get("/api/*", (context) => context.json({ error: "not_found" }, 404));
 
