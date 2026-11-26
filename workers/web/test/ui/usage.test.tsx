@@ -1,5 +1,5 @@
 import type { MonthlyUsage, UsageDailyResponse } from "@bilan/shared";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UsageSection } from "@/components/usage-section";
@@ -14,6 +14,20 @@ const usage: MonthlyUsage = {
   latest_bucket_start: "2026-11-02T00:00:00Z",
   data_age_seconds: 120,
   is_stale: false,
+  source_freshness: [
+    {
+      source: "codex",
+      latest_bucket_start: "2026-11-02T00:00:00Z",
+      data_age_seconds: 120,
+      is_stale: false,
+    },
+    {
+      source: "opencode",
+      latest_bucket_start: "2026-11-01T18:00:00Z",
+      data_age_seconds: 21_600,
+      is_stale: true,
+    },
+  ],
   rows: [
     {
       source: "codex",
@@ -200,6 +214,10 @@ describe("Token usage dashboard section", () => {
     expect(screen.getAllByText("Machine").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Identity").length).toBeGreaterThan(0);
     expect(screen.getAllByText("OpenCode Go").length).toBeGreaterThan(0);
+    expect(within(screen.getByLabelText("Codex freshness")).queryByText("Delayed")).toBeNull();
+    expect(
+      within(screen.getByLabelText("OpenCode Go freshness")).getByText("Delayed"),
+    ).toBeTruthy();
 
     // NULL stays absent; an explicitly reported zero is shown as 0.
     expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
@@ -272,7 +290,13 @@ describe("Token usage dashboard section", () => {
   it("shows an explicit empty state without inventing token totals", () => {
     render(
       <UsageSection
-        usage={{ ...usage, rows: [], latest_bucket_start: null, data_age_seconds: null }}
+        usage={{
+          ...usage,
+          rows: [],
+          latest_bucket_start: null,
+          data_age_seconds: null,
+          source_freshness: [],
+        }}
         daily={{ ...daily, rows: [] }}
         timezone="UTC"
         month="2026-11"

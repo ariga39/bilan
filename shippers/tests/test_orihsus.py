@@ -817,6 +817,40 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(len(self.ingest.snapshot_requests()), 2)
         self.assertEqual(self.read_state()["batch_seq"], 2)
 
+    def test_duplicate_equivalent_usage_lines_are_deduplicated_before_split(self) -> None:
+        base = datetime(2026, 11, 26, 0, 0, 0)
+        unique = [
+            usage_record(
+                (base + timedelta(seconds=index)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                key_fingerprint="fp_%03d" % index,
+                rolling=window(percent=10.0),
+                weekly=window(percent=20.0),
+                monthly=window(percent=30.0),
+            )
+            for index in range(125)
+        ]
+        # 125 unique observations fill exactly 500 rows. Duplicate poll lines
+        # must be removed before splitting so the batch stays one request and
+        # never carries duplicate sample_ids.
+        path = self.write_usage(
+            "2026-11-26",
+            [unique[0], unique[0], unique[1], unique[1], *unique[2:]],
+        )
+
+        self.assert_ok(self.run_cli())
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 1)
+        observations = requests[0]["payload"]["quota_observations"]
+        self.assertEqual(len(observations), 125)
+        self.assertEqual(len({item["sample_id"] for item in observations}), 125)
+        self.assertEqual(self.ingest.snapshot_requests()[0]["payload"]["batch_seq"], 1)
+        self.assertEqual(self.read_state()["usage_cursors"]["2026-11-26"], os.path.getsize(path))
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(len(self.ingest.snapshot_requests()), 2)
+        self.assertEqual(self.ingest.snapshot_requests()[1]["payload"]["quota_observations"], [])
+        self.assertEqual(len(self.ingest.snapshot_observations()), 125)
+
     def test_unfinished_trailing_usage_line_is_not_consumed_until_complete(self) -> None:
         first = usage_record(
             "2026-11-26T11:05:00.000Z",

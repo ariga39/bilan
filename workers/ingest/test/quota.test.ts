@@ -510,7 +510,7 @@ describe("POST /api/v1/ingest quota observations", () => {
       sampled_at: "2026-11-26T14:35:00Z",
       status: "error",
       time_anomaly: "clock_skew",
-      error_summary: "upstream HTTP 500",
+      error_summary: "http_error",
       windows: [],
     });
 
@@ -527,9 +527,59 @@ describe("POST /api/v1/ingest quota observations", () => {
     expect(stored.find((row) => row.sample_id === failed.sample_id)).toMatchObject({
       status: "error",
       time_anomaly: "clock_skew",
-      error_summary: "upstream HTTP 500",
+      error_summary: "http_error",
     });
     expect(await windows()).toEqual([]);
+  });
+
+  it("stores only safe bounded error categories instead of arbitrary upstream text", async () => {
+    const sentinel = "synthetic-secret-sentinel-must-not-persist";
+    const result = await post(
+      envelope(1, {
+        observations: [
+          quotaObservation({
+            sample_id: "opencode:fp_error:2026-11-26T14:30:00Z:error",
+            account: "fp_error",
+            status: "error",
+            error_summary: sentinel,
+            windows: [],
+          }),
+          quotaObservation({
+            sample_id: "opencode:fp_timeout:2026-11-26T14:31:00Z:timeout",
+            account: "fp_timeout",
+            sampled_at: "2026-11-26T14:31:00Z",
+            status: "error",
+            error_summary: "timeout",
+            windows: [],
+          }),
+          quotaObservation({
+            sample_id: "opencode:fp_empty:2026-11-26T14:32:00Z:empty",
+            account: "fp_empty",
+            sampled_at: "2026-11-26T14:32:00Z",
+            status: "empty",
+            error_summary: sentinel,
+            windows: [],
+          }),
+        ],
+      }),
+    );
+
+    expect(result.status).toBe(200);
+    const stored = await observations();
+    const byAccount = new Map(stored.map((row) => [row.account, row]));
+    expect(byAccount.get("fp_error")).toMatchObject({
+      status: "error",
+      error_summary: "upstream_error",
+    });
+    expect(byAccount.get("fp_timeout")).toMatchObject({
+      status: "error",
+      error_summary: "timeout",
+    });
+    expect(byAccount.get("fp_empty")).toMatchObject({
+      status: "empty",
+      error_summary: null,
+    });
+    expect(JSON.stringify(stored)).not.toContain(sentinel);
   });
 
   it("rejects quota pushes outside the producer's explicit scopes", async () => {

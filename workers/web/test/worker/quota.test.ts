@@ -1,12 +1,23 @@
 import type { QuotaResponse } from "@bilan/shared";
-import { env } from "cloudflare:test";
+import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import ingestWorker from "../../../ingest/src/index";
+import type { Env as IngestEnv } from "../../../ingest/src/types";
 import { app } from "../../src/worker/app";
 import { getQuotaOverview } from "../../src/worker/quota";
 import { clearDatabase, seedUsageBucket } from "./seed";
 
 const NOW = new Date("2026-11-27T12:00:00Z");
+const ORIHSUS_TOKEN = "test-orihsus-token";
+const QUOTA_PRODUCERS_JSON = JSON.stringify({
+  "orihsus-main": {
+    token_sha256: "174b251f753833d225882771a1488413ea9170f1db266b60491772948b7bccdd",
+    display_name: "orihsus (OpenCode Go)",
+    expected_interval_seconds: 1800,
+    scopes: [{ source: "opencode", kind: "quota_observations" }],
+  },
+});
 
 interface SeedWindow {
   bucketId?: string;
@@ -214,7 +225,7 @@ describe("B3 quota read query", () => {
       account: "fp_error",
       sampledAt: "2026-11-27T11:55:00Z",
       status: "error",
-      errorSummary: "upstream HTTP 500",
+      errorSummary: "http_error",
     });
     await seedObservation({
       sampleId: "fp_empty-empty",
@@ -243,7 +254,7 @@ describe("B3 quota read query", () => {
     expect(failed?.latest_attempt).toMatchObject({
       sample_id: "fp_error-failed",
       status: "error",
-      error_summary: "upstream HTTP 500",
+      error_summary: "http_error",
     });
     expect(failed?.anomalies).toEqual([]);
 
@@ -318,6 +329,91 @@ describe("B3 quota read query", () => {
     const byAccount = new Map(body.subjects.map((subject) => [subject.account, subject]));
     expect(byAccount.get("fp_stale")?.latest_valid?.is_stale).toBe(true);
     expect(byAccount.get("fp_fresh")?.latest_valid?.is_stale).toBe(false);
+  });
+
+  it("sanitizes arbitrary upstream error summaries before public return", async () => {
+    const sentinel = "synthetic-secret-sentinel-must-never-return";
+    const ctx = createExecutionContext();
+    const ingestEnv: IngestEnv = {
+      DB: env.DB,
+      INGEST_PRODUCERS_JSON: QUOTA_PRODUCERS_JSON,
+    };
+    const response = await ingestWorker.fetch(
+      new Request("https://bilan-ingest.example/api/v1/ingest", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ORIHSUS_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          schema_version: 1,
+          batch_seq: 1,
+          usage_buckets: [],
+          quota_observations: [
+            {
+              sample_id: "opencode:fp_error:2026-11-26T14:30:00Z:error",
+              source: "opencode",
+              account: "fp_error",
+              observer_machine: "gateway-a",
+              sampled_at: "2026-11-26T14:30:00Z",
+              interval_seconds: 300,
+              status: "error",
+              time_anomaly: null,
+              error_summary: sentinel,
+              windows: [],
+            },
+            {
+              sample_id: "opencode:fp_empty:2026-11-26T14:31:00Z:empty",
+              source: "opencode",
+              account: "fp_empty",
+              observer_machine: "gateway-a",
+              sampled_at: "2026-11-26T14:31:00Z",
+              interval_seconds: 300,
+              status: "empty",
+              time_anomaly: null,
+              error_summary: sentinel,
+              windows: [],
+            },
+          ],
+          balance_snapshots: [],
+        }),
+      }),
+      ingestEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(response.status, await response.text()).toBe(200);
+
+    const stored = await env.DB.prepare(
+      "SELECT account, status, error_summary FROM quota_observations ORDER BY account",
+    ).all<{ account: string; status: string; error_summary: string | null }>();
+    expect(stored.results).toEqual([
+      { account: "fp_empty", status: "empty", error_summary: null },
+      { account: "fp_error", status: "error", error_summary: "upstream_error" },
+    ]);
+    expect(JSON.stringify(stored.results)).not.toContain(sentinel);
+
+    const quotaResponse = await app.request("https://bilan-web.example/api/v1/quotas", {}, env);
+    expect(quotaResponse.status).toBe(200);
+    const quotaBody: QuotaResponse = await quotaResponse.json();
+    expect(JSON.stringify(quotaBody)).not.toContain(sentinel);
+    const byAccount = new Map(quotaBody.subjects.map((subject) => [subject.account, subject]));
+    expect(byAccount.get("fp_error")?.latest_attempt).toMatchObject({
+      status: "error",
+      error_summary: "upstream_error",
+    });
+    expect(byAccount.get("fp_empty")?.latest_attempt).toMatchObject({
+      status: "empty",
+      error_summary: null,
+    });
+
+    const overviewResponse = await app.request(
+      "https://bilan-web.example/api/v1/overview?tz=UTC&month=2026-11",
+      {},
+      env,
+    );
+    expect(overviewResponse.status).toBe(200);
+    expect(await overviewResponse.text()).not.toContain(sentinel);
   });
 
   it("includes per-key quotas and both actor kinds in the normal overview", async () => {

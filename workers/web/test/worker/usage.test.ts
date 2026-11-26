@@ -191,6 +191,54 @@ describe("GET /api/v1/overview usage", () => {
     expect(dailyBody.rows.map((row) => row.date)).toEqual(["2026-11-01"]);
   });
 
+  it("reports per-source freshness so fresh Codex cannot hide stale OpenCode Go", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
+      await seedUsageBucket({
+        bucketStart: "2026-11-27T11:55:00Z",
+        source: "codex",
+        actorKind: "machine",
+        actorId: "machine-a",
+        unitCount: 1,
+        inputTokens: 10,
+        inputCounted: 1,
+      });
+      await seedUsageBucket({
+        bucketStart: "2026-11-27T08:00:00Z",
+        source: "opencode",
+        actorKind: "identity",
+        actorId: "laptop-key",
+        accountingBasis: "orihsus-audit-v1",
+        unitCount: 2,
+        inputTokens: 100,
+        inputCounted: 2,
+      });
+
+      const body = await overview("?tz=UTC&month=2026-11");
+
+      expect(body.usage.rows.map((row) => row.source).sort()).toEqual(["codex", "opencode"]);
+      const freshness = new Map(
+        body.usage.source_freshness.map((source) => [source.source, source]),
+      );
+      expect(freshness.get("codex")).toMatchObject({
+        latest_bucket_start: "2026-11-27T11:55:00Z",
+        data_age_seconds: 300,
+        is_stale: false,
+      });
+      expect(freshness.get("opencode")).toMatchObject({
+        latest_bucket_start: "2026-11-27T08:00:00Z",
+        data_age_seconds: 14_400,
+        is_stale: true,
+      });
+      // The global header remains the max across sources, but freshness is
+      // carried per source so stale OpenCode Go is not hidden by Codex.
+      expect(body.usage.latest_bucket_start).toBe("2026-11-27T11:55:00Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("defaults to Asia/Shanghai and the current month in that timezone", async () => {
     const body = await overview();
     expect(body.usage.timezone).toBe("Asia/Shanghai");

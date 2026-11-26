@@ -352,7 +352,7 @@ export function UsageSection({
           {usage ? (
             <span className="inline-flex items-center gap-1.5">
               <Clock3 className="size-3.5" />
-              Data through {formatDateTime(usage.latest_bucket_start)} ·{" "}
+              Latest bucket across sources: {formatDateTime(usage.latest_bucket_start)} ·{" "}
               {formatAge(usage.data_age_seconds)}
             </span>
           ) : (
@@ -363,11 +363,6 @@ export function UsageSection({
                 : `Usage for ${month} in ${timezone} is unavailable.`}
             </span>
           )}
-          {usage?.is_stale ? (
-            <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-              Delayed
-            </Badge>
-          ) : null}
           <span className="text-muted-foreground/70">
             Heartbeat liveness is shown separately above.
           </span>
@@ -402,24 +397,48 @@ export function UsageSection({
             {usageGroups.length > 0 ? (
               <div className="space-y-4">
                 <h3 className="text-sm font-medium">Monthly breakdown</h3>
-                {usageGroups.map((group) => (
-                  <div key={group.key} className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h4 className="text-sm font-medium">{sourceLabel(group.source)}</h4>
-                      <Badge variant="outline">{group.accountingBasis}</Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {group.unitKind} · {actorLabel(group.actorKind)} rows
-                      </span>
+                {usageGroups.map((group) => {
+                  const freshness = usage.source_freshness.find(
+                    (item) => item.source === group.source,
+                  );
+                  return (
+                    <div key={group.key} className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="text-sm font-medium">{sourceLabel(group.source)}</h4>
+                        <Badge variant="outline">{group.accountingBasis}</Badge>
+                        <span className="text-xs text-muted-foreground">
+                          {group.unitKind} · {actorLabel(group.actorKind)} rows
+                        </span>
+                        <span
+                          aria-label={`${sourceLabel(group.source)} freshness`}
+                          className="inline-flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+                        >
+                          <Clock3 className="size-3.5" />
+                          {freshness?.latest_bucket_start
+                            ? `Data through ${formatDateTime(
+                                freshness.latest_bucket_start,
+                              )} · ${formatAge(freshness.data_age_seconds)}`
+                            : "No buckets"}
+                          {freshness?.is_stale ? (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-300 bg-amber-50 text-amber-800"
+                            >
+                              Delayed
+                            </Badge>
+                          ) : null}
+                        </span>
+                      </div>
+                      <MonthlyUsageTable
+                        rows={group.rows}
+                        actorKind={group.actorKind}
+                        ariaLabel={`${sourceLabel(group.source)} token usage by ${actorLabel(
+                          group.actorKind,
+                        ).toLowerCase()}, model, and effort`}
+                      />
                     </div>
-                    <MonthlyUsageTable
-                      rows={group.rows}
-                      actorKind={group.actorKind}
-                      ariaLabel={`${sourceLabel(group.source)} token usage by ${actorLabel(
-                        group.actorKind,
-                      ).toLowerCase()}, model, and effort`}
-                    />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="rounded-lg border border-dashed px-4 py-8 text-center">

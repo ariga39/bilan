@@ -665,6 +665,7 @@ def _read_usage_backlog(
     """Read every daily file from its own cursor, covering an offline backlog."""
 
     observations: list[dict[str, Any]] = []
+    seen_sample_ids: set[str] = set()
     updated = dict(cursors)
     reset_days: list[str] = []
     for day, path in _usage_files(usage_dir):
@@ -677,7 +678,14 @@ def _read_usage_backlog(
         updated[day] = next_cursor
         if reset:
             reset_days.append(day)
-        observations.extend(records)
+        for record in records:
+            sample_id = record["sample_id"]
+            if sample_id in seen_sample_ids:
+                # Equivalent repeated poll lines resolve to the first immutable
+                # observation; cursors still advance past every consumed line.
+                continue
+            seen_sample_ids.add(sample_id)
+            observations.append(record)
     observations.sort(key=lambda item: (item["sampled_at"], item["sample_id"]))
     return observations, updated, reset_days
 

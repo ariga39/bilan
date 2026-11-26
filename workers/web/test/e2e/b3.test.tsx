@@ -247,6 +247,10 @@ describe("B3 shipper to dashboard E2E", () => {
     writeJsonl(path.join(usageDir, "2026-11-26.jsonl"), [
       usageRecord("2026-11-26T14:30:00.000Z", "fp_a", 42.5, true, "go-key-1"),
       usageRecord("2026-11-26T14:35:00.000Z", "fp_a", 43.5, false, "go-key-1"),
+      // Equivalent repeated poll lines must be deduplicated before the shipper
+      // batch is split; otherwise the public ingest boundary rejects the batch.
+      usageRecord("2026-11-26T14:35:00.000Z", "fp_a", 43.5, false, "go-key-1"),
+      usageRecord("2026-11-26T14:31:00.000Z", "fp_b", 90, true),
       usageRecord("2026-11-26T14:31:00.000Z", "fp_b", 90, true),
     ]);
 

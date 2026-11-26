@@ -17,6 +17,7 @@ import type {
   QuotaWindow,
   UsageBreakdownRow,
   UsageDailyResponse,
+  UsageSourceFreshness,
 } from "./index";
 
 const balanceProviderSchema = z.enum(["openrouter", "deepseek"]);
@@ -105,6 +106,13 @@ const usageBreakdownRowSchema: z.ZodType<UsageBreakdownRow> = z.object({
   ...usageCountersShape,
 });
 
+const usageSourceFreshnessSchema: z.ZodType<UsageSourceFreshness> = z.object({
+  source: z.string(),
+  latest_bucket_start: z.string().nullable(),
+  data_age_seconds: z.number().nullable(),
+  is_stale: z.boolean(),
+});
+
 const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
   timezone: z.string(),
   month: z.string(),
@@ -113,6 +121,7 @@ const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
   latest_bucket_start: z.string().nullable(),
   data_age_seconds: z.number().nullable(),
   is_stale: z.boolean(),
+  source_freshness: z.array(usageSourceFreshnessSchema),
   rows: z.array(usageBreakdownRowSchema),
 });
 
