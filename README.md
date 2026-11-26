@@ -97,7 +97,12 @@ cron trigger and, in later B2 work, the scoped push endpoint.
 
 1. Create one D1 database and replace the placeholder `database_id` in both
    `workers/*/wrangler.toml` files with its real ID.
-2. Apply migrations with `wrangler d1 migrations apply bilan --remote`.
+2. Apply migrations with:
+
+   ```sh
+   pnpm --filter bilan-ingest exec wrangler d1 migrations apply bilan --remote
+   ```
+
 3. Put `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY` only on `bilan-ingest`:
 
    ```sh

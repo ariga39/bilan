@@ -1,6 +1,15 @@
 import type { BalanceHistoryResponse, BalanceProvider, OverviewResponse } from "@bilan/shared";
+import { balanceHistoryResponseSchema, overviewResponseSchema } from "@bilan/shared/schemas";
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+interface ResponseSchema<T> {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}
+
+async function getJson<T>(
+  path: string,
+  schema: ResponseSchema<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   const response = await fetch(path, {
     headers: { accept: "application/json" },
     credentials: "same-origin",
@@ -11,11 +20,16 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw new Error(`Request failed (HTTP ${response.status})`);
   }
 
-  return (await response.json()) as T;
+  const body: unknown = await response.json();
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new Error("The read API returned an unexpected response.");
+  }
+  return parsed.data;
 }
 
 export function fetchOverview(signal?: AbortSignal): Promise<OverviewResponse> {
-  return getJson<OverviewResponse>("/api/v1/overview", signal);
+  return getJson("/api/v1/overview", overviewResponseSchema, signal);
 }
 
 export function fetchBalanceHistory(
@@ -27,5 +41,9 @@ export function fetchBalanceHistory(
     provider,
     days: String(days),
   });
-  return getJson<BalanceHistoryResponse>(`/api/v1/balances/history?${query.toString()}`, signal);
+  return getJson(
+    `/api/v1/balances/history?${query.toString()}`,
+    balanceHistoryResponseSchema,
+    signal,
+  );
 }

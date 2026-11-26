@@ -59,7 +59,8 @@ async function runScheduledPulls(): Promise<void> {
 async function overview(): Promise<OverviewResponse> {
   const response = await app.request("https://bilan-web.example/api/v1/overview", {}, env);
   expect(response.status).toBe(200);
-  return (await response.json()) as OverviewResponse;
+  const body: OverviewResponse = await response.json();
+  return body;
 }
 
 const DEEPSEEK_SUCCESS = {

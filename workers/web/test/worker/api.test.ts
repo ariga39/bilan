@@ -10,7 +10,8 @@ const DAY_MS = 86_400_000;
 async function overview(): Promise<OverviewResponse> {
   const response = await app.request("https://bilan-web.example/api/v1/overview", {}, env);
   expect(response.status).toBe(200);
-  return (await response.json()) as OverviewResponse;
+  const body: OverviewResponse = await response.json();
+  return body;
 }
 
 async function history(query: string): Promise<{ status: number; body: BalanceHistoryResponse }> {
@@ -19,9 +20,10 @@ async function history(query: string): Promise<{ status: number; body: BalanceHi
     {},
     env,
   );
+  const body: BalanceHistoryResponse = await response.json();
   return {
     status: response.status,
-    body: (await response.json()) as BalanceHistoryResponse,
+    body,
   };
 }
 
