@@ -64,13 +64,15 @@ Generate the token directly into its protected file, then hash the file contents
 The token itself never appears in shell arguments or history:
 
 ```sh
-TOKEN_FILE=/etc/bilan/debitmetre.token
-install -d -m 0700 /etc/bilan
-(umask 077; python -c "import secrets; print(secrets.token_urlsafe(32))" > "$TOKEN_FILE")
-chmod 600 "$TOKEN_FILE"
-python -c "import hashlib, pathlib; t = pathlib.Path('$TOKEN_FILE').read_text(encoding='utf-8').splitlines()[0]; print(hashlib.sha256(t.encode('utf-8')).hexdigest())"
+sudo install -d -m 0750 -o root -g bilan /etc/bilan
+sudo sh -c 'umask 077; python3 -c "import secrets; print(secrets.token_urlsafe(32))" > /etc/bilan/debitmetre.token'
+sudo chown root:bilan /etc/bilan/debitmetre.token
+sudo chmod 0640 /etc/bilan/debitmetre.token
+sudo python3 -c "import hashlib, pathlib; t = pathlib.Path('/etc/bilan/debitmetre.token').read_text(encoding='utf-8').splitlines()[0]; print(hashlib.sha256(t.encode('utf-8')).hexdigest())"
 ```
 
+The directory is traversable by the `bilan` service group, the token is
+group-readable only, and the token value never appears in argv or shell history.
 Repeat with the matching token file for `orihsus` and `telemetre`.
 
 `INGEST_PRODUCERS_JSON` stores only the hash. Start from
@@ -91,7 +93,8 @@ Token handling:
 
 - Prefer `--token-file` over `--token` so the token does not appear in process
   arguments or shell history.
-- Store the token file with mode `0600`, readable only by the shipper user.
+- Store the token file as `root:bilan` mode `0640`, or `0600` owned by the
+  shipper user. Never make it world-readable.
 - Put the same token on exactly one active writer for that `producer_id`.
 - `INGEST_PRODUCERS_JSON` accepts exactly one `token_sha256` per producer, so
   rotation is coordinated and brief downtime is expected:
@@ -148,6 +151,21 @@ lines use per-user crontab syntax (no username field), so install them in the
 shipper user's own crontab. A system `/etc/cron.d` file needs a different format
 that includes the user field. Choose one mechanism per host, not both.
 
+Create least-privilege state and source directories before enabling a timer. The
+service runs as `bilan`, must read its own token, and must write only its state
+directory:
+
+```sh
+sudo install -d -m 0750 -o bilan -g bilan /var/lib/bilan/host-a /var/lib/bilan/host-a/state
+sudo install -d -m 0750 -o bilan -g bilan /var/lib/bilan/host-b /var/lib/bilan/host-b/state
+sudo install -d -m 0750 -o bilan -g bilan /var/lib/bilan/host-c /var/lib/bilan/host-c/state
+```
+
+Ensure each source directory is readable by `bilan` and each state directory is
+writable only by `bilan`. If an upstream collector runs as another account, use a
+shared group rather than world-readable files. `ProtectSystem=strict` plus
+`ReadWritePaths` keeps the rest of the host read-only for the shipper.
+
 Example enablement after an operator installs and reviews a template (not
 performed by this repository):
 
@@ -167,24 +185,36 @@ stores its cursor/outbox beside its own state path, retries the identical
 
 `producer_id` identifies the dataset. Move the dataset, not a new identity.
 
-1. Stop the old shipper process and disable its timer/unit. Confirm no manual or
-   scheduled run can still push from the old host.
-2. Copy **all** of that collector's inputs and its exact state/outbox file to
-   the new host directory. If a batch is pending, the state file contains the
-   identical payload and `batch_seq` that must be retried.
+1. **Quiesce the actual source writers as well as the shipper.** Stop and
+   disable the service that writes this collector's input, or redirect it to the
+   new host: `debitmetre`'s `usage.jsonl` writer, `orihsus`'s `audit.jsonl` and
+   `usage/*.jsonl` writer, or `telemetre`'s centre quota sampler/database writer.
+   Wait for in-flight writes to finish and confirm file sizes/mtimes stop
+   changing. A pre-seed copy is fine for speed, but the final snapshot must be
+   taken while the source is quiesced.
+2. Stop the old shipper process and disable its timer/unit. Confirm no manual or
+   scheduled run can still push from the old host. Never let old and new
+   shippers write the same `producer_id` at once.
+3. Copy **all** of that collector's inputs and its exact state/outbox file from
+   the stable snapshot to the new host directory. If a batch is pending, the
+   state file contains the identical payload and `batch_seq` that must be
+   retried.
 
    | Collector | Copy with the state file | Keep |
    | :--- | :--- | :--- |
    | `debitmetre` | `usage.jsonl` | The explicit `--state-file` path, or the default `.bilan-debitmetre-state.json` beside the log. |
    | `orihsus` | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl` file** | The explicit `--state-file` path, or the default `.bilan-orihsus-state.json` beside `audit.jsonl`. A missing usage file is treated as empty, so omitting it drops unsent quota observations. |
-   | `telemetre` | A consistent SQLite backup of the centre quota database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. Stop telemetre or use SQLite's backup API; if copying files live, include `-wal` and `-shm` or the cursor may not match the restored database. |
+   | `telemetre` | A consistent SQLite backup of the centre quota database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. Stop telemetre and copy the database, use SQLite's backup API, or include `-wal` and `-shm` in a consistent live snapshot; the cursor must match the restored database. |
 
    Copy the token file too (or perform the coordinated rotation above).
 
-3. Start the new host with the same `producer_id`, the same token (or its
-   rotated replacement), and the copied state file.
-4. Run once and verify the producer heartbeat updates, the sequence advances by
-   one, and totals do not double. Do not run both hosts concurrently.
+4. **Final catch-up and cutover.** Start the new host first with the same
+   `producer_id`, the same token (or its rotated replacement), and the copied
+   state file. Run it once and verify the producer heartbeat updates, the
+   sequence advances, any pending batch is retried, and totals do not double.
+   Only after that succeeds, resume or redirect the source writers to the new
+   host. Resume order is: new shipper first, then source writers. Leave the old
+   shipper disabled and the old state file untouched; never resume both sides.
 
 Never reset `batch_seq` to `1`, never edit the state file, and never replay a
 truncated/replaced source log. The shipper verifies a digest over the consumed
@@ -252,6 +282,9 @@ python -m unittest discover -s shippers/tests -v
 - [ ] Codex and OpenCode Go token columns remain separate by source and
       `accounting_basis`; partial columns stay explicitly flagged.
 - [ ] DeepSeek differences are labeled net balance change, never spend/burn.
+- [ ] Quota current windows come only from the latest valid sample; a sample
+      more than 5 minutes ahead of its own ingestion time is excluded as a clock
+      anomaly even when the upstream `time_anomaly` flag is absent.
 - [ ] Each producer token resolves one logical `producer_id` from its explicit
       scopes; out-of-scope `(source, kind)` pushes return `403`.
 - [ ] A migrated host keeps its `producer_id`, copies log plus state, and does

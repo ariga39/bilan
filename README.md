@@ -189,11 +189,13 @@ it with a partial file.
 A migrated shipper must retain the same logical dataset and sequence, so moving
 only `usage.jsonl` is not enough:
 
-1. Stop the old shipper process and disable its timer/systemd unit. Confirm no
-   scheduled or manual run can still push from the old host.
-2. Copy all of that collector's inputs and the **exact** state/outbox file
-   together. If a batch is pending, the state file contains the identical
-   payload and `batch_seq` that must be retried on the new host.
+1. Quiesce or redirect the actual source writer (debitmetre/orihsus log writer
+   or telemetre database sampler), then stop the old shipper and disable its
+   timer/systemd unit. Confirm no scheduled or manual run can still push from
+   the old host.
+2. Copy all of that collector's inputs and the **exact** state/outbox file from
+   the stable snapshot together. If a batch is pending, the state file contains
+   the identical payload and `batch_seq` that must be retried on the new host.
 
    | Collector    | Copy with the state file                                | State file                                                                    |
    | :----------- | :------------------------------------------------------ | :---------------------------------------------------------------------------- |
@@ -205,9 +207,12 @@ only `usage.jsonl` is not enough:
    observations. For a live telemetre database, stop the writer or use SQLite's
    backup API; a raw file copy must include `-wal` and `-shm` consistently.
 
-3. Start the new host with the same `--producer-id` and the copied state file.
-   Do not run the old and new writers concurrently. Exact paths and token
-   rotation are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+3. Start the new shipper first with the same `--producer-id` and copied state
+   file, run its final catch-up, and verify HTTP `200` plus a non-double-counted
+   total. Then resume/redirect the source writers. Resume order is new shipper
+   first, then source writers; leave the old shipper disabled. Do not run old
+   and new writers concurrently. Exact paths, permissions, and token rotation
+   are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 The shipper verifies a content checkpoint over the consumed or aggregated
 source extent, including any in-flight batch. If the log has been truncated or
@@ -335,7 +340,8 @@ API, and dashboard:
   (`status = 'ok'`, non-anomalous) observation. Failed/empty attempts and clock
   anomalies are separate warnings; a future-clock sample cannot replace the
   current reading or pin freshness, even when the upstream anomaly flag is
-  absent.
+  absent. The read selection excludes any sample more than 5 minutes ahead of
+  its own ingestion time.
 - AGY is quota-only on the dashboard and is omitted from token usage totals
   (never rendered as `0`).
 
