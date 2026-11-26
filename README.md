@@ -110,8 +110,10 @@ cron trigger and, in later B2 work, the scoped push endpoint.
    pnpm --filter bilan-ingest exec wrangler secret put DEEPSEEK_API_KEY
    ```
 
-4. Attach a custom domain to `bilan-web` and protect it with Cloudflare
-   Access. See [docs/ACCESS.md](docs/ACCESS.md).
+4. Before attaching a custom domain to `bilan-web`, create the Cloudflare
+   Access self-hosted application for that exact hostname and all paths with a
+   restricted Allow policy. Then attach the custom domain. See
+   [docs/ACCESS.md](docs/ACCESS.md).
 5. Deploying is outside B1 authority; the commands above are the intended
    handoff for the operator.
 
