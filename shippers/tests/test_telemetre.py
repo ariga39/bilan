@@ -1014,6 +1014,65 @@ class TelemetreShipperTests(unittest.TestCase):
         self.assertTrue(slots[1].endswith("#2"))
         self.assertTrue(slots[2].endswith("#3"))
 
+    def test_slot_fallback_is_bounded_before_first_uniqueness_lookup(self) -> None:
+        prefix = "x" * 64
+        first_bucket = prefix + "a" * 36
+        second_bucket = prefix + "b" * 36
+        self.add_sample(
+            sample_id="agy-long-fallback",
+            provider="agy",
+            account="agy-long",
+            windows=(
+                window(
+                    group_name="Gemini",
+                    bucket_id=first_bucket,
+                    slot=None,
+                    limit_id=None,
+                ),
+                window(
+                    group_name="Gemini",
+                    bucket_id=second_bucket,
+                    slot=None,
+                    limit_id=None,
+                ),
+            ),
+        )
+        self.add_sample(
+            sample_id="codex-long-fallback",
+            provider="codex",
+            account="codex-long",
+            windows=(
+                window(
+                    group_name="codex",
+                    bucket_id=first_bucket,
+                    limit_id="codex",
+                    slot=None,
+                ),
+                window(
+                    group_name="codex",
+                    bucket_id=second_bucket,
+                    limit_id="codex",
+                    slot=None,
+                ),
+            ),
+        )
+
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[0]["payload"]
+        by_source = {
+            observation["source"]: observation
+            for observation in payload["quota_observations"]
+        }
+        for provider in ("agy", "codex"):
+            with self.subTest(provider=provider):
+                slots = [item["slot"] for item in by_source[provider]["windows"]]
+                self.assertEqual(len(slots), 2)
+                self.assertTrue(all(slot and len(slot) <= 64 for slot in slots))
+                self.assertEqual(len(set(slots)), 2)
+                self.assertEqual(slots[0], prefix)
+                self.assertTrue(slots[1].endswith("#2"))
+                self.assertLessEqual(len(slots[1]), 64)
+
     # -- durable replay / ACK / heartbeat ---------------------------------
 
     def test_lost_ack_retries_identical_batch_then_heartbeats(self) -> None:

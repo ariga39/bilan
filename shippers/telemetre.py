@@ -325,6 +325,10 @@ def _unique_window_key(
 ) -> tuple[str, str]:
     """Keep the required ``(bucket_id, slot)`` pair unique without dropping rows."""
 
+    # A NULL upstream slot falls back to the source bucket id, which may be up
+    # to 128 characters. Bound that fallback before the first uniqueness lookup
+    # so the first emitted window satisfies the 64-character contract too.
+    slot = _slot_with_suffix(slot, "")
     key = (bucket_id, slot)
     if key not in seen:
         seen[key] = 1
