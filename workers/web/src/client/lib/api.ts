@@ -11,11 +11,11 @@ import {
   usageDailyResponseSchema,
 } from "@bilan/shared/schemas";
 
-export interface ResponseSchema<T> {
+interface ResponseSchema<T> {
   safeParse(value: unknown): { success: true; data: T } | { success: false };
 }
 
-export async function getJson<T>(
+async function getJson<T>(
   path: string,
   schema: ResponseSchema<T>,
   signal?: AbortSignal,

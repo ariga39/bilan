@@ -1,60 +1,15 @@
+import type {
+  QuotaAnomaly,
+  QuotaAttempt,
+  QuotaObservation,
+  QuotaObservationStatus,
+  QuotaResponse,
+  QuotaWindow,
+  QuotaWindowStatus,
+} from "@bilan/shared";
 import { Hono } from "hono";
 
 import type { Env } from "./types";
-
-export type QuotaWindowStatus = "ok" | "limited" | "cooldown" | "unknown";
-export type QuotaObservationStatus = "ok" | "empty" | "error";
-
-export interface QuotaWindowView {
-  bucket_id: string;
-  slot: string;
-  label: string | null;
-  used_percent: number | null;
-  remaining_percent: number | null;
-  status: QuotaWindowStatus | null;
-  resets_at: string | null;
-  reset_in_seconds: number | null;
-  window_duration_mins: number | null;
-}
-
-export interface QuotaObservationView {
-  sample_id: string;
-  observer_machine: string;
-  sampled_at: string;
-  interval_seconds: number | null;
-  sample_age_seconds: number | null;
-  is_stale: boolean;
-  status: QuotaObservationStatus;
-  time_anomaly: string | null;
-  error_summary: string | null;
-  windows: Array<QuotaWindowView>;
-}
-
-export interface QuotaAttemptView {
-  sample_id: string;
-  observer_machine: string;
-  sampled_at: string;
-  sample_age_seconds: number | null;
-  status: QuotaObservationStatus;
-  time_anomaly: string | null;
-  error_summary: string | null;
-}
-
-export type QuotaAnomalyView = QuotaAttemptView;
-
-export interface QuotaSubjectView {
-  source: string;
-  account: string;
-  latest_valid: QuotaObservationView | null;
-  latest_attempt: QuotaAttemptView | null;
-  /** Anomalous attempts surfaced separately from the current valid windows. */
-  anomalies: Array<QuotaAnomalyView>;
-}
-
-export interface QuotaResponse {
-  generated_at: string;
-  subjects: Array<QuotaSubjectView>;
-}
 
 interface LatestValidRow {
   producer_id: string;
@@ -97,9 +52,9 @@ interface AttemptRow {
 interface MutableSubject {
   source: string;
   account: string;
-  latest_valid: QuotaObservationView | null;
-  latest_attempt: QuotaAttemptView | null;
-  anomalies: Array<QuotaAnomalyView>;
+  latest_valid: QuotaObservation | null;
+  latest_attempt: QuotaAttempt | null;
+  anomalies: Array<QuotaAnomaly>;
 }
 
 const DEFAULT_INTERVAL_SECONDS = 300;
@@ -219,7 +174,7 @@ function subjectFor(
   return subject;
 }
 
-function validObservation(row: LatestValidRow, nowMs: number): QuotaObservationView {
+function validObservation(row: LatestValidRow, nowMs: number): QuotaObservation {
   const age = ageSeconds(nowMs, row.sampled_at);
   return {
     sample_id: row.sample_id,
@@ -235,7 +190,7 @@ function validObservation(row: LatestValidRow, nowMs: number): QuotaObservationV
   };
 }
 
-function windowView(row: LatestValidRow, nowMs: number): QuotaWindowView | null {
+function windowView(row: LatestValidRow, nowMs: number): QuotaWindow | null {
   if (row.bucket_id === null || row.slot === null) {
     return null;
   }
@@ -252,7 +207,7 @@ function windowView(row: LatestValidRow, nowMs: number): QuotaWindowView | null 
   };
 }
 
-function attemptView(row: AttemptRow, nowMs: number): QuotaAttemptView {
+function attemptView(row: AttemptRow, nowMs: number): QuotaAttempt {
   return {
     sample_id: row.sample_id,
     observer_machine: row.observer_machine,

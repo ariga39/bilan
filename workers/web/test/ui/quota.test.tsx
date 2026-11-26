@@ -1,8 +1,8 @@
+import type { QuotaAttempt, QuotaObservation, QuotaResponse, QuotaWindow } from "@bilan/shared";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { QuotaSection } from "@/components/quota-section";
-import type { QuotaAttempt, QuotaObservation, QuotaResponse, QuotaWindow } from "@/lib/quota";
 
 afterEach(cleanup);
 

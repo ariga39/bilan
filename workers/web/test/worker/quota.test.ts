@@ -1,10 +1,10 @@
+import type { QuotaResponse } from "@bilan/shared";
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { app } from "../../src/worker/app";
 import { getQuotaOverview } from "../../src/worker/quota";
-import type { QuotaResponse } from "../../src/worker/quota";
-import { clearDatabase } from "./seed";
+import { clearDatabase, seedUsageBucket } from "./seed";
 
 const NOW = new Date("2026-11-27T12:00:00Z");
 
@@ -318,6 +318,93 @@ describe("B3 quota read query", () => {
     const byAccount = new Map(body.subjects.map((subject) => [subject.account, subject]));
     expect(byAccount.get("fp_stale")?.latest_valid?.is_stale).toBe(true);
     expect(byAccount.get("fp_fresh")?.latest_valid?.is_stale).toBe(false);
+  });
+
+  it("includes per-key quotas and both actor kinds in the normal overview", async () => {
+    await seedUsageBucket({
+      bucketStart: "2026-11-26T14:00:00Z",
+      source: "codex",
+      actorKind: "machine",
+      actorId: "machine-a",
+      model: "gpt-5",
+      effort: "high",
+      unitCount: 1,
+      inputTokens: 10,
+      inputCounted: 1,
+      outputTokens: 5,
+      outputCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-11-26T14:00:00Z",
+      source: "opencode",
+      actorKind: "identity",
+      actorId: "laptop-key",
+      model: "deepseek-chat",
+      effort: "",
+      unitCount: 2,
+      inputTokens: 100,
+      inputCounted: 2,
+      cachedTokens: 40,
+      cachedCounted: 2,
+      uncachedTokens: 60,
+      uncachedCounted: 2,
+      cacheWriteTokens: null,
+      cacheWriteCounted: 0,
+      outputTokens: 20,
+      outputCounted: 2,
+      reasoningTokens: 4,
+      reasoningCounted: 2,
+      accountingBasis: "orihsus-audit-v1",
+    });
+    await seedObservation({
+      sampleId: "overview-fp-a",
+      sampledAt: "2026-11-26T14:30:00Z",
+      windows: [{ slot: "rolling", usedPercent: 42.5, remainingPercent: 57.5 }],
+    });
+
+    const response = await app.request(
+      "https://bilan-web.example/api/v1/overview?tz=UTC&month=2026-11",
+      {},
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    const body: {
+      generated_at: string;
+      usage: { rows: Array<{ source: string; actor_kind: string; actor_id: string }> };
+      quotas: QuotaResponse;
+    } = await response.json();
+
+    expect(body.usage.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "codex",
+          actor_kind: "machine",
+          actor_id: "machine-a",
+        }),
+        expect.objectContaining({
+          source: "opencode",
+          actor_kind: "identity",
+          actor_id: "laptop-key",
+        }),
+      ]),
+    );
+    expect(body.quotas.generated_at).toBe(body.generated_at);
+    expect(body.quotas.subjects).toHaveLength(1);
+    expect(body.quotas.subjects[0]).toMatchObject({
+      source: "opencode",
+      account: "fp_a",
+      latest_valid: {
+        sample_id: "overview-fp-a",
+        windows: [
+          {
+            slot: "rolling",
+            used_percent: 42.5,
+            remaining_percent: 57.5,
+          },
+        ],
+      },
+    });
   });
 
   it("serves the quota endpoint without caching", async () => {

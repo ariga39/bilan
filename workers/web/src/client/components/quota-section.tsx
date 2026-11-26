@@ -1,3 +1,12 @@
+import type {
+  QuotaAnomaly,
+  QuotaAttempt,
+  QuotaObservation,
+  QuotaResponse,
+  QuotaSubject,
+  QuotaWindow,
+  QuotaWindowStatus,
+} from "@bilan/shared";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
@@ -12,15 +21,6 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAge, formatDateTime, formatNumber, formatSpan } from "@/lib/format";
-import type {
-  QuotaAnomaly,
-  QuotaAttempt,
-  QuotaObservation,
-  QuotaResponse,
-  QuotaSubject,
-  QuotaWindow,
-  QuotaWindowStatus,
-} from "@/lib/quota";
 import { cn } from "@/lib/utils";
 
 interface SourceMeta {

@@ -12,6 +12,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
     "test": "pnpm -r --if-present test",
+    "test:e2e": "pnpm --filter bilan-web test:e2e",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {

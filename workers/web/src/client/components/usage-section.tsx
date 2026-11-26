@@ -117,16 +117,77 @@ function CoverageBadge({
   );
 }
 
-function MonthlyUsageTable({ rows }: { rows: Array<UsageBreakdownRow> }) {
+function sourceLabel(source: string): string {
+  if (source === "codex") {
+    return "Codex";
+  }
+  if (source === "opencode") {
+    return "OpenCode Go";
+  }
+  return source;
+}
+
+function actorLabel(actorKind: string): string {
+  if (actorKind === "identity") {
+    return "Identity";
+  }
+  if (actorKind === "machine") {
+    return "Machine";
+  }
+  return "Actor";
+}
+
+interface UsageGroup {
+  key: string;
+  source: string;
+  accountingBasis: string;
+  unitKind: string;
+  actorKind: string;
+  rows: Array<UsageBreakdownRow>;
+}
+
+function groupUsageRows(rows: Array<UsageBreakdownRow>): Array<UsageGroup> {
+  const groups = new Map<string, UsageGroup>();
+  for (const row of rows) {
+    const key = `${row.source}\u0000${row.accounting_basis}\u0000${row.unit_kind}\u0000${row.actor_kind}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        source: row.source,
+        accountingBasis: row.accounting_basis,
+        unitKind: row.unit_kind,
+        actorKind: row.actor_kind,
+        rows: [],
+      };
+      groups.set(key, group);
+    }
+    group.rows.push(row);
+  }
+  return [...groups.values()].sort(
+    (left, right) =>
+      left.source.localeCompare(right.source) ||
+      left.actorKind.localeCompare(right.actorKind) ||
+      left.accountingBasis.localeCompare(right.accountingBasis) ||
+      left.unitKind.localeCompare(right.unitKind),
+  );
+}
+
+function MonthlyUsageTable({
+  rows,
+  actorKind,
+  ariaLabel,
+}: {
+  rows: Array<UsageBreakdownRow>;
+  actorKind: string;
+  ariaLabel: string;
+}) {
   return (
     <div className="overflow-x-auto rounded-lg border">
-      <table
-        className="w-full min-w-[72rem] text-sm"
-        aria-label="Codex token usage by machine, model, and effort"
-      >
+      <table className="w-full min-w-[72rem] text-sm" aria-label={ariaLabel}>
         <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-medium">Machine</th>
+            <th className="px-3 py-2 font-medium">{actorLabel(actorKind)}</th>
             <th className="px-3 py-2 font-medium">Model</th>
             <th className="px-3 py-2 font-medium">Effort</th>
             <th className="px-3 py-2 text-right font-medium">Requests</th>
@@ -194,7 +255,7 @@ function DailyUsageTable({ rows }: { rows: Array<DailyUsageRow> }) {
               className="border-t"
             >
               <td className="px-3 py-2 font-mono text-xs">{row.date}</td>
-              <td className="px-3 py-2">{row.source}</td>
+              <td className="px-3 py-2">{sourceLabel(row.source)}</td>
               <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.unit_count)}</td>
               <TokenCells row={row} />
               <td className="px-3 py-2">
@@ -235,6 +296,7 @@ export function UsageSection({
   const attributionApproximate =
     usage?.bucket_attribution === "approximate" || daily?.bucket_attribution === "approximate";
   const attributionNote = usage?.bucket_attribution_note ?? daily?.bucket_attribution_note;
+  const usageGroups = usage ? groupUsageRows(usage.rows) : [];
 
   return (
     <Card>
@@ -243,12 +305,13 @@ export function UsageSection({
           <div>
             <CardTitle className="flex items-center gap-2 text-base">
               <BarChart3 className="size-4 text-muted-foreground" />
-              Codex token usage
+              Token usage breakdown
             </CardTitle>
             <CardDescription className="mt-1">
-              Monthly totals sliced by the selected timezone and calendar month. Each token column
-              is counted independently; partial columns show the count of records that reported
-              them.
+              Monthly totals sliced by the selected timezone and calendar month. Codex machines and
+              OpenCode Go caller identities are listed separately; token columns are never summed
+              across sources or accounting bases. Each column is counted independently, and partial
+              columns show how many records reported them.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-end gap-2">
@@ -336,17 +399,34 @@ export function UsageSection({
           </div>
         ) : (
           <>
-            {usage.rows.length > 0 ? (
-              <div className="space-y-2">
+            {usageGroups.length > 0 ? (
+              <div className="space-y-4">
                 <h3 className="text-sm font-medium">Monthly breakdown</h3>
-                <MonthlyUsageTable rows={usage.rows} />
+                {usageGroups.map((group) => (
+                  <div key={group.key} className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-sm font-medium">{sourceLabel(group.source)}</h4>
+                      <Badge variant="outline">{group.accountingBasis}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {group.unitKind} · {actorLabel(group.actorKind)} rows
+                      </span>
+                    </div>
+                    <MonthlyUsageTable
+                      rows={group.rows}
+                      actorKind={group.actorKind}
+                      ariaLabel={`${sourceLabel(group.source)} token usage by ${actorLabel(
+                        group.actorKind,
+                      ).toLowerCase()}, model, and effort`}
+                    />
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="rounded-lg border border-dashed px-4 py-8 text-center">
-                <p className="font-medium">No Codex usage for this month</p>
+                <p className="font-medium">No token usage for this month</p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  A row appears after debitmetre pushes a complete UTC-hour bucket that falls inside
-                  the selected timezone month.
+                  A row appears after debitmetre or orihsus pushes a complete UTC-hour bucket that
+                  falls inside the selected timezone month.
                 </p>
               </div>
             )}

@@ -1,8 +1,9 @@
 # bilan
 
 Personal AI consumption aggregator on Cloudflare Workers + D1. This checkout
-implements **B2**: multi-machine Codex token usage pushed by `debitmetre`,
-alongside the B1 OpenRouter and DeepSeek balance path.
+implements **B2 and B3**: multi-machine Codex token usage pushed by
+`debitmetre`, plus OpenCode Go usage and per-key quota windows pushed by
+`orihsus`, alongside the B1 OpenRouter and DeepSeek balance path.
 
 - Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest` on
   its own HTTPS hostname, plus scheduled pull adapters, D1 writes, and
@@ -11,17 +12,17 @@ alongside the B1 OpenRouter and DeepSeek balance path.
   served exclusively on a separate Access-protected HTTPS hostname. No write
   routes and no upstream/ingest credentials. `workers_dev` and preview URLs are
   disabled.
-- Shared D1 database: `producers`, `balance_snapshots`, and `usage_buckets`.
+- Shared D1 database: `producers`, `balance_snapshots`, `usage_buckets`, `quota_observations`, and `quota_windows`.
 - Dashboard: producer heartbeat health, balances, 7d/30d net balance change,
-  OpenRouter reported usage delta, and Codex token usage broken down by
-  timezone/month, machine, model, effort, and day, with explicit partial
-  counters.
-- Host shipper (`shippers/debitmetre.py`): Python 3 standard library only,
-  durable cursor/outbox, monotonic `batch_seq`, idle heartbeat, and
-  `--backfill`.
+  OpenRouter reported usage delta, Codex machine and OpenCode Go identity token
+  usage, and latest-valid per-key quota windows.
+- Host shippers: `shippers/debitmetre.py` for Codex usage and
+  `shippers/orihsus.py` for OpenCode Go usage plus quota history. Both use the
+  Python 3 standard library only, durable cursors/outboxes, monotonic
+  `batch_seq`, and idle heartbeats.
 
-B2 does not include OpenCode Go or AGY token usage, quota windows, pricing,
-alerting, or the `orihsus` / `telemetre` shippers.
+AGY token usage, Codex/AGY quota via `telemetre`, pricing, and alerting remain
+out of scope.
 
 ## Layout
 
@@ -53,6 +54,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm test:e2e   # requires pnpm build; starts local Workers and the real shipper
 ```
 
 `pnpm test` runs:
@@ -63,11 +65,13 @@ pnpm build
   absence of read routes.
 - `bilan-web` worker-pool tests: balance overview/history behavior, timezone
   month and daily usage slicing (including non-whole-hour offset disclosure),
-  per-column completeness flags, push-to-read integration over one D1 binding,
-  and the absence of write routes.
+  per-column completeness flags, latest-valid per-key quota selection,
+  identity/machine usage separation, push-to-read integration over one D1
+  binding, and the absence of write routes.
 - `bilan-web` jsdom tests: currency labels, partial-history labels, delayed
   samples, usage timezone/month controls, selection safety, initial-load retry,
-  machine/model/effort rows, daily rows, and partial-counter rendering.
+  machine/identity/model/effort rows, per-key quota windows and warnings, daily
+  rows, and partial-counter rendering.
 
 `pnpm test` does **not** run the Python shipper suite. Run it separately:
 
@@ -80,7 +84,7 @@ mock, including missing/empty logs, full-extent continuity, truncation and
 same-size replacement, pending suffix continuity, bounded incremental capture
 with concurrent appends, interrupted multi-chunk backfill resume, backfill-first
 extents, lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety,
-and migration.
+per-key quota windows, and migration.
 
 ## Local development against one D1 database
 
@@ -197,6 +201,100 @@ producer whose last accepted sequence is exactly `1` will no-op duplicate-ACK
 it without writing the missing data. Recovery never resets the sequence; restore
 the state/outbox from the backup/copy, or otherwise recover the recorded
 sequence before writing again.
+
+## B3: OpenCode Go usage and per-key quotas
+
+B3 adds the `orihsus` shipper and two read surfaces:
+
+- OpenCode Go token usage from `audit.jsonl`, attributed to the caller
+  `gateway_key` as `actor_kind = 'identity'` with
+  `accounting_basis = 'orihsus-audit-v1'`.
+- Per-key quota history from `usage/YYYY-MM-DD.jsonl`. Each key fingerprint is
+  its own `(source, account)` subject, and only the single latest valid
+  observation (`status = 'ok'` and `time_anomaly IS NULL`) supplies current
+  windows.
+- The dashboard shows Codex machine rows and OpenCode Go identity rows in
+  separate usage tables, plus a quota section with sample age, reset countdowns,
+  and separate failed/empty/anomaly callouts.
+
+The existing local migration command applies the B3 schema, including
+`migrations/0004_quota_observations.sql`; no separate B3 migration command is
+needed:
+
+```sh
+pnpm db:migrate:local
+```
+
+Add an `orihsus-main` entry to `INGEST_PRODUCERS_JSON` with both explicit
+OpenCode Go scopes:
+
+```json
+{
+  "orihsus-main": {
+    "token_sha256": "<sha256-hex-of-your-local-orihsus-token>",
+    "display_name": "orihsus (OpenCode Go)",
+    "expected_interval_seconds": 1800,
+    "scopes": [
+      { "source": "opencode", "kind": "usage_buckets" },
+      { "source": "opencode", "kind": "quota_observations" }
+    ]
+  }
+}
+```
+
+The scoped token resolves `producer_id`; never send it in the request body.
+
+Run the shipper against synthetic or real local files:
+
+```sh
+python shippers/orihsus.py \
+  --audit-file /path/to/orihsus/audit.jsonl \
+  --usage-dir /path/to/orihsus/usage \
+  --producer-id orihsus-main \
+  --endpoint http://127.0.0.1:8787/api/v1/ingest \
+  --token replace-with-local-orihsus-token \
+  --observer-machine gateway-a
+```
+
+`--state-file` defaults next to `audit.jsonl`; use an explicit durable path for
+a production host. The shipper re-reads the complete touched UTC hours from the
+audit log, sends every unsent daily quota file (offline backlog included), and
+retries the exact in-flight envelope and `batch_seq` after a lost ACK.
+
+Audit log safety:
+
+- A missing audit log fails closed before any heartbeat.
+- If the audit file shrinks or its already-consumed prefix changes (truncation,
+  rotation, or replacement), the shipper exits non-zero **without sending** and
+  without advancing its cursor. This prevents an incomplete replay from
+  overwriting an already-shipped complete hourly total.
+- Restore the original audit log/state pair, or recover the recorded sequence
+  and log deliberately, before running again.
+
+The dashboard and read API expose:
+
+```sh
+curl "http://127.0.0.1:8788/api/v1/overview?tz=UTC&month=2026-11"
+curl "http://127.0.0.1:8788/api/v1/quotas"
+```
+
+`overview.usage.rows` contains both `codex` machine rows and `opencode` identity
+rows, never summed across sources or accounting bases. `overview.quotas.subjects`
+contains the latest valid windows per key fingerprint; a window missing from the
+latest valid sample disappears immediately. `GET /api/v1/quotas` returns the
+same quota block for focused consumers.
+
+Run the focused E2E after building the SPA. It starts local Workers against a
+temporary D1 database, invokes the real `orihsus.py` CLI, pushes a synthetic
+Codex bucket, reads the web overview, and renders the usage/quota UI:
+
+```sh
+pnpm build
+pnpm test:e2e
+```
+
+The E2E uses only synthetic gateway keys, fingerprints, machine names, and
+logs.
 
 ## Production configuration
 

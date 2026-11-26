@@ -109,7 +109,7 @@ else:
         utc_now_iso,
     )
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 DEFAULT_PRODUCER_ID = "orihsus-main"
 SOURCE = "opencode"
 ACCOUNTING_BASIS = "orihsus-audit-v1"
@@ -317,30 +317,95 @@ def aggregate_audit_records(
     return rows
 
 
-def _read_appended_audit(audit_path: str, cursor: int) -> tuple[list[dict[str, Any]], int, bool]:
-    """Read complete appended audit lines and return (records, new_cursor, reset)."""
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _require_audit_log(audit_path: str) -> None:
+    """Refuse to run when the audit source is absent or not a regular file."""
+
+    if not os.path.exists(audit_path):
+        raise ShipperError("audit log not found; refusing to send a heartbeat")
+    if not os.path.isfile(audit_path):
+        raise ShipperError("audit log path is not a file")
+
+
+def _prefix_sha256(audit_path: str, size: int) -> str:
+    """Hash exactly the consumed audit prefix so rewrites fail closed."""
+
+    digest = hashlib.sha256()
+    remaining = size
+    try:
+        with open(audit_path, "rb") as handle:
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ShipperError(
+                        "audit log ended before the saved cursor; "
+                        "refusing to replay complete hourly totals"
+                    )
+                digest.update(chunk)
+                remaining -= len(chunk)
+    except FileNotFoundError as exc:
+        raise ShipperError(
+            "audit log disappeared; refusing to replay complete hourly totals"
+        ) from exc
+    return digest.hexdigest()
+
+
+def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
+    try:
+        size = os.path.getsize(audit_path)
+    except FileNotFoundError as exc:
+        raise ShipperError(
+            "audit log disappeared; refusing to replay complete hourly totals"
+        ) from exc
+    if cursor > size:
+        raise ShipperError(
+            "audit log shrank below the saved cursor; refusing to replay because "
+            "complete hourly totals could be overwritten"
+        )
+    actual = _prefix_sha256(audit_path, cursor)
+    if actual != expected:
+        raise ShipperError(
+            "audit log prefix changed below the saved cursor; refusing to replay because "
+            "complete hourly totals could be overwritten"
+        )
+
+
+def _read_appended_audit(
+    audit_path: str,
+    cursor: int,
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Read complete appended audit lines and return (records, new_cursor, new_hash)."""
 
     try:
         size = os.path.getsize(audit_path)
-    except FileNotFoundError:
-        return [], cursor, False
-    reset = False
+    except FileNotFoundError as exc:
+        raise ShipperError("audit log disappeared while reading") from exc
     if cursor > size:
-        # The audit file was rotated or truncated; safely replay the replacement.
-        cursor = 0
-        reset = True
-        size = os.path.getsize(audit_path)
+        raise ShipperError(
+            "audit log shrank below the saved cursor; refusing to replay because "
+            "complete hourly totals could be overwritten"
+        )
 
     try:
         with open(audit_path, "rb") as handle:
             handle.seek(cursor)
             appended = handle.read()
-    except FileNotFoundError:
-        return [], cursor, reset
+    except FileNotFoundError as exc:
+        raise ShipperError("audit log disappeared while reading") from exc
 
     last_newline = appended.rfind(b"\n")
     if last_newline < 0:
-        return [], cursor, reset
+        return [], cursor, _prefix_sha256(audit_path, cursor)
     complete = appended[: last_newline + 1]
     records = []
     for raw in complete.split(b"\n"):
@@ -349,7 +414,8 @@ def _read_appended_audit(audit_path: str, cursor: int) -> tuple[list[dict[str, A
         record = _canonical_audit_record(raw)
         if record is not None:
             records.append(record)
-    return records, cursor + len(complete), reset
+    next_cursor = cursor + len(complete)
+    return records, next_cursor, _prefix_sha256(audit_path, next_cursor)
 
 
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
@@ -550,6 +616,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "producer_id": producer_id,
             "batch_seq": 0,
             "audit_cursor": 0,
+            "audit_prefix_sha256": EMPTY_SHA256,
             "usage_cursors": {},
             "pending": None,
         }
@@ -562,10 +629,15 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         )
     batch_seq = raw.get("batch_seq")
     audit_cursor = raw.get("audit_cursor")
+    audit_prefix = raw.get("audit_prefix_sha256")
     if isinstance(batch_seq, bool) or not isinstance(batch_seq, int) or batch_seq < 0:
         raise ShipperError("invalid batch_seq in shipper state")
     if isinstance(audit_cursor, bool) or not isinstance(audit_cursor, int) or audit_cursor < 0:
         raise ShipperError("invalid audit_cursor in shipper state")
+    if not _is_sha256_hex(audit_prefix):
+        raise ShipperError("invalid audit_prefix_sha256 in shipper state")
+    if audit_cursor == 0 and audit_prefix != EMPTY_SHA256:
+        raise ShipperError("audit_prefix_sha256 does not match the empty cursor")
     _validate_cursors(raw.get("usage_cursors"), "usage_cursors")
 
     pending = raw.get("pending")
@@ -574,6 +646,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             raise ShipperError("invalid pending outbox in shipper state")
         pending_seq = pending.get("batch_seq")
         pending_audit_cursor = pending.get("audit_cursor_after")
+        pending_audit_prefix = pending.get("audit_prefix_sha256_after")
         payload = pending.get("payload")
         if (
             isinstance(pending_seq, bool)
@@ -582,6 +655,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             or isinstance(pending_audit_cursor, bool)
             or not isinstance(pending_audit_cursor, int)
             or pending_audit_cursor < 0
+            or not _is_sha256_hex(pending_audit_prefix)
             or not isinstance(payload, dict)
         ):
             raise ShipperError("invalid pending outbox in shipper state")
@@ -662,6 +736,7 @@ def _send_pending(
         return False
     state["batch_seq"] = sequence
     state["audit_cursor"] = pending["audit_cursor_after"]
+    state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
     state["usage_cursors"] = dict(pending["usage_cursors_after"])
     state["pending"] = None
     _save_state(state_path, state)
@@ -683,6 +758,7 @@ def _send_rows(
     usage_rows: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     audit_cursor_after: int,
+    audit_prefix_sha256_after: str,
     usage_cursors_after: Dict[str, int],
     endpoint: str,
     token: str,
@@ -701,6 +777,9 @@ def _send_rows(
             "batch_seq": sequence,
             "payload": _envelope(sequence, usage_chunk, observation_chunk),
             "audit_cursor_after": audit_cursor_after if is_last else state["audit_cursor"],
+            "audit_prefix_sha256_after": (
+                audit_prefix_sha256_after if is_last else state["audit_prefix_sha256"]
+            ),
             "usage_cursors_after": (
                 dict(usage_cursors_after) if is_last else dict(state["usage_cursors"])
             ),
@@ -721,6 +800,7 @@ def _send_rows(
 
         state["batch_seq"] = sequence
         state["audit_cursor"] = pending["audit_cursor_after"]
+        state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
         state["usage_cursors"] = dict(pending["usage_cursors_after"])
         state["pending"] = None
         _save_state(state_path, state)
@@ -748,7 +828,9 @@ def run_once(
     timeout: float,
     quiet: bool = False,
 ) -> bool:
+    _require_audit_log(audit_path)
     state = _load_state(state_path, producer_id)
+    _verify_audit_prefix(audit_path, state["audit_cursor"], state["audit_prefix_sha256"])
 
     pending_acked = False
     if state["pending"] is not None:
@@ -756,20 +838,19 @@ def run_once(
             return False
         pending_acked = True
 
-    records, next_audit_cursor, audit_reset = _read_appended_audit(
+    records, next_audit_cursor, next_audit_prefix = _read_appended_audit(
         audit_path, state["audit_cursor"]
     )
-    if audit_reset:
-        print(
-            "orihsus-shipper: audit file shrank below the saved cursor; replaying it",
-            file=sys.stderr,
-        )
     touched_hours = {_record_hour(record) for record in records}
     usage_rows = (
         aggregate_audit_records(_iter_audit_records(audit_path), touched_hours)
         if touched_hours
         else []
     )
+    if touched_hours:
+        # The source may have been rewritten while rows were aggregated. Never
+        # send a possibly incomplete complete-hour total in that case.
+        _verify_audit_prefix(audit_path, next_audit_cursor, next_audit_prefix)
 
     observations, next_usage_cursors, reset_days = _read_usage_backlog(
         usage_dir,
@@ -789,6 +870,7 @@ def run_once(
             usage_rows,
             observations,
             next_audit_cursor,
+            next_audit_prefix,
             next_usage_cursors,
             endpoint,
             token,
@@ -803,6 +885,7 @@ def run_once(
             [],
             [],
             next_audit_cursor,
+            next_audit_prefix,
             next_usage_cursors,
             endpoint,
             token,

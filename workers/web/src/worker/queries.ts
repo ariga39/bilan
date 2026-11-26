@@ -24,6 +24,8 @@ import type {
   UsageTokenColumn,
 } from "@bilan/shared";
 
+import { getQuotaOverview } from "./quota";
+
 interface ProducerRow {
   producer_id: string;
   mode: string;
@@ -484,10 +486,11 @@ export async function getOverview(
   },
 ): Promise<OverviewResponse> {
   const nowMs = now.getTime();
-  const [producerRows, latestBalances, usage] = await Promise.all([
+  const [producerRows, latestBalances, usage, quotas] = await Promise.all([
     loadProducers(db),
     loadLatestBalances(db),
     loadMonthlyUsage(db, usageQuery.timezone, usageQuery.month, now),
+    getQuotaOverview(db, now),
   ]);
   const producerIntervals = new Map(
     producerRows.map((row) => [row.producer_id, row.expected_interval_seconds]),
@@ -534,6 +537,7 @@ export async function getOverview(
     producers: producerRows.map((row) => toProducerHealth(row, nowMs)),
     balances,
     usage,
+    quotas,
   };
 }
 

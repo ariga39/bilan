@@ -9,6 +9,7 @@ can be compared byte-for-byte. Fixtures use only synthetic ``audit.jsonl`` and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -206,6 +207,7 @@ class OrihsusShipperTests(unittest.TestCase):
         self.usage_dir = os.path.join(self.tempdir, "usage")
         os.makedirs(self.usage_dir, exist_ok=True)
         self.state_path = os.path.join(self.tempdir, "shipper-state.json")
+        self.write_audit([])
         self.ingest = _IngestState()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.daemon_threads = True
@@ -839,6 +841,92 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(len(self.ingest.snapshot_observations()), 126)
         self.assertEqual(self.read_state()["batch_seq"], 2)
 
+    # -- audit log integrity ----------------------------------------------
+
+    def test_missing_audit_log_fails_before_sending_a_heartbeat(self) -> None:
+        os.remove(self.audit_path)
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("audit log not found", result.stderr)
+        self.assertEqual(self.ingest.snapshot_requests(), [])
+
+    def test_existing_empty_audit_log_still_sends_an_idle_heartbeat(self) -> None:
+        self.write_audit([])
+
+        self.assert_ok(self.run_cli())
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["payload"]["usage_buckets"], [])
+        self.assertEqual(requests[0]["payload"]["quota_observations"], [])
+        self.assertEqual(requests[0]["payload"]["batch_seq"], 1)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["audit_cursor"], 0)
+        self.assertEqual(state["audit_prefix_sha256"], hashlib.sha256(b"").hexdigest())
+
+    def test_truncated_audit_log_fails_closed_without_overwriting_complete_hour(self) -> None:
+        first = audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")
+        second = audit_record("2026-11-26T14:10:00.000Z", gateway_key="laptop-key")
+        self.write_audit([first, second])
+        self.assert_ok(self.run_cli())
+
+        key = (
+            "opencode",
+            "default",
+            "identity",
+            "laptop-key",
+            "deepseek-chat",
+            "",
+            "2026-11-26T14:00:00Z",
+        )
+        self.assertEqual(self.ingest.snapshot_usage_rows()[key]["unit_count"], 2)
+        state_before = self.read_state()
+        request_count = len(self.ingest.snapshot_requests())
+
+        # Drop the first record of an already-shipped complete hour. Replaying
+        # this replacement would overwrite the complete hour with unit_count 1.
+        self.write_audit([second])
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to replay", result.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        self.assertEqual(self.ingest.snapshot_usage_rows()[key]["unit_count"], 2)
+        state_after = self.read_state()
+        self.assertEqual(state_after["batch_seq"], state_before["batch_seq"])
+        self.assertEqual(state_after["audit_cursor"], state_before["audit_cursor"])
+        self.assertEqual(state_after["audit_prefix_sha256"], state_before["audit_prefix_sha256"])
+        self.assertIsNone(state_after["pending"])
+
+    def test_rewritten_audit_prefix_fails_closed_even_when_size_is_unchanged(self) -> None:
+        self.write_audit(
+            [
+                audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key"),
+                audit_record("2026-11-26T14:10:00.000Z", gateway_key="laptop-key"),
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        state_before = self.read_state()
+        request_count = len(self.ingest.snapshot_requests())
+
+        with open(self.audit_path, "rb") as handle:
+            original = handle.read()
+        rewritten = original.replace(b"laptop-key", b"laptop-kez", 1)
+        self.assertEqual(len(rewritten), len(original))
+        with open(self.audit_path, "wb") as handle:
+            handle.write(rewritten)
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prefix changed", result.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), request_count)
+        state_after = self.read_state()
+        self.assertEqual(state_after["batch_seq"], state_before["batch_seq"])
+        self.assertEqual(state_after["audit_cursor"], state_before["audit_cursor"])
+        self.assertEqual(state_after["audit_prefix_sha256"], state_before["audit_prefix_sha256"])
+
     # -- durable replay / ACK / heartbeat ---------------------------------
 
     def test_lost_ack_retries_identical_batch_then_heartbeats(self) -> None:
@@ -863,10 +951,14 @@ class OrihsusShipperTests(unittest.TestCase):
         state = self.read_state()
         self.assertEqual(state["batch_seq"], 0)
         self.assertEqual(state["audit_cursor"], 0)
+        self.assertEqual(state["audit_prefix_sha256"], hashlib.sha256(b"").hexdigest())
         self.assertEqual(state["usage_cursors"], {})
         self.assertEqual(state["pending"]["batch_seq"], 1)
         self.assertEqual(state["pending"]["payload"]["batch_seq"], 1)
         self.assertEqual(state["pending"]["audit_cursor_after"], os.path.getsize(self.audit_path))
+        with open(self.audit_path, "rb") as handle:
+            audit_hash = hashlib.sha256(handle.read()).hexdigest()
+        self.assertEqual(state["pending"]["audit_prefix_sha256_after"], audit_hash)
         self.assertEqual(
             state["pending"]["usage_cursors_after"],
             {"2026-11-26": os.path.getsize(os.path.join(self.usage_dir, "2026-11-26.jsonl"))},
@@ -886,6 +978,7 @@ class OrihsusShipperTests(unittest.TestCase):
         state = self.read_state()
         self.assertEqual(state["batch_seq"], 1)
         self.assertEqual(state["audit_cursor"], os.path.getsize(self.audit_path))
+        self.assertEqual(state["audit_prefix_sha256"], audit_hash)
         self.assertEqual(
             state["usage_cursors"],
             {"2026-11-26": os.path.getsize(os.path.join(self.usage_dir, "2026-11-26.jsonl"))},

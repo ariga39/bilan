@@ -95,11 +95,65 @@ export interface BalanceView {
   deltas: Array<BalanceWindowDelta>;
 }
 
+export type QuotaWindowStatus = "ok" | "limited" | "cooldown" | "unknown";
+export type QuotaObservationStatus = "ok" | "empty" | "error";
+
+export interface QuotaWindow {
+  bucket_id: string;
+  slot: string;
+  label: string | null;
+  used_percent: number | null;
+  remaining_percent: number | null;
+  status: QuotaWindowStatus | null;
+  resets_at: string | null;
+  reset_in_seconds: number | null;
+  window_duration_mins: number | null;
+}
+
+export interface QuotaObservation {
+  sample_id: string;
+  observer_machine: string;
+  sampled_at: string;
+  interval_seconds: number | null;
+  sample_age_seconds: number | null;
+  is_stale: boolean;
+  status: QuotaObservationStatus;
+  time_anomaly: string | null;
+  error_summary: string | null;
+  windows: Array<QuotaWindow>;
+}
+
+export interface QuotaAttempt {
+  sample_id: string;
+  observer_machine: string;
+  sampled_at: string;
+  sample_age_seconds: number | null;
+  status: QuotaObservationStatus;
+  time_anomaly: string | null;
+  error_summary: string | null;
+}
+
+export type QuotaAnomaly = QuotaAttempt;
+
+export interface QuotaSubject {
+  source: string;
+  account: string;
+  latest_valid: QuotaObservation | null;
+  latest_attempt: QuotaAttempt | null;
+  anomalies: Array<QuotaAnomaly>;
+}
+
+export interface QuotaResponse {
+  generated_at: string;
+  subjects: Array<QuotaSubject>;
+}
+
 export interface OverviewResponse {
   generated_at: string;
   producers: Array<ProducerHealth>;
   balances: Array<BalanceView>;
   usage: MonthlyUsage;
+  quotas: QuotaResponse;
 }
 
 export interface BalanceHistoryPoint {
