@@ -662,6 +662,96 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
         self.assertEqual(self.read_state()["cursor"], os.path.getsize(self.usage_path))
 
+    def test_pending_unacknowledged_suffix_cannot_be_replaced(self) -> None:
+        records = [
+            audit_record("2026-11-01T13:05:00Z", machine_id="machine-a"),
+            audit_record("2026-11-01T13:25:00Z", machine_id="machine-a"),
+        ]
+        full_size = self.write_records(records)
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        state = self.read_state()
+        self.assertEqual(state["pending"]["cursor_after"], full_size)
+        self.assertEqual(state["pending"]["source_extent"], full_size)
+        self.assertEqual(state["pending"]["source_checkpoint"]["cursor"], full_size)
+        requests_before = len(self.ingest.snapshot_requests())
+
+        replacement = [
+            audit_record(
+                f"2026-11-01T1{hour}:05:00Z",
+                machine_id="machine-replacement-" + "x" * 80,
+                model="gpt-5-replacement",
+            )
+            for hour in (4, 5, 6)
+        ]
+        replacement_size = self.write_records(replacement)
+        self.assertGreaterEqual(replacement_size, full_size)
+
+        replaced = self.run_cli()
+        self.assertNotEqual(replaced.returncode, 0)
+        self.assertIn("restore the complete source log", replaced.stderr.lower())
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
+        state = self.read_state()
+        self.assertEqual(state["cursor"], 0)
+        self.assertIsNotNone(state["pending"])
+
+        self.write_records(records)
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["cursor"], full_size)
+        self.assertIsNone(state["pending"])
+
+        self.write_records(
+            [audit_record("2026-11-01T13:45:00Z", machine_id="machine-a")],
+            append=True,
+        )
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+
+    def test_backfill_first_checkpoints_the_aggregated_source_extent(self) -> None:
+        records = [
+            audit_record("2026-11-01T14:05:00Z", machine_id="machine-a"),
+            audit_record("2026-11-01T14:25:00Z", machine_id="machine-a"),
+        ]
+        full_size = self.write_records(records)
+        self.assert_ok(self.run_cli(extra=["--backfill"]))
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["cursor"], 0)
+        self.assertEqual(state["source_extent"], full_size)
+        self.assertEqual(state["source_checkpoint"]["cursor"], full_size)
+        requests_before = len(self.ingest.snapshot_requests())
+
+        self.write_records(
+            [
+                audit_record(
+                    f"2026-11-01T1{hour}:05:00Z",
+                    machine_id="machine-rotated-" + "y" * 80,
+                    model="gpt-5-rotated",
+                )
+                for hour in (5, 6, 7)
+            ]
+        )
+        replaced = self.run_cli()
+        self.assertNotEqual(replaced.returncode, 0)
+        self.assertIn("restore the complete source log", replaced.stderr.lower())
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
+        state = self.read_state()
+        self.assertEqual(state["cursor"], 0)
+        self.assertEqual(state["source_extent"], full_size)
+
+        self.write_records(
+            records + [audit_record("2026-11-01T14:45:00Z", machine_id="machine-a")]
+        )
+        self.assert_ok(self.run_cli())
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+
     def test_truncated_source_fails_closed_and_recovers_after_restore(self) -> None:
         records = [
             audit_record("2026-11-01T10:05:00Z", machine_id="machine-a"),
@@ -720,6 +810,30 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
         self.assertEqual(self.read_state()["cursor"], shipped_state["cursor"])
         self.assertEqual(self.read_state()["batch_seq"], shipped_state["batch_seq"])
+
+    def test_backfill_extent_state_migrates_intact(self) -> None:
+        records = [
+            audit_record("2026-11-01T15:05:00Z", machine_id="machine-a"),
+            audit_record("2026-11-01T15:25:00Z", machine_id="machine-a"),
+        ]
+        self.write_records(records)
+        self.assert_ok(self.run_cli(extra=["--backfill"]))
+        self.assertEqual(self.read_state()["cursor"], 0)
+
+        migrated = tempfile.mkdtemp(prefix="bilan-shipper-migrated-", dir=self.tempdir)
+        migrated_usage = os.path.join(migrated, "usage.jsonl")
+        migrated_state = os.path.join(migrated, "state.json")
+        shutil.copyfile(self.usage_path, migrated_usage)
+        shutil.copyfile(self.state_path, migrated_state)
+        with open(migrated_usage, "ab") as handle:
+            record = audit_record("2026-11-01T15:45:00Z", machine_id="machine-a")
+            handle.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+
+        result = self.run_cli(usage_path=migrated_usage, state_path=migrated_state, cwd=migrated)
+        self.assert_ok(result)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
 
     def test_migrated_host_keeps_logical_producer_and_sequence(self) -> None:
         self.write_records([audit_record("2026-11-02T01:05:00Z", machine_id="machine-a")])

@@ -75,9 +75,9 @@ python -m unittest discover -s shippers/tests -v
 ```
 
 The Python suite covers synthetic CLI runs against a local replay-safe ingest
-mock, including missing/empty logs, truncation/replacement recovery, lost ACKs,
-login redirects, `202`, exact 200-only ACKs, backfill, cursor safety, and
-migration.
+mock, including missing/empty logs, truncation/replacement recovery, pending
+suffix continuity, backfill-first extents, lost ACKs, login redirects, `202`,
+exact 200-only ACKs, cursor safety, and migration.
 
 ## Local development against one D1 database
 
@@ -154,11 +154,14 @@ redirects and other 2xx responses leave the identical payload queued for retry.
 Run `--backfill` to replay the whole log without moving the incremental cursor.
 An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
 A missing log path fails closed before any heartbeat, while a real existing empty
-log remains idle and may heartbeat normally. If the consumed prefix of the log
-is shorter or no longer matches the saved source checkpoint, the shipper fails
-closed before pending retry, heartbeat, or backfill and leaves the cursor/state
-unchanged. Restore the complete source log before retrying; never truncate or
-replace it with a partial file.
+log remains idle and may heartbeat normally. The shipper checkpoints the source
+extent it has consumed or aggregated. If that prefix is shorter or no longer
+matches, it fails closed before pending retry, heartbeat, or backfill and leaves
+the cursor/state unchanged. The same checkpoint is stored with every in-flight
+batch, so an unacknowledged suffix cannot be replaced or regrown before retry.
+A backfill-first run checkpoints the extent it aggregated even though the
+incremental cursor remains `0`. Restore the complete source log before retrying;
+never truncate or replace it with a partial file.
 
 ### Migrating a shipper to another host
 
@@ -173,10 +176,11 @@ only `usage.jsonl` is not enough:
 3. Start the new host with the same `--producer-id` and the copied state file.
    Do not run the old and new writers concurrently.
 
-The shipper verifies a content checkpoint over the consumed source prefix. If
-the log has been truncated or replaced, stop the shipper, restore the complete
-log from the backup/copy, and only then retry. It will not replay a shortened
-file or advance the cursor past an incomplete source.
+The shipper verifies a content checkpoint over the consumed or aggregated
+source extent, including any in-flight batch. If the log has been truncated or
+replaced, stop the shipper, restore the complete log from the backup/copy, and
+only then retry. It will not replay a shortened file, skip an unacknowledged
+suffix, or advance the cursor past an incomplete source.
 
 If the state file is lost, restarting from sequence `1` is unsafe: a producer
 whose last accepted sequence is higher will reject it with `409`, while a
