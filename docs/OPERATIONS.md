@@ -60,12 +60,18 @@ A producer is a **logical dataset**, never a hostname. Every producer gets one
 opaque token, one explicit set of `(source, kind)` scopes, and one stable
 `producer_id`. The same token may move with its dataset during a host migration.
 
-Generate a token and its SHA-256 hash:
+Generate the token directly into its protected file, then hash the file contents.
+The token itself never appears in shell arguments or history:
 
 ```sh
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-python -c "import hashlib; print(hashlib.sha256(b'replace-with-generated-token').hexdigest())"
+TOKEN_FILE=/etc/bilan/debitmetre.token
+install -d -m 0700 /etc/bilan
+(umask 077; python -c "import secrets; print(secrets.token_urlsafe(32))" > "$TOKEN_FILE")
+chmod 600 "$TOKEN_FILE"
+python -c "import hashlib, pathlib; t = pathlib.Path('$TOKEN_FILE').read_text(encoding='utf-8').splitlines()[0]; print(hashlib.sha256(t.encode('utf-8')).hexdigest())"
 ```
+
+Repeat with the matching token file for `orihsus` and `telemetre`.
 
 `INGEST_PRODUCERS_JSON` stores only the hash. Start from
 [`ops/producers.example.json`](../ops/producers.example.json) and replace every
@@ -87,10 +93,18 @@ Token handling:
   arguments or shell history.
 - Store the token file with mode `0600`, readable only by the shipper user.
 - Put the same token on exactly one active writer for that `producer_id`.
-- To rotate, add the new hash under the same `producer_id`, deploy the config,
-  update the host token file, and then remove the old hash. Never give two
-  different logical datasets one token.
-- Never commit a token, its plaintext, or a real hash to this repository.
+- `INGEST_PRODUCERS_JSON` accepts exactly one `token_sha256` per producer, so
+  rotation is coordinated and brief downtime is expected:
+  1. Stop the shipper and disable its timer/unit.
+  2. Generate the new token into the protected file and compute its hash.
+  3. Replace the single `token_sha256` in `INGEST_PRODUCERS_JSON` and deploy
+     `bilan-ingest`.
+  4. Replace the host token file, start the same `producer_id` and state file,
+     and verify the next push gets HTTP `200`.
+  5. Resume the timer only after that check. The old token now gets `401`; do
+     not run old and new tokens concurrently.
+- Never give two different logical datasets one token, and never commit a
+  token, its plaintext, or a real hash to this repository.
 
 ## 4. Cloudflare Access: effective order
 
@@ -129,8 +143,10 @@ two timers or a manual run against the same state file at the same time.
 Templates live under [`ops/systemd/`](../ops/systemd/). They use synthetic
 paths (`/opt/bilan`, `/var/lib/bilan/host-a`, `/etc/bilan`) and do **not**
 install anything. A cron alternative is in
-[`ops/cron/bilan-shippers.example`](../ops/cron/bilan-shippers.example).
-Choose one mechanism per host, not both.
+[`ops/cron/bilan-shippers.example`](../ops/cron/bilan-shippers.example); its
+lines use per-user crontab syntax (no username field), so install them in the
+shipper user's own crontab. A system `/etc/cron.d` file needs a different format
+that includes the user field. Choose one mechanism per host, not both.
 
 Example enablement after an operator installs and reviews a template (not
 performed by this repository):
@@ -153,9 +169,18 @@ stores its cursor/outbox beside its own state path, retries the identical
 
 1. Stop the old shipper process and disable its timer/unit. Confirm no manual or
    scheduled run can still push from the old host.
-2. Copy the **source log and the exact state/outbox file together** to the new
-   host directory. If a batch is pending, the state file contains the identical
-   payload and `batch_seq` that must be retried.
+2. Copy **all** of that collector's inputs and its exact state/outbox file to
+   the new host directory. If a batch is pending, the state file contains the
+   identical payload and `batch_seq` that must be retried.
+
+   | Collector | Copy with the state file | Keep |
+   | :--- | :--- | :--- |
+   | `debitmetre` | `usage.jsonl` | The explicit `--state-file` path, or the default `.bilan-debitmetre-state.json` beside the log. |
+   | `orihsus` | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl` file** | The explicit `--state-file` path, or the default `.bilan-orihsus-state.json` beside `audit.jsonl`. A missing usage file is treated as empty, so omitting it drops unsent quota observations. |
+   | `telemetre` | A consistent SQLite backup of the centre quota database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. Stop telemetre or use SQLite's backup API; if copying files live, include `-wal` and `-shm` or the cursor may not match the restored database. |
+
+   Copy the token file too (or perform the coordinated rotation above).
+
 3. Start the new host with the same `producer_id`, the same token (or its
    rotated replacement), and the copied state file.
 4. Run once and verify the producer heartbeat updates, the sequence advances by
@@ -172,8 +197,8 @@ double-counted data.
 ## 7. Local five-platform acceptance
 
 The reproducible acceptance test uses two real local Workers sharing one D1
-database, three real shipper CLIs in separate host directories, and mocked
-scheduled OpenRouter/DeepSeek responses. It performs no cloud call.
+database, three real shipper CLIs in separate host directories, and injected
+synthetic OpenRouter/DeepSeek HTTP responses. It performs no cloud call.
 
 ```sh
 pnpm build
@@ -183,11 +208,15 @@ pnpm test:e2e:b5
 The test:
 
 - applies the real migrations to a temporary persisted D1 database;
-- starts `bilan-ingest` through a test-only entry that mocks only the two
-  scheduled adapter network calls against a loopback server; the real scheduled
-  orchestration, failure isolation, and D1 writes stay unchanged;
+- starts `bilan-ingest` through a test-only entry that passes the real
+  production adapters an injected fetch returning synthetic HTTP responses for
+  only the two exact upstream URLs; every other destination is refused, no
+  network call is made, and the real scheduled orchestration, parsing,
+  calculations, failure isolation, and D1 writes stay unchanged;
 - starts `bilan-web` against the same D1 state;
-- triggers the real scheduled handler and verifies both provider calls;
+- triggers the real scheduled handler, verifies both provider calls, changes the
+  synthetic responses to prove OpenRouter and DeepSeek parsing/calculation
+  changes, and checks a 302 fails without following or forwarding credentials;
 - runs `shippers/debitmetre.py`, `shippers/orihsus.py`, and
   `shippers/telemetre.py` with separate state files and scoped tokens;
 - reads the normal overview, daily usage, and quota responses and renders the

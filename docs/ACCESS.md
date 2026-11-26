@@ -110,7 +110,8 @@ Also verify the split boundaries:
 ## Credential handling in pull adapters
 
 Both credentialed upstream requests send `Authorization: Bearer <key>` and
-set `redirect: "error"`. The Worker therefore never follows a redirect that
-could forward a Bearer header to another host. Pull errors are recorded as
-bounded summaries such as `OpenRouter request failed (HTTP 502)`; raw response
-bodies and keys are not written to D1.
+set `redirect: "manual"`. The Worker never follows a redirect, and every non-2xx
+status (including 3xx) is treated as a pull failure, so a Bearer header cannot
+be forwarded to another host. Pull errors are recorded as bounded summaries
+such as `OpenRouter request failed (HTTP 502)`; raw response bodies and keys are
+not written to D1.

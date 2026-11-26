@@ -56,6 +56,7 @@ Individual checks:
 pnpm format:check
 pnpm lint
 pnpm typecheck
+pnpm typecheck:acceptance
 pnpm test
 pnpm build
 pnpm test:e2e     # requires pnpm build; starts local Workers and the real shippers
@@ -190,11 +191,23 @@ only `usage.jsonl` is not enough:
 
 1. Stop the old shipper process and disable its timer/systemd unit. Confirm no
    scheduled or manual run can still push from the old host.
-2. Copy the source log and the **exact** state/outbox file together. If a batch
-   is pending, the state file contains the identical payload and `batch_seq`
-   that must be retried on the new host.
+2. Copy all of that collector's inputs and the **exact** state/outbox file
+   together. If a batch is pending, the state file contains the identical
+   payload and `batch_seq` that must be retried on the new host.
+
+   | Collector    | Copy with the state file                                | State file                                                                    |
+   | :----------- | :------------------------------------------------------ | :---------------------------------------------------------------------------- |
+   | `debitmetre` | `usage.jsonl`                                           | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
+   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**    | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `telemetre`  | A consistent SQLite backup of the centre quota database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
+
+   Omitting `orihsus` daily usage files treats them as empty and drops unsent
+   observations. For a live telemetre database, stop the writer or use SQLite's
+   backup API; a raw file copy must include `-wal` and `-shm` consistently.
+
 3. Start the new host with the same `--producer-id` and the copied state file.
-   Do not run the old and new writers concurrently.
+   Do not run the old and new writers concurrently. Exact paths and token
+   rotation are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 The shipper verifies a content checkpoint over the consumed or aggregated
 source extent, including any in-flight batch. If the log has been truncated or
@@ -415,11 +428,13 @@ pnpm test:e2e:b5
 
 It starts both real local Workers against one temporary D1 database, runs the
 real `debitmetre.py`, `orihsus.py`, and `telemetre.py` CLIs from separate host
-directories with separate state and scoped tokens, and mocks only the scheduled
-OpenRouter/DeepSeek upstream calls with fixed synthetic balances. It verifies
-Codex usage/quota, OpenCode Go usage/quota, AGY quota without any AGY token
-total, and OpenRouter/DeepSeek balances through the normal read API and dashboard
-sections. It also copies a
+directories with separate state and scoped tokens, and gives the real production
+scheduled adapters synthetic HTTP responses for only the two exact upstream
+URLs (no network). Changing those fixtures proves the actual parsing and
+balance calculations. It verifies Codex usage/quota, OpenCode Go usage/quota,
+AGY quota without any AGY token total, and OpenRouter/DeepSeek balances through
+the normal read API and dashboard sections. A 302 fixture confirms redirects
+fail without following or forwarding credentials. It also copies a
 collector log and state to a migrated host to assert zero double-counting, and
 checks route/secret isolation plus cross-scope `403` rejection.
 

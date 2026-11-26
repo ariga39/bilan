@@ -177,7 +177,7 @@ describe("ingest to read integration", () => {
     await runScheduledPulls();
     const body = await overview();
 
-    expect(calls.calls.every((call) => call.redirect === "error")).toBe(true);
+    expect(calls.calls.every((call) => call.redirect === "manual")).toBe(true);
     expect(body.balances).toHaveLength(3);
     expect(body.producers).toHaveLength(2);
     expect(

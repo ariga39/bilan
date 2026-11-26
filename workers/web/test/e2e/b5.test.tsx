@@ -11,8 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, request } from "node:http";
-import type { Server } from "node:http";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -66,9 +65,11 @@ const PRODUCERS_JSON = JSON.stringify({
   },
 });
 
-interface UpstreamCall {
-  path: string;
+interface RecordedCall {
+  url: string;
   authorization: string | null;
+  redirect?: string;
+  status: number;
 }
 
 let tempDir = "";
@@ -78,9 +79,6 @@ let hostOrihsusDir = "";
 let hostTelemetreDir = "";
 let ingest: DevWorker | null = null;
 let web: DevWorker | null = null;
-let upstreamServer: Server | null = null;
-let upstreamBase = "";
-let upstreamCalls: Array<UpstreamCall> = [];
 let ingestBase = "";
 let webBase = "";
 
@@ -259,78 +257,6 @@ function usageHistoryRecord(
   return record;
 }
 
-async function startUpstreamMock(): Promise<string> {
-  upstreamCalls = [];
-  const server = createServer((request, response) => {
-    const requestPath = request.url ?? "";
-    upstreamCalls.push({
-      path: requestPath,
-      authorization: request.headers.authorization ?? null,
-    });
-    request.resume();
-
-    const send = (status: number, body: unknown): void => {
-      const payload = JSON.stringify(body);
-      response.writeHead(status, {
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(payload),
-      });
-      response.end(payload);
-    };
-
-    if (requestPath === "/openrouter/api/v1/credits") {
-      if (request.headers.authorization !== `Bearer ${OPENROUTER_KEY}`) {
-        send(401, { error: "unauthorized" });
-        return;
-      }
-      send(200, { data: { total_credits: 50, total_usage: 12.5 } });
-      return;
-    }
-
-    if (requestPath === "/deepseek/user/balance") {
-      if (request.headers.authorization !== `Bearer ${DEEPSEEK_KEY}`) {
-        send(401, { error: "unauthorized" });
-        return;
-      }
-      send(200, {
-        is_available: true,
-        balance_infos: [
-          {
-            currency: "CNY",
-            total_balance: "83.50",
-            granted_balance: "3.50",
-            topped_up_balance: "80.00",
-          },
-          {
-            currency: "USD",
-            total_balance: "5.00",
-            granted_balance: "0.00",
-            topped_up_balance: "5.00",
-          },
-        ],
-      });
-      return;
-    }
-
-    send(404, { error: "unexpected_url" });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("mock upstream server did not expose a TCP address");
-  }
-  upstreamServer = server;
-  return `http://127.0.0.1:${address.port}`;
-}
-
 function createHostFixtures(): void {
   hostDebitmetreDir = path.join(tempDir, "host-a-debitmetre");
   hostOrihsusDir = path.join(tempDir, "host-b-orihsus");
@@ -404,25 +330,57 @@ async function readOverview(webUrl: string): Promise<OverviewResponse> {
   return parsed.data;
 }
 
-async function waitForPulledBalances(webUrl: string): Promise<OverviewResponse> {
-  const deadline = Date.now() + 20_000;
-  let lastBody = "";
-  while (Date.now() < deadline) {
-    const response = await httpCall(
-      `${webUrl}/api/v1/overview?tz=${encodeURIComponent(TIMEZONE)}&month=${MONTH}`,
-    );
-    lastBody = response.body;
-    if (response.status === 200) {
-      const parsed = overviewResponseSchema.safeParse(JSON.parse(response.body));
-      if (parsed.success && parsed.data.balances.length === 3) {
-        return parsed.data;
-      }
-    }
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 250);
-    });
+async function selectUpstreamFixture(
+  ingestUrl: string,
+  name: "v1" | "v2" | "redirect",
+  at: string,
+): Promise<void> {
+  const response = await httpCall(
+    `${ingestUrl}/__b5_fixture?name=${name}&at=${encodeURIComponent(at)}`,
+  );
+  expect(response.status, response.body).toBe(200);
+  expect(response.body).toBe(name);
+}
+
+async function triggerScheduledPull(ingestUrl: string): Promise<void> {
+  const response = await httpCall(`${ingestUrl}/__scheduled?cron=*/30+*+*+*+*`);
+  expect(response.status, response.body).toBe(200);
+}
+
+function isRecordedCall(value: unknown): value is RecordedCall {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "url" in value &&
+    typeof value.url === "string" &&
+    "authorization" in value &&
+    (value.authorization === null || typeof value.authorization === "string") &&
+    (!("redirect" in value) ||
+      value.redirect === undefined ||
+      typeof value.redirect === "string") &&
+    "status" in value &&
+    typeof value.status === "number"
+  );
+}
+
+function isRecordedCalls(value: unknown): value is { calls: Array<RecordedCall> } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "calls" in value &&
+    Array.isArray(value.calls) &&
+    value.calls.every(isRecordedCall)
+  );
+}
+
+async function readRecordedCalls(ingestUrl: string, reset = false): Promise<Array<RecordedCall>> {
+  const response = await httpCall(`${ingestUrl}/__b5_calls${reset ? "?reset=1" : ""}`);
+  expect(response.status, response.body).toBe(200);
+  const raw: unknown = JSON.parse(response.body);
+  if (!isRecordedCalls(raw)) {
+    throw new Error("recorded calls response has an unexpected shape");
   }
-  throw new Error(`scheduled balance pull did not reach the read API:\n${lastBody}`);
+  return raw.calls;
 }
 
 async function readDaily(webUrl: string): Promise<UsageDailyResponse> {
@@ -473,7 +431,6 @@ beforeAll(async () => {
   tempDir = mkdtempSync(path.join(tmpdir(), "bilan-b5-e2e-"));
   stateDir = path.join(tempDir, "d1");
   createHostFixtures();
-  upstreamBase = await startUpstreamMock();
 
   const migrate = spawnSync(
     "pnpm",
@@ -507,7 +464,6 @@ beforeAll(async () => {
         INGEST_PRODUCERS_JSON: { type: "plain_text", value: PRODUCERS_JSON },
         OPENROUTER_API_KEY: { type: "plain_text", value: OPENROUTER_KEY },
         DEEPSEEK_API_KEY: { type: "plain_text", value: DEEPSEEK_KEY },
-        B5_MOCK_UPSTREAM_URL: { type: "plain_text", value: upstreamBase },
       },
       dev: {
         persist: stateDir,
@@ -544,12 +500,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await ingest?.dispose();
   await web?.dispose();
-  if (upstreamServer !== null) {
-    await new Promise<void>((resolve) => {
-      upstreamServer?.close(() => resolve());
-    });
-    upstreamServer = null;
-  }
   if (tempDir) {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -563,22 +513,114 @@ describe("B5 multi-host acceptance", () => {
     const ingestUrl = ingestBase;
     const webUrl = webBase;
 
-    // Zero manual-pull step: trigger the real scheduled entry point. Only the
-    // two upstream URLs are redirected to the loopback mock.
-    const scheduled = await httpCall(`${ingestUrl}/__scheduled?cron=*/30+*+*+*+*`);
-    expect(scheduled.status, scheduled.body).toBe(200);
+    // Zero manual-pull step: the production adapters run with only their
+    // outbound transport replaced by synthetic HTTP responses.
+    await selectUpstreamFixture(ingestUrl, "v1", "2026-11-26T14:00:00Z");
+    await readRecordedCalls(ingestUrl, true);
+    await triggerScheduledPull(ingestUrl);
+    const firstPulled = await readOverview(webUrl);
+    expect(
+      firstPulled.balances.find((balance) => balance.provider === "openrouter")?.total_balance,
+    ).toBe(37.5);
+    expect(
+      firstPulled.balances.find(
+        (balance) => balance.provider === "deepseek" && balance.currency === "CNY",
+      )?.total_balance,
+    ).toBe(83.5);
+    expect(
+      firstPulled.balances.find(
+        (balance) => balance.provider === "deepseek" && balance.currency === "USD",
+      )?.total_balance,
+    ).toBe(5);
+    expect(
+      firstPulled.balances.find((balance) => balance.provider === "deepseek")?.is_available,
+    ).toBe(true);
+    const firstCalls = await readRecordedCalls(ingestUrl);
+    expect(firstCalls).toHaveLength(2);
+    expect(firstCalls).toEqual(
+      expect.arrayContaining([
+        {
+          url: "https://openrouter.ai/api/v1/credits",
+          authorization: `Bearer ${OPENROUTER_KEY}`,
+          redirect: "manual",
+          status: 200,
+        },
+        {
+          url: "https://api.deepseek.com/user/balance",
+          authorization: `Bearer ${DEEPSEEK_KEY}`,
+          redirect: "manual",
+          status: 200,
+        },
+      ]),
+    );
 
-    await waitForPulledBalances(webUrl);
-    expect(upstreamCalls).toEqual([
-      {
-        path: "/openrouter/api/v1/credits",
-        authorization: `Bearer ${OPENROUTER_KEY}`,
-      },
-      {
-        path: "/deepseek/user/balance",
-        authorization: `Bearer ${DEEPSEEK_KEY}`,
-      },
-    ]);
+    // Changing only the synthetic HTTP responses must flow through the real
+    // parser and calculations: OpenRouter total_balance = credits - usage, and
+    // DeepSeek decimal strings are converted without losing currencies.
+    await selectUpstreamFixture(ingestUrl, "v2", "2026-11-26T15:00:00Z");
+    await readRecordedCalls(ingestUrl, true);
+    await triggerScheduledPull(ingestUrl);
+    const secondPulled = await readOverview(webUrl);
+    const secondOpenRouter = secondPulled.balances.find(
+      (balance) => balance.provider === "openrouter",
+    );
+    expect(secondOpenRouter?.total_balance).toBe(39.5);
+    expect(secondOpenRouter?.cumulative_usage).toBe(20.5);
+    expect(
+      secondPulled.balances.find(
+        (balance) => balance.provider === "deepseek" && balance.currency === "CNY",
+      )?.total_balance,
+    ).toBe(110);
+    expect(
+      secondPulled.balances.find(
+        (balance) => balance.provider === "deepseek" && balance.currency === "USD",
+      )?.total_balance,
+    ).toBe(7.25);
+    expect(
+      secondPulled.balances.find((balance) => balance.provider === "deepseek")?.is_available,
+    ).toBe(false);
+    const secondCalls = await readRecordedCalls(ingestUrl);
+    expect(secondCalls).toHaveLength(2);
+    expect(secondCalls.every((call) => call.redirect === "manual")).toBe(true);
+
+    // A 302 must fail through the adapter's non-ok path, never follow the
+    // Location, and never send the Authorization header anywhere else.
+    await selectUpstreamFixture(ingestUrl, "redirect", "2026-11-26T16:00:00Z");
+    await readRecordedCalls(ingestUrl, true);
+    await triggerScheduledPull(ingestUrl);
+    const redirectCalls = await readRecordedCalls(ingestUrl);
+    expect(redirectCalls).toHaveLength(2);
+    expect(redirectCalls).toEqual(
+      expect.arrayContaining([
+        {
+          url: "https://openrouter.ai/api/v1/credits",
+          authorization: `Bearer ${OPENROUTER_KEY}`,
+          redirect: "manual",
+          status: 302,
+        },
+        {
+          url: "https://api.deepseek.com/user/balance",
+          authorization: `Bearer ${DEEPSEEK_KEY}`,
+          redirect: "manual",
+          status: 200,
+        },
+      ]),
+    );
+    expect(redirectCalls.some((call) => call.url.includes("redirect.invalid"))).toBe(false);
+    const afterRedirect = await readOverview(webUrl);
+    expect(
+      afterRedirect.producers.find((producer) => producer.producer_id === "pull-openrouter"),
+    ).toMatchObject({
+      last_status: "error",
+      last_error: "OpenRouter request failed (HTTP 302)",
+    });
+    expect(
+      afterRedirect.balances.find((balance) => balance.provider === "openrouter")?.total_balance,
+    ).toBe(39.5);
+
+    // Return to a healthy fixture so later checks see successful producers.
+    await selectUpstreamFixture(ingestUrl, "v2", "2026-11-26T17:00:00Z");
+    await triggerScheduledPull(ingestUrl);
 
     runShipper(
       "debitmetre.py",
@@ -662,10 +704,11 @@ describe("B5 multi-host acceptance", () => {
     const deepSeekUsd = overview.balances.find(
       (balance) => balance.provider === "deepseek" && balance.currency === "USD",
     );
-    expect(openRouter?.total_balance).toBe(37.5);
-    expect(openRouter?.cumulative_usage).toBe(12.5);
-    expect(deepSeekCny?.total_balance).toBe(83.5);
-    expect(deepSeekUsd?.total_balance).toBe(5);
+    expect(openRouter?.total_balance).toBe(39.5);
+    expect(openRouter?.cumulative_usage).toBe(20.5);
+    expect(deepSeekCny?.total_balance).toBe(110);
+    expect(deepSeekUsd?.total_balance).toBe(7.25);
+    expect(deepSeekCny?.is_available).toBe(false);
 
     const codexRow = overview.usage.rows.find(
       (row) =>

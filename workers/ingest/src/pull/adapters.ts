@@ -14,7 +14,7 @@ export interface PullAdapter {
   readonly displayName: string;
   readonly expectedIntervalSeconds: number;
   isEnabled(env: Env): boolean;
-  pull(env: Env, sampledAt: string): Promise<Array<BalanceSnapshotInput>>;
+  pull(env: Env, sampledAt: string, fetchImpl?: typeof fetch): Promise<Array<BalanceSnapshotInput>>;
 }
 
 const decimal = z
@@ -58,16 +58,19 @@ async function requestJson<T>(
   providerLabel: string,
   schema: z.ZodType<T>,
   invalidMessage: string,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<T> {
   let response: Response;
 
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       headers: {
         accept: "application/json",
         authorization: `Bearer ${apiKey}`,
       },
-      redirect: "error",
+      // Workerd rejects redirect "error". "manual" keeps the Authorization
+      // header from being forwarded; the response.ok guard below rejects 3xx.
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
   } catch (error) {
@@ -105,7 +108,7 @@ export const openRouterAdapter: PullAdapter = {
   displayName: "OpenRouter balance",
   expectedIntervalSeconds: 1800,
   isEnabled: (env) => (env.OPENROUTER_API_KEY ?? "") !== "",
-  async pull(env, sampledAt) {
+  async pull(env, sampledAt, fetchImpl = fetch) {
     const apiKey = env.OPENROUTER_API_KEY ?? "";
     const credits = await requestJson(
       OPENROUTER_CREDITS_URL,
@@ -113,6 +116,7 @@ export const openRouterAdapter: PullAdapter = {
       "OpenRouter",
       openRouterCreditsSchema,
       "OpenRouter response missing credit fields",
+      fetchImpl,
     );
 
     return [
@@ -139,7 +143,7 @@ export const deepSeekAdapter: PullAdapter = {
   displayName: "DeepSeek balance",
   expectedIntervalSeconds: 1800,
   isEnabled: (env) => (env.DEEPSEEK_API_KEY ?? "") !== "",
-  async pull(env, sampledAt) {
+  async pull(env, sampledAt, fetchImpl = fetch) {
     const apiKey = env.DEEPSEEK_API_KEY ?? "";
     const balance = await requestJson(
       DEEPSEEK_BALANCE_URL,
@@ -147,6 +151,7 @@ export const deepSeekAdapter: PullAdapter = {
       "DeepSeek",
       deepSeekBalanceSchema,
       "DeepSeek response contained an invalid balance",
+      fetchImpl,
     );
     const isAvailable = balance.is_available ?? null;
 
