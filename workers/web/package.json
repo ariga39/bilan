@@ -6,6 +6,7 @@
     "build": "vite build",
     "dev": "vite",
     "test": "pnpm test:worker && pnpm test:ui",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.client.json"

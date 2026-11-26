@@ -121,6 +121,8 @@ async function usageRows() {
 
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM quota_windows"),
+    env.DB.prepare("DELETE FROM quota_observations"),
     env.DB.prepare("DELETE FROM usage_buckets"),
     env.DB.prepare("DELETE FROM producers"),
   ]);
@@ -282,7 +284,18 @@ describe("POST /api/v1/ingest", () => {
     const wrongKind = await post(
       {
         ...envelope(1, []),
-        quota_observations: [{ sample_id: "out-of-scope" }],
+        quota_observations: [
+          {
+            sample_id: "codex:out-of-scope:2026-11-01T00:00:00Z",
+            source: "codex",
+            account: "default",
+            observer_machine: "machine-a",
+            sampled_at: "2026-11-01T00:00:00Z",
+            interval_seconds: 300,
+            status: "ok",
+            windows: [],
+          },
+        ],
       },
       DEBITMETRE_TOKEN,
     );

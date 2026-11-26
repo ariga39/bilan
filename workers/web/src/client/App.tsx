@@ -9,6 +9,7 @@ import {
   Activity,
   AlertTriangle,
   CircleDollarSign,
+  Gauge,
   History,
   LockKeyhole,
   RefreshCw,
@@ -19,6 +20,7 @@ import { useEffect, useState } from "react";
 import { BalanceCard, BalancesEmptyState } from "@/components/balance-card";
 import { BalanceHistoryChart } from "@/components/balance-history-chart";
 import { HealthStrip } from "@/components/health-strip";
+import { QuotaSection } from "@/components/quota-section";
 import { UsageSection } from "@/components/usage-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -175,7 +177,8 @@ export function App() {
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">bilan</h1>
               <p className="text-sm text-muted-foreground">
-                Prepaid balances, Codex token usage, and collection health.
+                Prepaid balances, Codex and OpenCode Go token usage, per-key quotas, and collection
+                health.
               </p>
             </div>
           </div>
@@ -245,11 +248,31 @@ export function App() {
           )}
         </section>
 
+        {overview || loading ? (
+          <section>
+            <SectionHeading
+              icon={Gauge}
+              title="Quota windows"
+              description="Latest valid sample per OpenCode Go key or Codex account. Missing windows disappear rather than carrying forward; failed, empty, and anomalous attempts are shown separately."
+            />
+            {overview ? (
+              <QuotaSection quota={overview.quotas} />
+            ) : (
+              <Card className="border-dashed">
+                <CardContent className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+                  <RefreshCw className="size-4 animate-spin" />
+                  Loading quota windows…
+                </CardContent>
+              </Card>
+            )}
+          </section>
+        ) : null}
+
         <section>
           <SectionHeading
             icon={Activity}
             title="Token usage"
-            description="Codex records from debitmetre, broken down by machine, model, and declared reasoning effort. Heartbeat liveness stays separate from the latest usage hour."
+            description="Codex machines and OpenCode Go caller identities, broken down by model and declared reasoning effort. Heartbeat liveness stays separate from the latest usage hour."
           />
           {overview ? (
             <UsageSection
@@ -328,7 +351,8 @@ export function App() {
 
         <footer className="border-t pt-4 text-xs text-muted-foreground">
           Read-only surface. Balance collection runs on the write Worker schedule; Codex usage is
-          pushed by debitmetre. This page refreshes every 60 seconds.
+          pushed by debitmetre; OpenCode Go usage and quotas are pushed by orihsus. This page
+          refreshes every 60 seconds.
         </footer>
       </div>
     </div>

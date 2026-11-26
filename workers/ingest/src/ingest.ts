@@ -1,5 +1,10 @@
-import type { IngestEnvelope, UsageBucketInput } from "./validate";
-import { MAX_INGEST_BYTES, parseEnvelope } from "./validate";
+import type {
+  IngestEnvelope,
+  QuotaObservationInput,
+  QuotaWindowInput,
+  UsageBucketInput,
+} from "./validate";
+import { MAX_INGEST_BYTES, ingestRowCount, parseEnvelope } from "./validate";
 import type { Env } from "./types";
 import {
   IngestConfigError,
@@ -48,6 +53,30 @@ DO UPDATE SET
   batch_seq = excluded.batch_seq,
   updated_at = excluded.updated_at
 WHERE excluded.batch_seq >= usage_buckets.batch_seq`;
+
+const INSERT_QUOTA_OBSERVATION = `INSERT INTO quota_observations (
+  producer_id, sample_id, source, account, observer_machine, sampled_at,
+  interval_seconds, status, time_anomaly, error_summary, ingested_at, batch_seq
+)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE (SELECT last_batch_seq FROM producers WHERE producer_id = ?) < ?
+ON CONFLICT(producer_id, sample_id) DO NOTHING`;
+
+// Children are inserted only while this batch still owns the producer sequence
+// and only for a parent observation accepted by this same batch. An observation
+// already stored under an older batch_seq is immutable: a repeated sample_id
+// cannot gain or replace windows.
+const INSERT_QUOTA_WINDOW = `INSERT INTO quota_windows (
+  producer_id, sample_id, bucket_id, slot, label, used_percent,
+  remaining_percent, status, resets_at, window_duration_mins, meta_json
+)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE (SELECT last_batch_seq FROM producers WHERE producer_id = ?) < ?
+  AND EXISTS (
+    SELECT 1 FROM quota_observations
+    WHERE producer_id = ? AND sample_id = ? AND batch_seq = ?
+  )
+ON CONFLICT(producer_id, sample_id, bucket_id, slot) DO NOTHING`;
 
 const COMMIT_PRODUCER = `UPDATE producers SET
   last_batch_seq = ?,
@@ -103,7 +132,59 @@ function usageStatement(
   );
 }
 
-export async function commitUsageBatch(
+function quotaObservationStatement(
+  env: Env,
+  producer: ProducerConfig,
+  observation: QuotaObservationInput,
+  sequence: number,
+  now: string,
+): D1PreparedStatement {
+  return env.DB.prepare(INSERT_QUOTA_OBSERVATION).bind(
+    producer.producerId,
+    observation.sample_id,
+    observation.source,
+    observation.account,
+    observation.observer_machine,
+    observation.sampled_at,
+    observation.interval_seconds,
+    observation.status,
+    observation.time_anomaly,
+    observation.error_summary,
+    now,
+    sequence,
+    producer.producerId,
+    sequence,
+  );
+}
+
+function quotaWindowStatement(
+  env: Env,
+  producer: ProducerConfig,
+  observation: QuotaObservationInput,
+  window: QuotaWindowInput,
+  sequence: number,
+): D1PreparedStatement {
+  return env.DB.prepare(INSERT_QUOTA_WINDOW).bind(
+    producer.producerId,
+    observation.sample_id,
+    window.bucket_id,
+    window.slot,
+    window.label,
+    window.used_percent,
+    window.remaining_percent,
+    window.status,
+    window.resets_at,
+    window.window_duration_mins,
+    window.meta_json,
+    producer.producerId,
+    sequence,
+    producer.producerId,
+    observation.sample_id,
+    sequence,
+  );
+}
+
+export async function commitIngestBatch(
   env: Env,
   producer: ProducerConfig,
   envelope: IngestEnvelope,
@@ -122,6 +203,13 @@ export async function commitUsageBatch(
 
   for (const bucket of envelope.usage_buckets) {
     statements.push(usageStatement(env, producer, bucket, envelope.batch_seq, now));
+  }
+
+  for (const observation of envelope.quota_observations) {
+    statements.push(quotaObservationStatement(env, producer, observation, envelope.batch_seq, now));
+    for (const window of observation.windows) {
+      statements.push(quotaWindowStatement(env, producer, observation, window, envelope.batch_seq));
+    }
   }
 
   statements.push(
@@ -218,9 +306,9 @@ export async function handleIngest(request: Request, env: Env): Promise<IngestRe
     return { status: 400, body: { error: "invalid_payload" } };
   }
 
-  // B2 only authorizes usage buckets. Unsupported non-empty kinds are rejected
-  // before any write rather than being silently ignored.
-  if (envelope.value.quota_observations.length > 0 || envelope.value.balance_snapshots.length > 0) {
+  // Balance push is not part of the v1 producer contract. Every non-empty
+  // usage or quota row must be covered by an explicit (source, kind) scope.
+  if (envelope.value.balance_snapshots.length > 0) {
     return { status: 403, body: { error: "forbidden_scope" } };
   }
   for (const bucket of envelope.value.usage_buckets) {
@@ -228,10 +316,15 @@ export async function handleIngest(request: Request, env: Env): Promise<IngestRe
       return { status: 403, body: { error: "forbidden_scope" } };
     }
   }
+  for (const observation of envelope.value.quota_observations) {
+    if (!scopeAllows(producer, observation.source, "quota_observations")) {
+      return { status: 403, body: { error: "forbidden_scope" } };
+    }
+  }
 
   let result: CommitResult;
   try {
-    result = await commitUsageBatch(env, producer, envelope.value);
+    result = await commitIngestBatch(env, producer, envelope.value);
   } catch {
     return { status: 500, body: { error: "storage_write_failed" } };
   }
@@ -250,7 +343,7 @@ export async function handleIngest(request: Request, env: Env): Promise<IngestRe
     body: {
       status: "ok",
       batch_seq: envelope.value.batch_seq,
-      rows: envelope.value.usage_buckets.length,
+      rows: ingestRowCount(envelope.value),
     },
   };
 }

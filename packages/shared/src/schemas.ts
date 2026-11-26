@@ -10,8 +10,14 @@ import type {
   MonthlyUsage,
   OverviewResponse,
   ProducerHealth,
+  QuotaAttempt,
+  QuotaObservation,
+  QuotaResponse,
+  QuotaSubject,
+  QuotaWindow,
   UsageBreakdownRow,
   UsageDailyResponse,
+  UsageSourceFreshness,
 } from "./index";
 
 const balanceProviderSchema = z.enum(["openrouter", "deepseek"]);
@@ -100,6 +106,13 @@ const usageBreakdownRowSchema: z.ZodType<UsageBreakdownRow> = z.object({
   ...usageCountersShape,
 });
 
+const usageSourceFreshnessSchema: z.ZodType<UsageSourceFreshness> = z.object({
+  source: z.string(),
+  latest_bucket_start: z.string().nullable(),
+  data_age_seconds: z.number().nullable(),
+  is_stale: z.boolean(),
+});
+
 const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
   timezone: z.string(),
   month: z.string(),
@@ -108,6 +121,7 @@ const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
   latest_bucket_start: z.string().nullable(),
   data_age_seconds: z.number().nullable(),
   is_stale: z.boolean(),
+  source_freshness: z.array(usageSourceFreshnessSchema),
   rows: z.array(usageBreakdownRowSchema),
 });
 
@@ -129,11 +143,60 @@ export const usageDailyResponseSchema: z.ZodType<UsageDailyResponse> = z.object(
   rows: z.array(dailyUsageRowSchema),
 });
 
+const quotaWindowSchema: z.ZodType<QuotaWindow> = z.object({
+  bucket_id: z.string(),
+  slot: z.string(),
+  label: z.string().nullable(),
+  used_percent: z.number().nullable(),
+  remaining_percent: z.number().nullable(),
+  status: z.enum(["ok", "limited", "cooldown", "unknown"]).nullable(),
+  resets_at: z.string().nullable(),
+  reset_in_seconds: z.number().nullable(),
+  window_duration_mins: z.number().nullable(),
+});
+
+const quotaObservationSchema: z.ZodType<QuotaObservation> = z.object({
+  sample_id: z.string(),
+  observer_machine: z.string(),
+  sampled_at: z.string(),
+  interval_seconds: z.number().nullable(),
+  sample_age_seconds: z.number().nullable(),
+  is_stale: z.boolean(),
+  status: z.enum(["ok", "empty", "error"]),
+  time_anomaly: z.string().nullable(),
+  error_summary: z.string().nullable(),
+  windows: z.array(quotaWindowSchema),
+});
+
+const quotaAttemptSchema: z.ZodType<QuotaAttempt> = z.object({
+  sample_id: z.string(),
+  observer_machine: z.string(),
+  sampled_at: z.string(),
+  sample_age_seconds: z.number().nullable(),
+  status: z.enum(["ok", "empty", "error"]),
+  time_anomaly: z.string().nullable(),
+  error_summary: z.string().nullable(),
+});
+
+const quotaSubjectSchema: z.ZodType<QuotaSubject> = z.object({
+  source: z.string(),
+  account: z.string(),
+  latest_valid: quotaObservationSchema.nullable(),
+  latest_attempt: quotaAttemptSchema.nullable(),
+  anomalies: z.array(quotaAttemptSchema),
+});
+
+export const quotaResponseSchema: z.ZodType<QuotaResponse> = z.object({
+  generated_at: z.string(),
+  subjects: z.array(quotaSubjectSchema),
+});
+
 export const overviewResponseSchema: z.ZodType<OverviewResponse> = z.object({
   generated_at: z.string(),
   producers: z.array(producerHealthSchema),
   balances: z.array(balanceViewSchema),
   usage: monthlyUsageSchema,
+  quotas: quotaResponseSchema,
 });
 
 const balanceHistoryPointSchema: z.ZodType<BalanceHistoryPoint> = z.object({

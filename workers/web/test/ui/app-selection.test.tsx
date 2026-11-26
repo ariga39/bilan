@@ -50,7 +50,19 @@ function overviewPayload(month: string, timezone: string, actor: string): Overvi
       latest_bucket_start: "2026-11-01T00:00:00Z",
       data_age_seconds: 60,
       is_stale: false,
+      source_freshness: [
+        {
+          source: "codex",
+          latest_bucket_start: "2026-11-01T00:00:00Z",
+          data_age_seconds: 60,
+          is_stale: false,
+        },
+      ],
       rows: [usageRow(actor)],
+    },
+    quotas: {
+      generated_at: "2026-11-27T12:00:00Z",
+      subjects: [],
     },
   };
 }

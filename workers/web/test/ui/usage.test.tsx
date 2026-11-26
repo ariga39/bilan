@@ -1,5 +1,5 @@
 import type { MonthlyUsage, UsageDailyResponse } from "@bilan/shared";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UsageSection } from "@/components/usage-section";
@@ -14,6 +14,20 @@ const usage: MonthlyUsage = {
   latest_bucket_start: "2026-11-02T00:00:00Z",
   data_age_seconds: 120,
   is_stale: false,
+  source_freshness: [
+    {
+      source: "codex",
+      latest_bucket_start: "2026-11-02T00:00:00Z",
+      data_age_seconds: 120,
+      is_stale: false,
+    },
+    {
+      source: "opencode",
+      latest_bucket_start: "2026-11-01T18:00:00Z",
+      data_age_seconds: 21_600,
+      is_stale: true,
+    },
+  ],
   rows: [
     {
       source: "codex",
@@ -64,6 +78,31 @@ const usage: MonthlyUsage = {
       reasoning_counted: 0,
       is_partial: true,
       partial_columns: ["input_tokens", "cached_tokens", "uncached_tokens", "reasoning_tokens"],
+    },
+    {
+      source: "opencode",
+      accounting_basis: "orihsus-audit-v1",
+      unit_kind: "request",
+      actor_kind: "identity",
+      actor_id: "laptop-key",
+      model: "deepseek-chat",
+      effort: "",
+      unit_count: 2,
+      coverage_gaps: 0,
+      input_tokens: 120,
+      input_counted: 2,
+      cached_tokens: 80,
+      cached_counted: 2,
+      uncached_tokens: 40,
+      uncached_counted: 2,
+      cache_write_tokens: null,
+      cache_write_counted: 0,
+      output_tokens: 10,
+      output_counted: 2,
+      reasoning_tokens: 4,
+      reasoning_counted: 2,
+      is_partial: false,
+      partial_columns: [],
     },
   ],
 };
@@ -118,11 +157,33 @@ const daily: UsageDailyResponse = {
       is_partial: true,
       partial_columns: ["output_tokens"],
     },
+    {
+      source: "opencode",
+      accounting_basis: "orihsus-audit-v1",
+      unit_kind: "request",
+      date: "2026-11-02",
+      unit_count: 2,
+      coverage_gaps: 0,
+      input_tokens: 120,
+      input_counted: 2,
+      cached_tokens: 80,
+      cached_counted: 2,
+      uncached_tokens: 40,
+      uncached_counted: 2,
+      cache_write_tokens: null,
+      cache_write_counted: 0,
+      output_tokens: 10,
+      output_counted: 2,
+      reasoning_tokens: 4,
+      reasoning_counted: 2,
+      is_partial: false,
+      partial_columns: [],
+    },
   ],
 };
 
-describe("Codex usage dashboard section", () => {
-  it("renders timezone/month controls, machine/model/effort rows, daily view, and partial counters", () => {
+describe("Token usage dashboard section", () => {
+  it("separates machine and identity rows with timezone/month controls and partial counters", () => {
     render(
       <UsageSection
         usage={usage}
@@ -134,17 +195,29 @@ describe("Codex usage dashboard section", () => {
       />,
     );
 
-    expect(screen.getByText("Codex token usage")).toBeTruthy();
+    expect(screen.getByText("Token usage breakdown")).toBeTruthy();
     expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("Asia/Shanghai");
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe("2026-11");
     expect(screen.getByText("Monthly breakdown")).toBeTruthy();
     expect(screen.getByLabelText("Codex token usage by machine, model, and effort")).toBeTruthy();
+    expect(
+      screen.getByLabelText("OpenCode Go token usage by identity, model, and effort"),
+    ).toBeTruthy();
 
     expect(screen.getByText("machine-a")).toBeTruthy();
+    expect(screen.getByText("laptop-key")).toBeTruthy();
     expect(screen.getByText("gpt-5")).toBeTruthy();
+    expect(screen.getByText("deepseek-chat")).toBeTruthy();
     expect(screen.getByText("high")).toBeTruthy();
     expect(screen.getByText("machine-b")).toBeTruthy();
-    expect(screen.getByText("Unlabelled")).toBeTruthy();
+    expect(screen.getAllByText("Unlabelled").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Machine").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Identity").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("OpenCode Go").length).toBeGreaterThan(0);
+    expect(within(screen.getByLabelText("Codex freshness")).queryByText("Delayed")).toBeNull();
+    expect(
+      within(screen.getByLabelText("OpenCode Go freshness")).getByText("Delayed"),
+    ).toBeTruthy();
 
     // NULL stays absent; an explicitly reported zero is shown as 0.
     expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
@@ -157,10 +230,8 @@ describe("Codex usage dashboard section", () => {
     expect(screen.getByText("Daily view")).toBeTruthy();
     expect(screen.getByLabelText("Daily token usage")).toBeTruthy();
     expect(screen.getByText("2026-11-01")).toBeTruthy();
-    expect(screen.getByText("2026-11-02")).toBeTruthy();
+    expect(screen.getAllByText("2026-11-02").length).toBeGreaterThan(0);
     expect(screen.getByText("(4/5)")).toBeTruthy();
-
-    expect(document.body.textContent).not.toMatch(/AGY|quota/iu);
   });
 
   it("reports timezone and month changes to the dashboard", () => {
@@ -219,7 +290,13 @@ describe("Codex usage dashboard section", () => {
   it("shows an explicit empty state without inventing token totals", () => {
     render(
       <UsageSection
-        usage={{ ...usage, rows: [], latest_bucket_start: null, data_age_seconds: null }}
+        usage={{
+          ...usage,
+          rows: [],
+          latest_bucket_start: null,
+          data_age_seconds: null,
+          source_freshness: [],
+        }}
         daily={{ ...daily, rows: [] }}
         timezone="UTC"
         month="2026-11"
@@ -228,7 +305,7 @@ describe("Codex usage dashboard section", () => {
       />,
     );
 
-    expect(screen.getByText("No Codex usage for this month")).toBeTruthy();
+    expect(screen.getByText("No token usage for this month")).toBeTruthy();
     expect(screen.getByText("No daily usage for this month.")).toBeTruthy();
     expect(screen.queryByText(/^0$/u)).toBeNull();
   });
