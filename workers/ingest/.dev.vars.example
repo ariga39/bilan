@@ -1,2 +1,3 @@
 OPENROUTER_API_KEY=replace-with-local-test-key
 DEEPSEEK_API_KEY=replace-with-local-test-key
+INGEST_PRODUCERS_JSON={"debitmetre-main":{"token_sha256":"947db9cfb8efc11a5062488262a1ab31c8a9e5abdeed7aa871822d710301d20d","display_name":"debitmetre (Codex usage)","expected_interval_seconds":3600,"scopes":[{"source":"codex","kind":"usage_buckets"}]}}

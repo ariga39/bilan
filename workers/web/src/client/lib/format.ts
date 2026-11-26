@@ -39,6 +39,10 @@ export function formatCompactCurrency(value: number, currency: string): string {
   }
 }
 
+export function formatNumber(value: number): string {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
 export function formatAge(seconds: number | null): string {
   if (seconds === null) {
     return "Never";

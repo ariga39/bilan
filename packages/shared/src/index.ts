@@ -1,3 +1,7 @@
+import type { BucketAttribution } from "./time";
+
+export * from "./time";
+
 export const BALANCE_PROVIDERS = ["openrouter", "deepseek"] as const;
 export type BalanceProvider = (typeof BALANCE_PROVIDERS)[number];
 
@@ -95,6 +99,7 @@ export interface OverviewResponse {
   generated_at: string;
   producers: Array<ProducerHealth>;
   balances: Array<BalanceView>;
+  usage: MonthlyUsage;
 }
 
 export interface BalanceHistoryPoint {
@@ -114,4 +119,72 @@ export interface BalanceHistoryResponse {
   provider: BalanceProvider;
   days: number;
   series: Array<BalanceHistorySeries>;
+}
+
+export const USAGE_TOKEN_COLUMNS = [
+  "input_tokens",
+  "cached_tokens",
+  "uncached_tokens",
+  "cache_write_tokens",
+  "output_tokens",
+  "reasoning_tokens",
+] as const;
+
+export type UsageTokenColumn = (typeof USAGE_TOKEN_COLUMNS)[number];
+
+export interface UsageCounters {
+  unit_count: number;
+  coverage_gaps: number;
+  input_tokens: number | null;
+  input_counted: number;
+  cached_tokens: number | null;
+  cached_counted: number;
+  uncached_tokens: number | null;
+  uncached_counted: number;
+  cache_write_tokens: number | null;
+  cache_write_counted: number;
+  output_tokens: number | null;
+  output_counted: number;
+  reasoning_tokens: number | null;
+  reasoning_counted: number;
+}
+
+export interface UsageBreakdownRow extends UsageCounters {
+  source: string;
+  accounting_basis: string;
+  unit_kind: string;
+  actor_kind: string;
+  actor_id: string;
+  model: string;
+  effort: string;
+  is_partial: boolean;
+  partial_columns: Array<UsageTokenColumn>;
+}
+
+export interface MonthlyUsage {
+  timezone: string;
+  month: string;
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
+  latest_bucket_start: string | null;
+  data_age_seconds: number | null;
+  is_stale: boolean;
+  rows: Array<UsageBreakdownRow>;
+}
+
+export interface DailyUsageRow extends UsageCounters {
+  source: string;
+  accounting_basis: string;
+  unit_kind: string;
+  date: string;
+  is_partial: boolean;
+  partial_columns: Array<UsageTokenColumn>;
+}
+
+export interface UsageDailyResponse {
+  timezone: string;
+  month: string;
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
+  rows: Array<DailyUsageRow>;
 }

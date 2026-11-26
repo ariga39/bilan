@@ -6,12 +6,24 @@ import type {
   BalanceHistorySeries,
   BalanceView,
   BalanceWindowDelta,
+  DailyUsageRow,
+  MonthlyUsage,
   OverviewResponse,
   ProducerHealth,
+  UsageBreakdownRow,
+  UsageDailyResponse,
 } from "./index";
 
 const balanceProviderSchema = z.enum(["openrouter", "deepseek"]);
 const deltaWindowDaysSchema = z.union([z.literal(7), z.literal(30)]);
+const usageTokenColumnSchema = z.enum([
+  "input_tokens",
+  "cached_tokens",
+  "uncached_tokens",
+  "cache_write_tokens",
+  "output_tokens",
+  "reasoning_tokens",
+]);
 
 const producerHealthSchema: z.ZodType<ProducerHealth> = z.object({
   producer_id: z.string(),
@@ -58,10 +70,70 @@ const balanceViewSchema: z.ZodType<BalanceView> = z.object({
   deltas: z.array(balanceWindowDeltaSchema),
 });
 
+const usageCountersShape = {
+  unit_count: z.number().int().nonnegative(),
+  coverage_gaps: z.number().int().nonnegative(),
+  input_tokens: z.number().int().nonnegative().nullable(),
+  input_counted: z.number().int().nonnegative(),
+  cached_tokens: z.number().int().nonnegative().nullable(),
+  cached_counted: z.number().int().nonnegative(),
+  uncached_tokens: z.number().int().nonnegative().nullable(),
+  uncached_counted: z.number().int().nonnegative(),
+  cache_write_tokens: z.number().int().nonnegative().nullable(),
+  cache_write_counted: z.number().int().nonnegative(),
+  output_tokens: z.number().int().nonnegative().nullable(),
+  output_counted: z.number().int().nonnegative(),
+  reasoning_tokens: z.number().int().nonnegative().nullable(),
+  reasoning_counted: z.number().int().nonnegative(),
+} as const;
+
+const usageBreakdownRowSchema: z.ZodType<UsageBreakdownRow> = z.object({
+  source: z.string(),
+  accounting_basis: z.string(),
+  unit_kind: z.string(),
+  actor_kind: z.string(),
+  actor_id: z.string(),
+  model: z.string(),
+  effort: z.string(),
+  is_partial: z.boolean(),
+  partial_columns: z.array(usageTokenColumnSchema),
+  ...usageCountersShape,
+});
+
+const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
+  timezone: z.string(),
+  month: z.string(),
+  bucket_attribution: z.enum(["exact", "approximate"]),
+  bucket_attribution_note: z.string().nullable(),
+  latest_bucket_start: z.string().nullable(),
+  data_age_seconds: z.number().nullable(),
+  is_stale: z.boolean(),
+  rows: z.array(usageBreakdownRowSchema),
+});
+
+const dailyUsageRowSchema: z.ZodType<DailyUsageRow> = z.object({
+  source: z.string(),
+  accounting_basis: z.string(),
+  unit_kind: z.string(),
+  date: z.string(),
+  is_partial: z.boolean(),
+  partial_columns: z.array(usageTokenColumnSchema),
+  ...usageCountersShape,
+});
+
+export const usageDailyResponseSchema: z.ZodType<UsageDailyResponse> = z.object({
+  timezone: z.string(),
+  month: z.string(),
+  bucket_attribution: z.enum(["exact", "approximate"]),
+  bucket_attribution_note: z.string().nullable(),
+  rows: z.array(dailyUsageRowSchema),
+});
+
 export const overviewResponseSchema: z.ZodType<OverviewResponse> = z.object({
   generated_at: z.string(),
   producers: z.array(producerHealthSchema),
   balances: z.array(balanceViewSchema),
+  usage: monthlyUsageSchema,
 });
 
 const balanceHistoryPointSchema: z.ZodType<BalanceHistoryPoint> = z.object({
