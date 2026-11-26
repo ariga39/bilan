@@ -123,7 +123,9 @@ cron trigger and, in later B2 work, the scoped push endpoint.
 - A balance difference is labeled **Net balance change**. DeepSeek balances
   are balance-only, so a difference is never labeled spend or burn.
 - OpenRouter `cumulative_usage` differences are labeled **Reported usage
-  delta** and flagged as a discontinuity when they decrease.
+  delta** and flagged as a discontinuity when any consecutive known value
+  decreases inside the selected window, including a reset that still leaves
+  the endpoint delta positive.
 - A 7d/30d delta is marked full only when the current sample is near now and a
   baseline sample is near the window boundary. Otherwise the API returns
   `coverage: "partial"` with the actual interval, and the UI labels it

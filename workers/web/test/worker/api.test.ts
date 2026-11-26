@@ -189,6 +189,50 @@ describe("GET /api/v1/overview", () => {
     expect(JSON.stringify(body)).not.toMatch(/spend|burn/iu);
   });
 
+  it("flags a cumulative usage reset inside the window even when the net usage delta is positive", async () => {
+    const now = Date.now();
+    const iso = (daysAgo: number, minutesAgo = 0): string =>
+      new Date(now - daysAgo * DAY_MS - minutesAgo * 60_000).toISOString();
+
+    await seedBalance({
+      provider: "openrouter",
+      currency: "USD",
+      sampledAt: iso(7, 10),
+      totalBalance: 50,
+      cumulativeUsage: 100,
+      creditLimit: 200,
+    });
+    await seedBalance({
+      provider: "openrouter",
+      currency: "USD",
+      sampledAt: iso(3),
+      totalBalance: 60,
+      cumulativeUsage: 20,
+      creditLimit: 200,
+    });
+    await seedBalance({
+      provider: "openrouter",
+      currency: "USD",
+      sampledAt: iso(0),
+      totalBalance: 80,
+      cumulativeUsage: 120,
+      creditLimit: 200,
+    });
+
+    const body = await overview();
+    const delta = body.balances
+      .find((balance) => balance.provider === "openrouter")
+      ?.deltas.find((window) => window.window_days === 7);
+
+    expect(delta).toMatchObject({
+      net_delta: 30,
+      reported_usage_delta: 20,
+      reported_usage_delta_discontinuity: true,
+      coverage: "full",
+      history_complete: true,
+    });
+  });
+
   it("labels stale and sparse delta windows as partial with their actual interval", async () => {
     const now = Date.now();
     const iso = (daysAgo: number): string => new Date(now - daysAgo * DAY_MS).toISOString();

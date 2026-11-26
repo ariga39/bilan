@@ -51,6 +51,10 @@ interface HistoryRow {
   cumulative_usage: number | null;
 }
 
+interface CumulativeUsageRow {
+  cumulative_usage: number | null;
+}
+
 const DAY_MS = 86_400_000;
 
 export function isBalanceProvider(value: string | undefined): value is BalanceProvider {
@@ -128,6 +132,44 @@ async function loadBaseline(
     .first<BaselineRow>();
 }
 
+async function hasCumulativeUsageDecrease(
+  db: D1Database,
+  balance: LatestBalanceRow,
+  baseline: BaselineRow,
+): Promise<boolean> {
+  // A reset inside the window can still leave latest - baseline positive.
+  const result = await db
+    .prepare(
+      `SELECT cumulative_usage
+       FROM balance_snapshots
+       WHERE provider = ? AND account = ? AND currency = ?
+         AND sampled_at >= ? AND sampled_at <= ?
+         AND cumulative_usage IS NOT NULL
+       ORDER BY sampled_at, ingested_at`,
+    )
+    .bind(
+      balance.provider,
+      balance.account,
+      balance.currency,
+      baseline.sampled_at,
+      balance.sampled_at,
+    )
+    .all<CumulativeUsageRow>();
+
+  let previous: number | null = null;
+  for (const row of result.results) {
+    if (row.cumulative_usage === null) {
+      continue;
+    }
+    if (previous !== null && row.cumulative_usage < previous) {
+      return true;
+    }
+    previous = row.cumulative_usage;
+  }
+
+  return false;
+}
+
 async function loadDelta(
   db: D1Database,
   balance: LatestBalanceRow,
@@ -156,6 +198,8 @@ async function loadDelta(
     baseline !== null && balance.cumulative_usage !== null && baseline.cumulative_usage !== null
       ? balance.cumulative_usage - baseline.cumulative_usage
       : null;
+  const reportedUsageDiscontinuity =
+    baseline !== null ? await hasCumulativeUsageDecrease(db, balance, baseline) : false;
 
   let coverage: BalanceWindowDelta["coverage"] = "full";
   let coverageReason: BalanceWindowDelta["coverage_reason"] = null;
@@ -178,7 +222,7 @@ async function loadDelta(
     window_days: windowDays,
     net_delta: netDelta,
     reported_usage_delta: reportedUsageDelta,
-    reported_usage_delta_discontinuity: reportedUsageDelta !== null && reportedUsageDelta < 0,
+    reported_usage_delta_discontinuity: reportedUsageDiscontinuity,
     baseline_sampled_at: baseline?.sampled_at ?? null,
     actual_interval_seconds: actualIntervalSeconds,
     coverage,

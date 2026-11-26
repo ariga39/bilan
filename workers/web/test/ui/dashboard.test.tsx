@@ -188,4 +188,30 @@ describe("balance presentation", () => {
 
     expect(screen.getAllByText("Partial coverage · actual 9 d")).toHaveLength(2);
   });
+
+  it("shows the discontinuity badge when cumulative usage reset inside a positive delta", () => {
+    const current7d = openRouter.deltas.find((delta) => delta.window_days === 7);
+    if (!current7d) {
+      throw new Error("Expected a 7d fixture");
+    }
+
+    render(
+      <BalanceCard
+        balance={{
+          ...openRouter,
+          deltas: [
+            {
+              ...current7d,
+              reported_usage_delta: 20,
+              reported_usage_delta_discontinuity: true,
+            },
+            ...openRouter.deltas.filter((delta) => delta.window_days === 30),
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Discontinuity")).toBeTruthy();
+    expect(screen.getByText(/\+USD\s20\.00/u)).toBeTruthy();
+  });
 });
