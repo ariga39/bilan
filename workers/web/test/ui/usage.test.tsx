@@ -9,6 +9,8 @@ afterEach(cleanup);
 const usage: MonthlyUsage = {
   timezone: "Asia/Shanghai",
   month: "2026-11",
+  bucket_attribution: "exact",
+  bucket_attribution_note: null,
   latest_bucket_start: "2026-11-02T00:00:00Z",
   data_age_seconds: 120,
   is_stale: false,
@@ -69,6 +71,8 @@ const usage: MonthlyUsage = {
 const daily: UsageDailyResponse = {
   timezone: "Asia/Shanghai",
   month: "2026-11",
+  bucket_attribution: "exact",
+  bucket_attribution_note: null,
   rows: [
     {
       source: "codex",
@@ -179,6 +183,37 @@ describe("Codex usage dashboard section", () => {
 
     fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2026-10" } });
     expect(onMonthChange).toHaveBeenCalledWith("2026-10");
+  });
+
+  it("discloses approximate hour-bucket boundaries for non-whole-hour offsets", () => {
+    const note =
+      "Hourly UTC buckets are attributed by bucket_start. Asia/Kolkata has a non-whole-hour UTC offset, so month and day boundaries are approximate.";
+
+    render(
+      <UsageSection
+        usage={{
+          ...usage,
+          timezone: "Asia/Kolkata",
+          bucket_attribution: "approximate",
+          bucket_attribution_note: note,
+        }}
+        daily={{
+          ...daily,
+          timezone: "Asia/Kolkata",
+          bucket_attribution: "approximate",
+          bucket_attribution_note: note,
+        }}
+        timezone="Asia/Kolkata"
+        month="2026-11"
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Asia/Kolkata (UTC+5:30)" })).toBeTruthy();
+    expect(screen.getByText(/Approximate bucket boundaries/u)).toBeTruthy();
+    expect(screen.getByText(/Asia\/Kolkata has a non-whole-hour/u)).toBeTruthy();
   });
 
   it("shows an explicit empty state without inventing token totals", () => {

@@ -103,6 +103,8 @@ const usageBreakdownRowSchema: z.ZodType<UsageBreakdownRow> = z.object({
 const monthlyUsageSchema: z.ZodType<MonthlyUsage> = z.object({
   timezone: z.string(),
   month: z.string(),
+  bucket_attribution: z.enum(["exact", "approximate"]),
+  bucket_attribution_note: z.string().nullable(),
   latest_bucket_start: z.string().nullable(),
   data_age_seconds: z.number().nullable(),
   is_stale: z.boolean(),
@@ -122,6 +124,8 @@ const dailyUsageRowSchema: z.ZodType<DailyUsageRow> = z.object({
 export const usageDailyResponseSchema: z.ZodType<UsageDailyResponse> = z.object({
   timezone: z.string(),
   month: z.string(),
+  bucket_attribution: z.enum(["exact", "approximate"]),
+  bucket_attribution_note: z.string().nullable(),
   rows: z.array(dailyUsageRowSchema),
 });
 

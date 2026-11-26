@@ -115,6 +115,8 @@ describe("GET /api/v1/overview usage", () => {
 
     expect(body.usage.timezone).toBe("Asia/Shanghai");
     expect(body.usage.month).toBe("2026-11");
+    expect(body.usage.bucket_attribution).toBe("exact");
+    expect(body.usage.bucket_attribution_note).toBeNull();
     expect(body.usage.latest_bucket_start).toBe("2026-12-01T00:00:00Z");
     expect(body.usage.rows).toHaveLength(3);
 
@@ -164,6 +166,29 @@ describe("GET /api/v1/overview usage", () => {
 
     const producer = body.producers.find((row) => row.producer_id === "debitmetre-main");
     expect(producer).toMatchObject({ mode: "push", last_status: "ok" });
+  });
+
+  it("discloses approximate bucket-start attribution for non-whole-hour offsets", async () => {
+    // Asia/Kolkata is UTC+05:30, so local November starts at 18:30Z.
+    await seedUsageBucket({
+      bucketStart: "2026-10-31T18:00:00Z", // 2026-10-31 23:30 local
+      actorId: "machine-october",
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-10-31T19:00:00Z", // 2026-11-01 00:30 local
+      actorId: "machine-november",
+    });
+
+    const body = await overview("?tz=Asia%2FKolkata&month=2026-11");
+    expect(body.usage.bucket_attribution).toBe("approximate");
+    expect(body.usage.bucket_attribution_note).toContain("Asia/Kolkata");
+    expect(body.usage.bucket_attribution_note).toContain("bucket_start");
+    expect(body.usage.rows.map((row) => row.actor_id)).toEqual(["machine-november"]);
+
+    const dailyBody = await daily("?tz=Asia%2FKolkata&month=2026-11");
+    expect(dailyBody.bucket_attribution).toBe("approximate");
+    expect(dailyBody.bucket_attribution_note).toContain("Asia/Kolkata");
+    expect(dailyBody.rows.map((row) => row.date)).toEqual(["2026-11-01"]);
   });
 
   it("defaults to Asia/Shanghai and the current month in that timezone", async () => {
@@ -250,6 +275,8 @@ describe("GET /api/v1/usage/daily", () => {
 
     expect(body.timezone).toBe("Asia/Shanghai");
     expect(body.month).toBe("2026-11");
+    expect(body.bucket_attribution).toBe("exact");
+    expect(body.bucket_attribution_note).toBeNull();
     expect(body.rows).toHaveLength(3);
 
     const firstDay = body.rows.find((row) => row.date === "2026-11-01");

@@ -261,11 +261,37 @@ export function App() {
               onTimezoneChange={setTimezone}
               onMonthChange={setMonth}
             />
-          ) : (
+          ) : loading ? (
             <Card className="border-dashed">
               <CardContent className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                 <RefreshCw className="size-4 animate-spin" />
                 Loading token usage…
+              </CardContent>
+            </Card>
+          ) : (
+            <Card className="border-destructive/30 bg-destructive/5">
+              <CardContent className="flex flex-wrap items-start justify-between gap-3 px-4 py-5">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+                  <div>
+                    <p className="text-sm font-medium text-destructive">
+                      Token usage is unavailable
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      The initial read failed. Retry to reload balances and usage.
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setReloadToken((token) => token + 1);
+                  }}
+                >
+                  <RefreshCw />
+                  Retry token usage
+                </Button>
               </CardContent>
             </Card>
           )}

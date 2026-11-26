@@ -86,6 +86,13 @@ export interface MonthRange {
   end: string;
 }
 
+export type BucketAttribution = "exact" | "approximate";
+
+export interface BucketAttributionInfo {
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
+}
+
 /** UTC instants for the inclusive start and exclusive end of a local month. */
 export function monthRangeUtc(month: string, timeZone: string): MonthRange {
   if (!isValidMonth(month) || !isValidTimeZone(timeZone)) {
@@ -100,6 +107,38 @@ export function monthRangeUtc(month: string, timeZone: string): MonthRange {
       ? localMidnightUtc(year + 1, 0, 1, timeZone)
       : localMidnightUtc(year, monthIndex + 1, 1, timeZone);
   return { start: new Date(start).toISOString(), end: new Date(end).toISOString() };
+}
+
+/**
+ * Hourly UTC buckets are attributed to a local month/day by bucket_start.
+ * That is exact for whole-hour offsets; for offsets such as +05:30 or +05:45
+ * the local boundary falls inside an hour bucket, so the read surface must
+ * disclose the approximation instead of implying exact slicing.
+ */
+export function bucketAttributionForRange(
+  timeZone: string,
+  range: MonthRange,
+): BucketAttributionInfo {
+  const start = new Date(range.start);
+  const end = new Date(range.end);
+  const aligned =
+    start.getUTCMinutes() === 0 &&
+    start.getUTCSeconds() === 0 &&
+    end.getUTCMinutes() === 0 &&
+    end.getUTCSeconds() === 0;
+  if (aligned) {
+    return { bucket_attribution: "exact", bucket_attribution_note: null };
+  }
+  return {
+    bucket_attribution: "approximate",
+    bucket_attribution_note:
+      `Hourly UTC buckets are attributed by bucket_start. ${timeZone} has a non-whole-hour ` +
+      "UTC offset, so month and day boundaries are approximate.",
+  };
+}
+
+export function bucketAttributionForMonth(month: string, timeZone: string): BucketAttributionInfo {
+  return bucketAttributionForRange(timeZone, monthRangeUtc(month, timeZone));
 }
 
 /** The local calendar date (`YYYY-MM-DD`) of a UTC timestamp in a timezone. */

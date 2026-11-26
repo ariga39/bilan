@@ -287,6 +287,13 @@ def _default_state_path(usage_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(usage_path)), ".bilan-debitmetre-state.json")
 
 
+def _require_usage_log(usage_path: str) -> None:
+    if not os.path.exists(usage_path):
+        raise ShipperError("usage log not found; refusing to send a heartbeat")
+    if not os.path.isfile(usage_path):
+        raise ShipperError("usage log path is not a file")
+
+
 def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
     raw = load_json_file(state_path)
     if raw is None:
@@ -432,6 +439,7 @@ def run_once(
     timeout: float,
     quiet: bool = False,
 ) -> bool:
+    _require_usage_log(usage_path)
     state = _load_state(state_path, producer_id)
 
     pending_acked = False

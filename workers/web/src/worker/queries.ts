@@ -3,6 +3,7 @@ import {
   DEFAULT_TIMEZONE,
   DELTA_WINDOW_DAYS,
   USAGE_TOKEN_COLUMNS,
+  bucketAttributionForRange,
   currentMonthInTimeZone,
   localDateInTimeZone,
   monthRangeUtc,
@@ -14,7 +15,6 @@ import type {
   BalanceProvider,
   BalanceView,
   BalanceWindowDelta,
-  DailyUsageRow,
   DeltaWindowDays,
   MonthlyUsage,
   OverviewResponse,
@@ -326,6 +326,7 @@ async function loadMonthlyUsage(
   now: Date,
 ): Promise<MonthlyUsage> {
   const range = monthRangeUtc(month, timezone);
+  const attribution = bucketAttributionForRange(timezone, range);
   const nowIso = utcSecondIso(now);
   const [usage, latest] = await Promise.all([
     db
@@ -365,6 +366,7 @@ async function loadMonthlyUsage(
   return {
     timezone,
     month,
+    ...attribution,
     latest_bucket_start: latestBucketStart,
     data_age_seconds: dataAge,
     is_stale: dataAge === null || dataAge > USAGE_STALE_AFTER_SECONDS,
@@ -376,8 +378,9 @@ async function loadDailyUsage(
   db: D1Database,
   timezone: string,
   month: string,
-): Promise<Array<DailyUsageRow>> {
+): Promise<UsageDailyResponse> {
   const range = monthRangeUtc(month, timezone);
+  const attribution = bucketAttributionForRange(timezone, range);
   const result = await db
     .prepare(
       `SELECT bucket_start, source, accounting_basis, unit_kind, actor_kind, actor_id,
@@ -437,7 +440,7 @@ async function loadDailyUsage(
     }
   }
 
-  return [...accumulators.values()]
+  const rows = [...accumulators.values()]
     .map((row) => withCompleteness(row))
     .map((row) => ({
       source: row.source,
@@ -468,6 +471,8 @@ async function loadDailyUsage(
         left.accounting_basis.localeCompare(right.accounting_basis) ||
         left.unit_kind.localeCompare(right.unit_kind),
     );
+
+  return { timezone, month, ...attribution, rows };
 }
 
 export async function getOverview(
@@ -536,11 +541,7 @@ export async function getUsageDaily(
   db: D1Database,
   options: { timezone: string; month: string },
 ): Promise<UsageDailyResponse> {
-  return {
-    timezone: options.timezone,
-    month: options.month,
-    rows: await loadDailyUsage(db, options.timezone, options.month),
-  };
+  return loadDailyUsage(db, options.timezone, options.month);
 }
 
 export async function getBalanceHistory(

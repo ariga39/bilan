@@ -36,6 +36,7 @@ const TIMEZONES = [
   { value: "Asia/Shanghai", label: "Asia/Shanghai (UTC+8)" },
   { value: "UTC", label: "UTC" },
   { value: "Asia/Tokyo", label: "Asia/Tokyo" },
+  { value: "Asia/Kolkata", label: "Asia/Kolkata (UTC+5:30)" },
   { value: "Europe/London", label: "Europe/London" },
   { value: "America/New_York", label: "America/New_York" },
 ];
@@ -231,6 +232,9 @@ export function UsageSection({
   const timezoneOptions = TIMEZONES.some((option) => option.value === timezone)
     ? TIMEZONES
     : [{ value: timezone, label: timezone }, ...TIMEZONES];
+  const attributionApproximate =
+    usage?.bucket_attribution === "approximate" || daily?.bucket_attribution === "approximate";
+  const attributionNote = usage?.bucket_attribution_note ?? daily?.bucket_attribution_note;
 
   return (
     <Card>
@@ -307,6 +311,18 @@ export function UsageSection({
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
+        {attributionApproximate ? (
+          <div
+            className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+            role="status"
+          >
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+            <p>
+              <span className="font-medium">Approximate bucket boundaries. </span>
+              {attributionNote}
+            </p>
+          </div>
+        ) : null}
         {usage === null ? (
           <div className="rounded-lg border border-dashed px-4 py-8 text-center">
             <p className="font-medium">

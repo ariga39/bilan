@@ -1,3 +1,5 @@
+import type { BucketAttribution } from "./time";
+
 export * from "./time";
 
 export const BALANCE_PROVIDERS = ["openrouter", "deepseek"] as const;
@@ -162,6 +164,8 @@ export interface UsageBreakdownRow extends UsageCounters {
 export interface MonthlyUsage {
   timezone: string;
   month: string;
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
   latest_bucket_start: string | null;
   data_age_seconds: number | null;
   is_stale: boolean;
@@ -180,5 +184,7 @@ export interface DailyUsageRow extends UsageCounters {
 export interface UsageDailyResponse {
   timezone: string;
   month: string;
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
   rows: Array<DailyUsageRow>;
 }

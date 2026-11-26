@@ -45,6 +45,8 @@ function overviewPayload(month: string, timezone: string, actor: string): Overvi
     usage: {
       timezone,
       month,
+      bucket_attribution: "exact",
+      bucket_attribution_note: null,
       latest_bucket_start: "2026-11-01T00:00:00Z",
       data_age_seconds: 60,
       is_stale: false,
@@ -57,6 +59,8 @@ function dailyPayload(month: string, timezone: string, date: string): UsageDaily
   return {
     timezone,
     month,
+    bucket_attribution: "exact",
+    bucket_attribution_note: null,
     rows: [
       {
         source: "codex",
@@ -153,6 +157,31 @@ function installFetch(state: FetchState) {
 }
 
 describe("App usage selection safety", () => {
+  it("shows unavailable and a retry action after the initial overview fails", async () => {
+    const state: FetchState = {
+      actor: "machine-recovered",
+      dailyDate: "2026-11-01",
+      failOverview: true,
+      failDaily: false,
+      deferNextOverview: false,
+      deferredOverviewResolve: null,
+      deferredOverviewMonth: "",
+      deferredOverviewTimezone: "",
+    };
+    installFetch(state);
+    render(<App />);
+
+    expect(await screen.findByText("Request failed (HTTP 500)")).toBeTruthy();
+    expect(screen.getByText("Token usage is unavailable")).toBeTruthy();
+    expect(screen.queryByText(/Loading token usage/u)).toBeNull();
+
+    state.failOverview = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry token usage" }));
+
+    expect(await screen.findByText("machine-recovered")).toBeTruthy();
+    expect(screen.queryByText("Token usage is unavailable")).toBeNull();
+  });
+
   it("hides old monthly and daily rows when a new selection fails to refresh", async () => {
     const state: FetchState = {
       actor: "machine-old",

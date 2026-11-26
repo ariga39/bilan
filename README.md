@@ -60,15 +60,23 @@ pnpm build
   and scopes, `batch_seq` replay/duplicate/stale behavior (including competing
   requests), UTC-hour correction, heartbeat liveness, validation, and the
   absence of read routes.
-- `bilan-web` worker-pool tests: balance overview/history behavior, UTC+8 month
-  and daily usage slicing, per-column completeness flags, push-to-read
-  integration over one D1 binding, and the absence of write routes.
+- `bilan-web` worker-pool tests: balance overview/history behavior, timezone
+  month and daily usage slicing (including non-whole-hour offset disclosure),
+  per-column completeness flags, push-to-read integration over one D1 binding,
+  and the absence of write routes.
 - `bilan-web` jsdom tests: currency labels, partial-history labels, delayed
-  samples, usage timezone/month controls, machine/model/effort rows, daily
-  rows, and partial-counter rendering.
-- `shippers/tests` Python `unittest`: synthetic CLI runs against a local
-  replay-safe ingest mock, including lost ACKs, login redirects, `202`, exact
-  200-only ACKs, backfill, cursor safety, and migration.
+  samples, usage timezone/month controls, selection safety, initial-load retry,
+  machine/model/effort rows, daily rows, and partial-counter rendering.
+
+`pnpm test` does **not** run the Python shipper suite. Run it separately:
+
+```sh
+python -m unittest discover -s shippers/tests -v
+```
+
+The Python suite covers synthetic CLI runs against a local replay-safe ingest
+mock, including missing/empty logs, lost ACKs, login redirects, `202`, exact
+200-only ACKs, backfill, cursor safety, and migration.
 
 ## Local development against one D1 database
 
@@ -144,6 +152,8 @@ The shipper keeps its durable cursor/outbox next to `usage.jsonl` by default
 redirects and other 2xx responses leave the identical payload queued for retry.
 Run `--backfill` to replay the whole log without moving the incremental cursor.
 An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
+A missing log path fails closed before any heartbeat, while a real existing empty
+log remains idle and may heartbeat normally.
 
 ### Migrating a shipper to another host
 
@@ -158,9 +168,12 @@ only `usage.jsonl` is not enough:
 3. Start the new host with the same `--producer-id` and the copied state file.
    Do not run the old and new writers concurrently.
 
-If the state file is lost, the new host cannot safely infer the producer's last
-accepted `batch_seq`; a restart from `1` will be rejected as stale. Preserve the
-state/outbox with the log.
+If the state file is lost, restarting from sequence `1` is unsafe: a producer
+whose last accepted sequence is higher will reject it with `409`, while a
+producer whose last accepted sequence is exactly `1` will no-op duplicate-ACK
+it without writing the missing data. Recovery never resets the sequence; restore
+the state/outbox from the backup/copy, or otherwise recover the recorded
+sequence before writing again.
 
 ## Production configuration
 
@@ -205,6 +218,10 @@ state/outbox with the log.
 - Usage is stored in UTC hourly buckets and sliced by the selected timezone and
   calendar month on the read surface. Defaults are `Asia/Shanghai` and the
   current month in that timezone.
+- Usage is attributed to a local month/day by `bucket_start`. Whole-hour offsets
+  are exact; non-whole-hour offsets (for example `Asia/Kolkata`) disclose that
+  boundary hours are approximate in both the API and dashboard, rather than
+  pretending an hourly bucket can be split.
 - `batch_seq` is persisted per logical producer. `batch_seq < last_batch_seq`
   returns 409 with zero writes; an equal value returns a 200 no-op ACK; a higher
   value commits usage rows and the producer sequence atomically.

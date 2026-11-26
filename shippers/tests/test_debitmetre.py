@@ -567,6 +567,27 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertEqual(self.ingest.stats(), (1, 1, 0, 0))
         self.assertIsNone(self.read_state()["pending"])
 
+    def test_missing_usage_log_fails_before_sending_a_heartbeat(self) -> None:
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("usage log not found", result.stderr)
+        self.assertEqual(self.ingest.snapshot_requests(), [])
+
+    def test_existing_empty_usage_log_still_sends_an_idle_heartbeat(self) -> None:
+        self.write_records([])
+
+        result = self.run_cli()
+
+        self.assert_ok(result)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["payload"]["usage_buckets"], [])
+        self.assertEqual(requests[0]["payload"]["batch_seq"], 1)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["cursor"], 0)
+
     def test_idle_heartbeat_can_be_disabled_without_moving_data_age(self) -> None:
         self.write_records([audit_record("2026-11-01T10:05:00Z")])
         self.assert_ok(self.run_cli())
