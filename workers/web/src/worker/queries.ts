@@ -1,0 +1,267 @@
+import { BALANCE_PROVIDERS, DELTA_WINDOW_DAYS } from "@bilan/shared";
+import type {
+  BalanceHistoryResponse,
+  BalanceHistorySeries,
+  BalanceProvider,
+  BalanceView,
+  BalanceWindowDelta,
+  DeltaWindowDays,
+  OverviewResponse,
+  ProducerHealth,
+} from "@bilan/shared";
+
+interface ProducerRow {
+  producer_id: string;
+  mode: string;
+  display_name: string;
+  expected_interval_seconds: number;
+  last_heartbeat_at: string | null;
+  last_attempt_at: string | null;
+  last_status: string | null;
+  last_error: string | null;
+}
+
+interface LatestBalanceRow {
+  producer_id: string;
+  provider: string;
+  account: string;
+  currency: string;
+  sampled_at: string;
+  ingested_at: string;
+  total_balance: number | null;
+  topped_up_balance: number | null;
+  granted_balance: number | null;
+  cumulative_usage: number | null;
+  credit_limit: number | null;
+  is_available: number | null;
+}
+
+interface BaselineRow {
+  sampled_at: string;
+  total_balance: number | null;
+  cumulative_usage: number | null;
+}
+
+interface HistoryRow {
+  account: string;
+  currency: string;
+  sampled_at: string;
+  ingested_at: string;
+  total_balance: number | null;
+  cumulative_usage: number | null;
+}
+
+const DAY_MS = 86_400_000;
+
+export function isBalanceProvider(value: string | undefined): value is BalanceProvider {
+  return value !== undefined && BALANCE_PROVIDERS.some((provider) => provider === value);
+}
+
+function parseTimestamp(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function ageSeconds(nowMs: number, timestamp: string): number | null {
+  const parsed = parseTimestamp(timestamp);
+  if (parsed === null) {
+    return null;
+  }
+  return Math.max(0, Math.round((nowMs - parsed) / 1000));
+}
+
+function producerStatus(value: string | null): "ok" | "error" | null {
+  return value === "ok" || value === "error" ? value : null;
+}
+
+async function loadProducers(db: D1Database): Promise<Array<ProducerRow>> {
+  const result = await db
+    .prepare(
+      `SELECT producer_id, mode, display_name, expected_interval_seconds,
+              last_heartbeat_at, last_attempt_at, last_status, last_error
+       FROM producers
+       ORDER BY producer_id`,
+    )
+    .all<ProducerRow>();
+  return result.results;
+}
+
+async function loadLatestBalances(db: D1Database): Promise<Array<LatestBalanceRow>> {
+  const result = await db
+    .prepare(
+      `SELECT producer_id, provider, account, currency, sampled_at, ingested_at,
+              total_balance, topped_up_balance, granted_balance,
+              cumulative_usage, credit_limit, is_available
+       FROM (
+         SELECT b.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY provider, account, currency
+                  ORDER BY sampled_at DESC, ingested_at DESC
+                ) AS row_number
+         FROM balance_snapshots b
+       )
+       WHERE row_number = 1
+       ORDER BY provider, currency, account`,
+    )
+    .all<LatestBalanceRow>();
+  return result.results;
+}
+
+async function loadBaseline(
+  db: D1Database,
+  balance: LatestBalanceRow,
+  windowDays: DeltaWindowDays,
+  nowMs: number,
+): Promise<BaselineRow | null> {
+  const cutoff = new Date(nowMs - windowDays * DAY_MS).toISOString();
+  return db
+    .prepare(
+      `SELECT sampled_at, total_balance, cumulative_usage
+       FROM balance_snapshots
+       WHERE provider = ? AND account = ? AND currency = ?
+         AND sampled_at < ?
+         AND sampled_at <= ?
+       ORDER BY sampled_at DESC
+       LIMIT 1`,
+    )
+    .bind(balance.provider, balance.account, balance.currency, balance.sampled_at, cutoff)
+    .first<BaselineRow>();
+}
+
+async function loadDelta(
+  db: D1Database,
+  balance: LatestBalanceRow,
+  windowDays: DeltaWindowDays,
+  nowMs: number,
+): Promise<BalanceWindowDelta> {
+  const baseline = await loadBaseline(db, balance, windowDays, nowMs);
+  const netDelta =
+    baseline !== null && balance.total_balance !== null && baseline.total_balance !== null
+      ? balance.total_balance - baseline.total_balance
+      : null;
+  const hasCompleteHistory = netDelta !== null;
+
+  const reportedUsageDelta =
+    baseline !== null && balance.cumulative_usage !== null && baseline.cumulative_usage !== null
+      ? balance.cumulative_usage - baseline.cumulative_usage
+      : null;
+
+  return {
+    window_days: windowDays,
+    net_delta: netDelta,
+    reported_usage_delta: reportedUsageDelta,
+    reported_usage_delta_discontinuity: reportedUsageDelta !== null && reportedUsageDelta < 0,
+    baseline_sampled_at: baseline?.sampled_at ?? null,
+    history_complete: hasCompleteHistory,
+  };
+}
+
+function toProducerHealth(row: ProducerRow, nowMs: number): ProducerHealth {
+  const heartbeatAge = row.last_heartbeat_at ? ageSeconds(nowMs, row.last_heartbeat_at) : null;
+  const staleAfter = row.expected_interval_seconds * 2;
+
+  return {
+    producer_id: row.producer_id,
+    display_name: row.display_name,
+    mode: row.mode === "push" ? "push" : "pull",
+    expected_interval_seconds: row.expected_interval_seconds,
+    last_heartbeat_at: row.last_heartbeat_at,
+    last_attempt_at: row.last_attempt_at,
+    last_status: producerStatus(row.last_status),
+    last_error: row.last_error,
+    heartbeat_age_seconds: heartbeatAge,
+    is_stale: heartbeatAge === null || heartbeatAge > staleAfter,
+  };
+}
+
+export async function getOverview(
+  db: D1Database,
+  now: Date = new Date(),
+): Promise<OverviewResponse> {
+  const nowMs = now.getTime();
+  const [producerRows, latestBalances] = await Promise.all([
+    loadProducers(db),
+    loadLatestBalances(db),
+  ]);
+  const producerIntervals = new Map(
+    producerRows.map((row) => [row.producer_id, row.expected_interval_seconds]),
+  );
+
+  const balances = (
+    await Promise.all(
+      latestBalances.map(async (row): Promise<BalanceView | null> => {
+        if (!isBalanceProvider(row.provider)) {
+          return null;
+        }
+
+        const dataAge = ageSeconds(nowMs, row.sampled_at);
+        const expectedInterval = producerIntervals.get(row.producer_id) ?? 1800;
+        const deltas = await Promise.all(
+          DELTA_WINDOW_DAYS.map((windowDays) => loadDelta(db, row, windowDays, nowMs)),
+        );
+
+        return {
+          producer_id: row.producer_id,
+          provider: row.provider,
+          account: row.account,
+          currency: row.currency,
+          sampled_at: row.sampled_at,
+          ingested_at: row.ingested_at,
+          total_balance: row.total_balance,
+          topped_up_balance: row.topped_up_balance,
+          granted_balance: row.granted_balance,
+          cumulative_usage: row.cumulative_usage,
+          credit_limit: row.credit_limit,
+          is_available: row.is_available === null ? null : row.is_available === 1,
+          data_age_seconds: dataAge,
+          is_stale: dataAge === null || dataAge > expectedInterval * 2,
+          deltas,
+        };
+      }),
+    )
+  ).filter((balance): balance is BalanceView => balance !== null);
+
+  return {
+    generated_at: now.toISOString(),
+    producers: producerRows.map((row) => toProducerHealth(row, nowMs)),
+    balances,
+  };
+}
+
+export async function getBalanceHistory(
+  db: D1Database,
+  provider: BalanceProvider,
+  days: number,
+  now: Date = new Date(),
+): Promise<BalanceHistoryResponse> {
+  const cutoff = new Date(now.getTime() - days * DAY_MS).toISOString();
+  const result = await db
+    .prepare(
+      `SELECT account, currency, sampled_at, ingested_at,
+              total_balance, cumulative_usage
+       FROM balance_snapshots
+       WHERE provider = ? AND sampled_at >= ?
+       ORDER BY currency, account, sampled_at
+       LIMIT 20000`,
+    )
+    .bind(provider, cutoff)
+    .all<HistoryRow>();
+
+  const seriesByKey = new Map<string, BalanceHistorySeries>();
+  for (const row of result.results) {
+    const key = `${row.account}\u0000${row.currency}`;
+    let series = seriesByKey.get(key);
+    if (!series) {
+      series = { account: row.account, currency: row.currency, points: [] };
+      seriesByKey.set(key, series);
+    }
+    series.points.push({
+      sampled_at: row.sampled_at,
+      ingested_at: row.ingested_at,
+      total_balance: row.total_balance,
+      cumulative_usage: row.cumulative_usage,
+    });
+  }
+
+  return { provider, days, series: [...seriesByKey.values()] };
+}

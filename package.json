@@ -1,0 +1,25 @@
+{
+  "name": "bilan",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm --filter bilan-web build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "dev:ingest": "pnpm --filter bilan-ingest exec wrangler dev --test-scheduled --persist-to ../../.wrangler/state",
+    "dev:web": "pnpm --filter bilan-web build && pnpm --filter bilan-web exec wrangler dev --persist-to ../../.wrangler/state",
+    "db:migrate:local": "pnpm --filter bilan-ingest exec wrangler d1 migrations apply bilan --local --persist-to ../../.wrangler/state",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "@cloudflare/oxlint-config": "^0.2.0",
+    "oxfmt": "^0.80.0",
+    "oxlint": "^1.95.0",
+    "tsrs": "7.1.0-beta.tsrs5",
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "pnpm@11.20.0"
+}
