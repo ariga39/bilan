@@ -31,6 +31,9 @@ const openRouter: BalanceView = {
       reported_usage_delta: 7.5,
       reported_usage_delta_discontinuity: false,
       baseline_sampled_at: "2026-11-20T12:00:00Z",
+      actual_interval_seconds: 7 * 86_400 + 9 * 60,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     },
     {
@@ -39,6 +42,9 @@ const openRouter: BalanceView = {
       reported_usage_delta: 10.5,
       reported_usage_delta_discontinuity: false,
       baseline_sampled_at: "2026-10-28T12:00:00Z",
+      actual_interval_seconds: 30 * 86_400 + 9 * 60,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     },
   ],
@@ -66,6 +72,9 @@ const deepSeek: BalanceView = {
       reported_usage_delta: null,
       reported_usage_delta_discontinuity: false,
       baseline_sampled_at: "2026-11-20T12:00:00Z",
+      actual_interval_seconds: 7 * 86_400 + 9 * 60,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     },
     {
@@ -74,6 +83,9 @@ const deepSeek: BalanceView = {
       reported_usage_delta: null,
       reported_usage_delta_discontinuity: false,
       baseline_sampled_at: null,
+      actual_interval_seconds: null,
+      coverage: "unavailable",
+      coverage_reason: "missing_baseline",
       history_complete: false,
     },
   ],
@@ -139,5 +151,41 @@ describe("balance presentation", () => {
 
     expect(screen.getByText("Delayed")).toBeTruthy();
     expect(screen.getByText(/USD\s37\.50/u)).toBeTruthy();
+  });
+
+  it("labels a partial delta window with its actual coverage", () => {
+    render(
+      <BalanceCard
+        balance={{
+          ...openRouter,
+          deltas: [
+            {
+              window_days: 7,
+              net_delta: -2.5,
+              reported_usage_delta: 10.5,
+              reported_usage_delta_discontinuity: false,
+              baseline_sampled_at: "2026-11-18T12:00:00Z",
+              actual_interval_seconds: 9 * 86_400,
+              coverage: "partial",
+              coverage_reason: "boundary_mismatch",
+              history_complete: false,
+            },
+            {
+              window_days: 30,
+              net_delta: null,
+              reported_usage_delta: null,
+              reported_usage_delta_discontinuity: false,
+              baseline_sampled_at: null,
+              actual_interval_seconds: null,
+              coverage: "unavailable",
+              coverage_reason: "missing_baseline",
+              history_complete: false,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText("Partial coverage · actual 9 d")).toHaveLength(2);
   });
 });

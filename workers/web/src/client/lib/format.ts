@@ -76,16 +76,35 @@ export function formatDateTime(timestamp: string | null): string {
   }).format(parsed)} UTC`;
 }
 
-export function formatChartDate(timestamp: string): string {
-  const parsed = Date.parse(timestamp);
-  if (Number.isNaN(parsed)) {
-    return timestamp;
+export function formatChartDateMs(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs)) {
+    return "";
   }
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
-  }).format(parsed);
+  }).format(timestampMs);
+}
+
+export function formatSpan(seconds: number | null): string {
+  if (seconds === null) {
+    return "unknown";
+  }
+  if (seconds < SECONDS_PER_MINUTE) {
+    return `${Math.max(1, Math.round(seconds))} s`;
+  }
+  if (seconds < SECONDS_PER_HOUR) {
+    return `${Math.round(seconds / SECONDS_PER_MINUTE)} min`;
+  }
+  if (seconds < SECONDS_PER_DAY) {
+    const hours = Math.floor(seconds / SECONDS_PER_HOUR);
+    const minutes = Math.round((seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+    return minutes > 0 ? `${hours} h ${minutes} min` : `${hours} h`;
+  }
+  const days = Math.floor(seconds / SECONDS_PER_DAY);
+  const hours = Math.round((seconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR);
+  return hours > 0 ? `${days} d ${hours} h` : `${days} d`;
 }
 
 export function formatInterval(seconds: number): string {

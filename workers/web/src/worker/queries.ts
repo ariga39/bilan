@@ -133,18 +133,46 @@ async function loadDelta(
   balance: LatestBalanceRow,
   windowDays: DeltaWindowDays,
   nowMs: number,
+  expectedIntervalSeconds: number,
 ): Promise<BalanceWindowDelta> {
   const baseline = await loadBaseline(db, balance, windowDays, nowMs);
+  const windowMs = windowDays * DAY_MS;
+  const cutoffMs = nowMs - windowMs;
+  const toleranceMs = Math.max(1, expectedIntervalSeconds) * 2 * 1000;
+  const currentMs = parseTimestamp(balance.sampled_at);
+  const baselineMs = baseline === null ? null : parseTimestamp(baseline.sampled_at);
+
+  const actualIntervalSeconds =
+    currentMs !== null && baselineMs !== null
+      ? Math.max(0, Math.round((currentMs - baselineMs) / 1000))
+      : null;
+
   const netDelta =
     baseline !== null && balance.total_balance !== null && baseline.total_balance !== null
       ? balance.total_balance - baseline.total_balance
       : null;
-  const hasCompleteHistory = netDelta !== null;
 
   const reportedUsageDelta =
     baseline !== null && balance.cumulative_usage !== null && baseline.cumulative_usage !== null
       ? balance.cumulative_usage - baseline.cumulative_usage
       : null;
+
+  let coverage: BalanceWindowDelta["coverage"] = "full";
+  let coverageReason: BalanceWindowDelta["coverage_reason"] = null;
+
+  if (baseline === null) {
+    coverage = "unavailable";
+    coverageReason = "missing_baseline";
+  } else if (netDelta === null) {
+    coverage = "unavailable";
+    coverageReason = "missing_value";
+  } else if (currentMs === null || Math.abs(nowMs - currentMs) > toleranceMs) {
+    coverage = "partial";
+    coverageReason = "stale_current_sample";
+  } else if (baselineMs === null || Math.abs(cutoffMs - baselineMs) > toleranceMs) {
+    coverage = "partial";
+    coverageReason = "boundary_mismatch";
+  }
 
   return {
     window_days: windowDays,
@@ -152,7 +180,10 @@ async function loadDelta(
     reported_usage_delta: reportedUsageDelta,
     reported_usage_delta_discontinuity: reportedUsageDelta !== null && reportedUsageDelta < 0,
     baseline_sampled_at: baseline?.sampled_at ?? null,
-    history_complete: hasCompleteHistory,
+    actual_interval_seconds: actualIntervalSeconds,
+    coverage,
+    coverage_reason: coverageReason,
+    history_complete: coverage === "full",
   };
 }
 
@@ -197,7 +228,9 @@ export async function getOverview(
         const dataAge = ageSeconds(nowMs, row.sampled_at);
         const expectedInterval = producerIntervals.get(row.producer_id) ?? 1800;
         const deltas = await Promise.all(
-          DELTA_WINDOW_DAYS.map((windowDays) => loadDelta(db, row, windowDays, nowMs)),
+          DELTA_WINDOW_DAYS.map((windowDays) =>
+            loadDelta(db, row, windowDays, nowMs, expectedInterval),
+          ),
         );
 
         return {
@@ -241,8 +274,7 @@ export async function getBalanceHistory(
               total_balance, cumulative_usage
        FROM balance_snapshots
        WHERE provider = ? AND sampled_at >= ?
-       ORDER BY currency, account, sampled_at
-       LIMIT 20000`,
+       ORDER BY sampled_at`,
     )
     .bind(provider, cutoff)
     .all<HistoryRow>();
@@ -263,5 +295,10 @@ export async function getBalanceHistory(
     });
   }
 
-  return { provider, days, series: [...seriesByKey.values()] };
+  const series = [...seriesByKey.values()].sort(
+    (left, right) =>
+      left.currency.localeCompare(right.currency) || left.account.localeCompare(right.account),
+  );
+
+  return { provider, days, series };
 }

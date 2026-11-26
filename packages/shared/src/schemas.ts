@@ -32,6 +32,11 @@ const balanceWindowDeltaSchema: z.ZodType<BalanceWindowDelta> = z.object({
   reported_usage_delta: z.number().nullable(),
   reported_usage_delta_discontinuity: z.boolean(),
   baseline_sampled_at: z.string().nullable(),
+  actual_interval_seconds: z.number().nullable(),
+  coverage: z.enum(["full", "partial", "unavailable"]),
+  coverage_reason: z
+    .enum(["missing_baseline", "missing_value", "stale_current_sample", "boundary_mismatch"])
+    .nullable(),
   history_complete: z.boolean(),
 });
 

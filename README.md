@@ -124,8 +124,12 @@ cron trigger and, in later B2 work, the scoped push endpoint.
   are balance-only, so a difference is never labeled spend or burn.
 - OpenRouter `cumulative_usage` differences are labeled **Reported usage
   delta** and flagged as a discontinuity when they decrease.
-- A 7d/30d delta is `null` with an "Incomplete history" label unless a sample
-  exists at or before the window boundary.
+- A 7d/30d delta is marked full only when the current sample is near now and a
+  baseline sample is near the window boundary. Otherwise the API returns
+  `coverage: "partial"` with the actual interval, and the UI labels it
+  "Partial coverage · actual …". A missing baseline is "Incomplete history".
+- History requests return every sampled point in the supported range; there is
+  no silent row cap that can drop a later currency series.
 - Producer heartbeat time is displayed separately from each balance's
   `sampled_at`. A successful pull updates liveness; historical data does not
   become fresh because the collector is alive.

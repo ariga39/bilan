@@ -13,11 +13,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  formatChartDate,
+  formatChartDateMs,
   formatCompactCurrency,
   formatCurrency,
   formatDateTime,
 } from "@/lib/format";
+import { buildBalanceChartPoints } from "@/lib/chart";
 
 const PROVIDER_LABEL: Record<BalanceProvider, string> = {
   openrouter: "OpenRouter",
@@ -31,11 +32,7 @@ export function BalanceHistoryChart({
   provider: BalanceProvider;
   series: BalanceHistorySeries;
 }) {
-  const points = series.points.flatMap((point) =>
-    point.total_balance === null
-      ? []
-      : [{ sampled_at: point.sampled_at, total_balance: point.total_balance }],
-  );
+  const points = buildBalanceChartPoints(series);
 
   if (points.length === 0) {
     return (
@@ -72,8 +69,11 @@ export function BalanceHistoryChart({
             <LineChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 3" />
               <XAxis
-                dataKey="sampled_at"
-                tickFormatter={(value) => formatChartDate(String(value))}
+                dataKey="sampled_at_ms"
+                type="number"
+                scale="time"
+                domain={["dataMin", "dataMax"]}
+                tickFormatter={(value) => formatChartDateMs(Number(value))}
                 tickLine={false}
                 axisLine={false}
                 minTickGap={28}
@@ -88,7 +88,7 @@ export function BalanceHistoryChart({
                 domain={["auto", "auto"]}
               />
               <Tooltip
-                labelFormatter={(label) => formatDateTime(String(label))}
+                labelFormatter={(label) => formatDateTime(new Date(Number(label)).toISOString())}
                 formatter={(value) => [
                   formatCurrency(Number(value), series.currency),
                   "Remaining balance",

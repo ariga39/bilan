@@ -50,6 +50,14 @@ export interface ProducerHealth {
   is_stale: boolean;
 }
 
+export type DeltaCoverage = "full" | "partial" | "unavailable";
+
+export type DeltaCoverageReason =
+  | "missing_baseline"
+  | "missing_value"
+  | "stale_current_sample"
+  | "boundary_mismatch";
+
 export interface BalanceWindowDelta {
   window_days: DeltaWindowDays;
   /** A balance-only difference. Never a spend or burn total. */
@@ -58,6 +66,10 @@ export interface BalanceWindowDelta {
   reported_usage_delta: number | null;
   reported_usage_delta_discontinuity: boolean;
   baseline_sampled_at: string | null;
+  /** Actual time between the baseline and current samples, not the nominal window. */
+  actual_interval_seconds: number | null;
+  coverage: DeltaCoverage;
+  coverage_reason: DeltaCoverageReason | null;
   history_complete: boolean;
 }
 

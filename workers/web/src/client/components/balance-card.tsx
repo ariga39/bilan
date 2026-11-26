@@ -4,7 +4,13 @@ import type { LucideIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatAge, formatCurrency, formatDateTime, formatSignedCurrency } from "@/lib/format";
+import {
+  formatAge,
+  formatCurrency,
+  formatDateTime,
+  formatSignedCurrency,
+  formatSpan,
+} from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const PROVIDER_META: Record<
@@ -32,6 +38,8 @@ function DeltaMetric({
   value,
   currency,
   emptyLabel,
+  coverage,
+  actualIntervalSeconds,
   note,
   discontinuity = false,
 }: {
@@ -39,6 +47,8 @@ function DeltaMetric({
   value: number | null;
   currency: string;
   emptyLabel: string;
+  coverage: BalanceWindowDelta["coverage"];
+  actualIntervalSeconds: number | null;
   note?: string;
   discontinuity?: boolean;
 }) {
@@ -61,6 +71,11 @@ function DeltaMetric({
       >
         {value === null ? emptyLabel : formatSignedCurrency(value, currency)}
       </p>
+      {coverage === "partial" ? (
+        <p className="mt-0.5 text-[11px] leading-snug text-amber-700">
+          Partial coverage · actual {formatSpan(actualIntervalSeconds)}
+        </p>
+      ) : null}
       {note ? (
         <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{note}</p>
       ) : null}
@@ -74,11 +89,16 @@ export function BalanceCard({ balance }: { balance: BalanceView }) {
   const delta7 = deltaFor(balance, 7);
   const delta30 = deltaFor(balance, 30);
 
-  const net7Label = delta7?.history_complete === false ? "Incomplete history" : "Not reported";
-  const net30Label = delta30?.history_complete === false ? "Incomplete history" : "Not reported";
-  const usage7Label = delta7?.baseline_sampled_at === null ? "Incomplete history" : "Not reported";
+  const net7Label = delta7?.coverage === "unavailable" ? "Incomplete history" : "Not reported";
+  const net30Label = delta30?.coverage === "unavailable" ? "Incomplete history" : "Not reported";
+  const usage7Label =
+    delta7?.coverage === "unavailable" || delta7?.baseline_sampled_at === null
+      ? "Incomplete history"
+      : "Not reported";
   const usage30Label =
-    delta30?.baseline_sampled_at === null ? "Incomplete history" : "Not reported";
+    delta30?.coverage === "unavailable" || delta30?.baseline_sampled_at === null
+      ? "Incomplete history"
+      : "Not reported";
 
   return (
     <Card className={cn("overflow-hidden", balance.is_stale && "border-amber-300/80")}>
@@ -165,12 +185,16 @@ export function BalanceCard({ balance }: { balance: BalanceView }) {
             value={delta7?.net_delta ?? null}
             currency={balance.currency}
             emptyLabel={net7Label}
+            coverage={delta7?.coverage ?? "unavailable"}
+            actualIntervalSeconds={delta7?.actual_interval_seconds ?? null}
           />
           <DeltaMetric
             label="Net balance change (30d)"
             value={delta30?.net_delta ?? null}
             currency={balance.currency}
             emptyLabel={net30Label}
+            coverage={delta30?.coverage ?? "unavailable"}
+            actualIntervalSeconds={delta30?.actual_interval_seconds ?? null}
           />
           {balance.provider === "openrouter" ? (
             <>
@@ -179,6 +203,8 @@ export function BalanceCard({ balance }: { balance: BalanceView }) {
                 value={delta7?.reported_usage_delta ?? null}
                 currency={balance.currency}
                 emptyLabel={usage7Label}
+                coverage={delta7?.coverage ?? "unavailable"}
+                actualIntervalSeconds={delta7?.actual_interval_seconds ?? null}
                 note="From OpenRouter's cumulative usage field."
                 discontinuity={delta7?.reported_usage_delta_discontinuity ?? false}
               />
@@ -187,6 +213,8 @@ export function BalanceCard({ balance }: { balance: BalanceView }) {
                 value={delta30?.reported_usage_delta ?? null}
                 currency={balance.currency}
                 emptyLabel={usage30Label}
+                coverage={delta30?.coverage ?? "unavailable"}
+                actualIntervalSeconds={delta30?.actual_interval_seconds ?? null}
                 note="From OpenRouter's cumulative usage field."
                 discontinuity={delta30?.reported_usage_delta_discontinuity ?? false}
               />

@@ -45,7 +45,7 @@ describe("GET /api/v1/overview", () => {
     await seedBalance({
       provider: "openrouter",
       currency: "USD",
-      sampledAt: iso(31),
+      sampledAt: iso(30, 10),
       totalBalance: 40,
       cumulativeUsage: 2,
       creditLimit: 42,
@@ -53,7 +53,7 @@ describe("GET /api/v1/overview", () => {
     await seedBalance({
       provider: "openrouter",
       currency: "USD",
-      sampledAt: iso(8),
+      sampledAt: iso(7, 10),
       totalBalance: 30,
       cumulativeUsage: 5,
       creditLimit: 42,
@@ -71,7 +71,7 @@ describe("GET /api/v1/overview", () => {
     await seedBalance({
       provider: "deepseek",
       currency: "CNY",
-      sampledAt: iso(8),
+      sampledAt: iso(7, 10),
       totalBalance: 100,
     });
     await seedBalance({
@@ -127,13 +127,19 @@ describe("GET /api/v1/overview", () => {
       net_delta: 7.5,
       reported_usage_delta: 7.5,
       reported_usage_delta_discontinuity: false,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     });
+    expect(openRouter7d?.actual_interval_seconds).toBe(7 * 86_400 + 9 * 60);
     expect(openRouter30d).toMatchObject({
       net_delta: -2.5,
       reported_usage_delta: 10.5,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     });
+    expect(openRouter30d?.actual_interval_seconds).toBe(30 * 86_400 + 9 * 60);
 
     const cny7d = deepSeekCny?.deltas.find((delta) => delta.window_days === 7);
     const cny30d = deepSeekCny?.deltas.find((delta) => delta.window_days === 30);
@@ -141,11 +147,17 @@ describe("GET /api/v1/overview", () => {
     expect(cny7d).toMatchObject({
       net_delta: -16.5,
       reported_usage_delta: null,
+      coverage: "full",
+      coverage_reason: null,
       history_complete: true,
     });
+    expect(cny7d?.actual_interval_seconds).toBe(7 * 86_400 + 9 * 60);
     expect(cny30d).toMatchObject({
       net_delta: null,
       baseline_sampled_at: null,
+      actual_interval_seconds: null,
+      coverage: "unavailable",
+      coverage_reason: "missing_baseline",
       history_complete: false,
     });
 
@@ -156,6 +168,9 @@ describe("GET /api/v1/overview", () => {
         reported_usage_delta: null,
         reported_usage_delta_discontinuity: false,
         baseline_sampled_at: null,
+        actual_interval_seconds: null,
+        coverage: "unavailable",
+        coverage_reason: "missing_baseline",
         history_complete: false,
       },
       {
@@ -164,11 +179,70 @@ describe("GET /api/v1/overview", () => {
         reported_usage_delta: null,
         reported_usage_delta_discontinuity: false,
         baseline_sampled_at: null,
+        actual_interval_seconds: null,
+        coverage: "unavailable",
+        coverage_reason: "missing_baseline",
         history_complete: false,
       },
     ]);
 
     expect(JSON.stringify(body)).not.toMatch(/spend|burn/iu);
+  });
+
+  it("labels stale and sparse delta windows as partial with their actual interval", async () => {
+    const now = Date.now();
+    const iso = (daysAgo: number): string => new Date(now - daysAgo * DAY_MS).toISOString();
+
+    await seedBalance({
+      provider: "openrouter",
+      currency: "USD",
+      sampledAt: iso(9),
+      totalBalance: 40,
+      cumulativeUsage: 2,
+    });
+    await seedBalance({
+      provider: "openrouter",
+      currency: "USD",
+      sampledAt: iso(0),
+      totalBalance: 37.5,
+      cumulativeUsage: 12.5,
+    });
+    await seedBalance({
+      provider: "deepseek",
+      currency: "CNY",
+      sampledAt: iso(10),
+      totalBalance: 100,
+    });
+    await seedBalance({
+      provider: "deepseek",
+      currency: "CNY",
+      sampledAt: iso(3),
+      totalBalance: 80,
+    });
+
+    const body = await overview();
+    const openRouter7d = body.balances
+      .find((balance) => balance.provider === "openrouter")
+      ?.deltas.find((delta) => delta.window_days === 7);
+    const deepSeek7d = body.balances
+      .find((balance) => balance.provider === "deepseek" && balance.currency === "CNY")
+      ?.deltas.find((delta) => delta.window_days === 7);
+
+    expect(openRouter7d).toMatchObject({
+      net_delta: -2.5,
+      coverage: "partial",
+      coverage_reason: "boundary_mismatch",
+      history_complete: false,
+    });
+    expect(openRouter7d?.actual_interval_seconds).toBe(9 * 86_400);
+
+    expect(deepSeek7d).toMatchObject({
+      net_delta: -20,
+      coverage: "partial",
+      coverage_reason: "stale_current_sample",
+      history_complete: false,
+    });
+    expect(deepSeek7d?.actual_interval_seconds).toBe(7 * 86_400);
   });
 
   it("surfaces a failed collector without hiding the other provider's balance", async () => {
@@ -235,6 +309,53 @@ describe("GET /api/v1/balances/history", () => {
     expect(result.body.series).toHaveLength(1);
     expect(result.body.series[0]?.currency).toBe("USD");
     expect(result.body.series[0]?.points.map((point) => point.total_balance)).toEqual([42, 37.5]);
+  });
+
+  it("returns every currency series beyond 20,000 rows without clipping recent points", async () => {
+    await env.DB.prepare(
+      `WITH digits(d) AS (
+         VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+       ),
+       numbers(n) AS (
+         SELECT a.d + b.d * 10 + c.d * 100 + d.d * 1000 + e.d * 10000
+         FROM digits a, digits b, digits c, digits d, digits e
+       )
+       INSERT INTO balance_snapshots (
+         producer_id, provider, account, currency, sampled_at,
+         total_balance, ingested_at
+       )
+       SELECT
+         'pull-deepseek', 'deepseek', 'default', 'CNY',
+         strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-300 days', '+' || n || ' minutes'),
+         1,
+         strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-300 days', '+' || n || ' minutes')
+       FROM numbers
+       WHERE n < 20001`,
+    ).run();
+
+    const now = Date.now();
+    await seedBalance({
+      provider: "deepseek",
+      currency: "USD",
+      sampledAt: new Date(now - 60 * 60_000).toISOString(),
+      totalBalance: 4,
+    });
+    await seedBalance({
+      provider: "deepseek",
+      currency: "USD",
+      sampledAt: new Date(now).toISOString(),
+      totalBalance: 5,
+    });
+
+    const result = await history("?provider=deepseek&days=365");
+    const cny = result.body.series.find((series) => series.currency === "CNY");
+    const usd = result.body.series.find((series) => series.currency === "USD");
+
+    expect(result.status).toBe(200);
+    expect(result.body.series.map((series) => series.currency)).toEqual(["CNY", "USD"]);
+    expect(cny?.points).toHaveLength(20_001);
+    expect(usd?.points).toHaveLength(2);
+    expect(usd?.points.at(-1)?.total_balance).toBe(5);
   });
 
   it("validates provider and day inputs instead of querying arbitrary data", async () => {
