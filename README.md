@@ -34,7 +34,9 @@ packages/shared/            Shared API types, schemas, and timezone helpers
 workers/ingest/             Scoped Push endpoint + scheduled balance pulls
 workers/web/                Read API + React/Tailwind/shadcn/Recharts SPA
 shippers/                   Standalone Python 3 stdlib host shippers
-docs/                       Design, tasks, and Access guidance
+acceptance/                 B5 multi-host acceptance entry points
+ops/                        Synthetic producer, systemd, and cron templates
+docs/                       Design, tasks, operations, and Access guidance
 ```
 
 ## Install and checks
@@ -54,9 +56,11 @@ Individual checks:
 pnpm format:check
 pnpm lint
 pnpm typecheck
+pnpm typecheck:acceptance
 pnpm test
 pnpm build
-pnpm test:e2e   # requires pnpm build; starts local Workers and the real shippers
+pnpm test:e2e     # requires pnpm build; starts local Workers and the real shippers
+pnpm test:e2e:b5  # focused B5 five-platform and host-migration acceptance
 ```
 
 `pnpm test` runs:
@@ -185,13 +189,34 @@ it with a partial file.
 A migrated shipper must retain the same logical dataset and sequence, so moving
 only `usage.jsonl` is not enough:
 
-1. Stop the old shipper process and disable its timer/systemd unit. Confirm no
-   scheduled or manual run can still push from the old host.
-2. Copy the source log and the **exact** state/outbox file together. If a batch
-   is pending, the state file contains the identical payload and `batch_seq`
-   that must be retried on the new host.
-3. Start the new host with the same `--producer-id` and the copied state file.
-   Do not run the old and new writers concurrently.
+1. Pause the actual source writer (debitmetre/orihsus log writer or telemetre
+   database sampler), or buffer its writes away from both dataset paths. Do not
+   point writers at the destination yet. Then stop the old shipper and disable
+   its timer/systemd unit; confirm no scheduled or manual run can still push
+   from the old host.
+2. Copy all of that collector's inputs and the **exact** state/outbox file from
+   the stable snapshot together. If a batch is pending, the state file contains
+   the identical payload and `batch_seq` that must be retried on the new host.
+
+   | Collector    | Copy with the state file                                                             | State file                                                                    |
+   | :----------- | :----------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
+   | `debitmetre` | `usage.jsonl`                                                                        | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
+   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `telemetre`  | SQLite backup API/CLI backup, or verified offline backup after stopping the database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
+
+   Omitting `orihsus` daily usage files treats them as empty and drops unsent
+   observations. Use `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"` or a
+   verified offline backup; do not casually copy a live database or rely on
+   ad-hoc `-wal`/`-shm` copies.
+
+3. Start the new shipper first with the same `--producer-id` and copied state
+   restored at its final `--state-file` path. Run its final catch-up and
+   complete the first HTTP `200` ACK before enabling writers at the destination.
+   Verify a non-double-counted total, then restore buffered writes and
+   resume/redirect the source writers. Resume order is new shipper, completed
+   ACK, buffered writes, then source writers; leave the old shipper disabled.
+   Do not run old and new writers concurrently. Exact paths, permissions, and
+   token rotation are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 The shipper verifies a content checkpoint over the consumed or aggregated
 source extent, including any in-flight batch. If the log has been truncated or
@@ -319,7 +344,8 @@ API, and dashboard:
   (`status = 'ok'`, non-anomalous) observation. Failed/empty attempts and clock
   anomalies are separate warnings; a future-clock sample cannot replace the
   current reading or pin freshness, even when the upstream anomaly flag is
-  absent.
+  absent. The read selection excludes any sample more than 5 minutes ahead of
+  its own ingestion time.
 - AGY is quota-only on the dashboard and is omitted from token usage totals
   (never rendered as `0`).
 
@@ -390,6 +416,43 @@ pnpm test:e2e
 ```
 
 The E2E uses only synthetic accounts, machine names, quota windows, and logs.
+
+## B5: Multi-host operations and acceptance
+
+B5 closes v1 with an operator runbook and a reproducible full-stack acceptance
+run. The runbook covers the effective Cloudflare Access order, one shared D1
+database across both Workers, scoped producer-token setup, independent
+per-host systemd/cron schedules, host migration with copied log and state, and
+the security/privacy checklist:
+
+- [docs/OPERATIONS.md](docs/OPERATIONS.md)
+- [`ops/producers.example.json`](ops/producers.example.json)
+- [`ops/systemd/`](ops/systemd/) and [`ops/cron/bilan-shippers.example`](ops/cron/bilan-shippers.example)
+
+Run the five-platform acceptance after building the SPA:
+
+```sh
+pnpm build
+pnpm test:e2e:b5
+```
+
+It starts both real local Workers against one temporary D1 database, runs the
+real `debitmetre.py`, `orihsus.py`, and `telemetre.py` CLIs from separate host
+directories with separate state and scoped tokens, and gives the real production
+scheduled adapters synthetic HTTP responses for only the two exact upstream
+URLs (no network). Changing those fixtures proves the actual parsing and
+balance calculations. It verifies Codex usage/quota, OpenCode Go usage/quota,
+AGY quota without any AGY token total, and OpenRouter/DeepSeek balances through
+the normal read API and dashboard sections. A 302 fixture confirms redirects
+fail without following or forwarding credentials. It also copies a
+collector log and state to a migrated host to assert zero double-counting, and
+checks route/secret isolation plus cross-scope `403` rejection.
+
+No live credentials, cloud calls, deployment, or production changes are
+involved; all host aliases, tokens, keys, accounts, and logs are synthetic. The
+B5 fixture gives each quota subject one distinct latest valid sample, so B5 does
+not depend on same-second tie ordering; that ordering remains covered by the B4
+quota tests.
 
 ## Production configuration
 

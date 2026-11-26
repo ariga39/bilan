@@ -1,0 +1,12 @@
+# Synthetic host alias: host-b. Timer period is an example, not a live install.
+[Unit]
+Description=Run the bilan orihsus shipper periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

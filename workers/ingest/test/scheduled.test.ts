@@ -109,7 +109,7 @@ describe("scheduled balance collection", () => {
     await runScheduled();
 
     expect(calls.calls).toHaveLength(2);
-    expect(calls.calls.every((call) => call.redirect === "error")).toBe(true);
+    expect(calls.calls.every((call) => call.redirect === "manual")).toBe(true);
     expect(calls.calls.map((call) => call.authorization)).toEqual([
       "Bearer test-openrouter-key",
       "Bearer test-deepseek-key",
@@ -244,7 +244,7 @@ describe("scheduled balance collection", () => {
 
     await runScheduled();
 
-    expect(calls.calls.every((call) => call.redirect === "error")).toBe(true);
+    expect(calls.calls.every((call) => call.redirect === "manual")).toBe(true);
     const openRouterRows = await env.DB.prepare(
       `SELECT provider FROM balance_snapshots WHERE provider = 'openrouter'`,
     ).all<{ provider: string }>();

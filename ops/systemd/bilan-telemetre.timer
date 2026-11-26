@@ -1,0 +1,12 @@
+# Synthetic host alias: host-c. Timer period is an example, not a live install.
+[Unit]
+Description=Run the bilan telemetre quota shipper periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

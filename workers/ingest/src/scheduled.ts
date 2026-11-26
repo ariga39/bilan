@@ -12,11 +12,16 @@ function errorMessage(adapter: PullAdapter, error: unknown): string {
   return `${adapter.providerLabel} request failed`;
 }
 
-async function runAdapter(env: Env, adapter: PullAdapter, sampledAt: string): Promise<void> {
+async function runAdapter(
+  env: Env,
+  adapter: PullAdapter,
+  sampledAt: string,
+  fetchImpl: typeof fetch,
+): Promise<void> {
   let snapshots: Array<BalanceSnapshotInput>;
 
   try {
-    snapshots = await adapter.pull(env, sampledAt);
+    snapshots = await adapter.pull(env, sampledAt, fetchImpl);
   } catch (error) {
     await recordPullError(env, adapter, sampledAt, errorMessage(adapter, error));
     return;
@@ -29,9 +34,15 @@ async function runAdapter(env: Env, adapter: PullAdapter, sampledAt: string): Pr
   }
 }
 
-export async function runScheduledPulls(controller: ScheduledController, env: Env): Promise<void> {
+export async function runScheduledPulls(
+  controller: ScheduledController,
+  env: Env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
   const sampledAt = new Date(controller.scheduledTime).toISOString();
   const enabled = pullAdapters.filter((adapter) => adapter.isEnabled(env));
 
-  await Promise.allSettled(enabled.map((adapter) => runAdapter(env, adapter, sampledAt)));
+  await Promise.allSettled(
+    enabled.map((adapter) => runAdapter(env, adapter, sampledAt, fetchImpl)),
+  );
 }

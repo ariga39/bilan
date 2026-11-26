@@ -1,0 +1,26 @@
+{
+  "debitmetre-main": {
+    "token_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+    "display_name": "debitmetre (Codex usage)",
+    "expected_interval_seconds": 3600,
+    "scopes": [{ "source": "codex", "kind": "usage_buckets" }]
+  },
+  "orihsus-main": {
+    "token_sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+    "display_name": "orihsus (OpenCode Go)",
+    "expected_interval_seconds": 1800,
+    "scopes": [
+      { "source": "opencode", "kind": "usage_buckets" },
+      { "source": "opencode", "kind": "quota_observations" }
+    ]
+  },
+  "telemetre-quota": {
+    "token_sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+    "display_name": "telemetre (AGY + Codex quota)",
+    "expected_interval_seconds": 1800,
+    "scopes": [
+      { "source": "agy", "kind": "quota_observations" },
+      { "source": "codex", "kind": "quota_observations" }
+    ]
+  }
+}

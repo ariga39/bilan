@@ -1,0 +1,27 @@
+# Synthetic host alias: host-b. Install only on the host that owns this dataset.
+[Unit]
+Description=bilan orihsus OpenCode Go shipper (host-b)
+Documentation=file:/opt/bilan/docs/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bilan
+Group=bilan
+WorkingDirectory=/var/lib/bilan/host-b
+ExecStart=/usr/bin/python3 /opt/bilan/shippers/orihsus.py \
+  --audit-file /var/lib/bilan/host-b/orihsus/audit.jsonl \
+  --usage-dir /var/lib/bilan/host-b/orihsus/usage \
+  --state-file /var/lib/bilan/host-b/state/orihsus.json \
+  --producer-id orihsus-main \
+  --observer-machine host-b \
+  --interval-seconds 300 \
+  --endpoint https://bilan-ingest.example.com/api/v1/ingest \
+  --token-file /etc/bilan/orihsus.token \
+  --timeout 30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/bilan/host-b/state
