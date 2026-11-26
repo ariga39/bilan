@@ -1,0 +1,15 @@
+# Synthetic host aliases only. Install at most one line per host, under the
+# shipper user. This file is an example and is never installed by the repo.
+# Prefer the systemd templates when the host already uses systemd.
+MAILTO=""
+PYTHON=/usr/bin/python3
+INGEST=https://bilan-ingest.example.com/api/v1/ingest
+
+# host-a: Codex usage from debitmetre.
+*/15 * * * * bilan $PYTHON /opt/bilan/shippers/debitmetre.py --usage-file /var/lib/bilan/host-a/debitmetre/usage.jsonl --state-file /var/lib/bilan/host-a/state/debitmetre.json --producer-id debitmetre-main --endpoint $INGEST --token-file /etc/bilan/debitmetre.token --timeout 30
+
+# host-b: OpenCode Go usage and per-key quota history from orihsus.
+*/5 * * * * bilan $PYTHON /opt/bilan/shippers/orihsus.py --audit-file /var/lib/bilan/host-b/orihsus/audit.jsonl --usage-dir /var/lib/bilan/host-b/orihsus/usage --state-file /var/lib/bilan/host-b/state/orihsus.json --producer-id orihsus-main --observer-machine host-b --interval-seconds 300 --endpoint $INGEST --token-file /etc/bilan/orihsus.token --timeout 30
+
+# host-c: AGY and Codex quota observations from the telemetre centre database.
+*/15 * * * * bilan $PYTHON /opt/bilan/shippers/telemetre.py --database /var/lib/bilan/host-c/telemetre/quota.sqlite3 --state-file /var/lib/bilan/host-c/state/telemetre.json --producer-id telemetre-quota --endpoint $INGEST --token-file /etc/bilan/telemetre.token --timeout 30
