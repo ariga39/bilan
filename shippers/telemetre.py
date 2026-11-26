@@ -63,6 +63,7 @@ rescan; D1's immutable observation keys make that replay harmless.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -305,10 +306,21 @@ def _cursor_row(
 # -- window mapping -----------------------------------------------------------
 
 
+def _slot_with_suffix(base: str, suffix: str) -> str:
+    """Return a non-empty slot no longer than the D1 contract limit."""
+
+    if len(suffix) >= MAX_SLOT:
+        # Keep collision handling deterministic even for an absurd ordinal
+        # counter whose decimal suffix would not fit in the slot column.
+        suffix = "#" + hashlib.sha256(suffix.encode("utf-8")).hexdigest()[: MAX_SLOT - 1]
+    available = MAX_SLOT - len(suffix)
+    candidate = ((base[:available] if available > 0 else "") + suffix)[:MAX_SLOT]
+    return candidate or suffix[:MAX_SLOT] or "slot"
+
+
 def _unique_window_key(
     bucket_id: str,
     slot: str,
-    ordinal: int,
     seen: Dict[tuple[str, str], int],
 ) -> tuple[str, str]:
     """Keep the required ``(bucket_id, slot)`` pair unique without dropping rows."""
@@ -320,8 +332,7 @@ def _unique_window_key(
     seen[key] += 1
     counter = seen[key]
     while True:
-        suffix = "#%d" % counter
-        candidate = slot[: max(1, MAX_SLOT - len(suffix))] + suffix
+        candidate = _slot_with_suffix(slot, "#%d" % counter)
         candidate_key = (bucket_id, candidate)
         if candidate_key not in seen:
             seen[candidate_key] = 1
@@ -389,7 +400,7 @@ def _map_window(
         bucket_id = group or source_bucket or ("group-%d" % (ordinal + 1))
         slot = source_slot or source_bucket or ("slot-%d" % (ordinal + 1))
 
-    bucket_id, slot = _unique_window_key(bucket_id, slot, ordinal, seen)
+    bucket_id, slot = _unique_window_key(bucket_id, slot, seen)
     label = _window_label(provider, window_raw, group, bucket_id)
 
     remaining = _percent(window["remaining_display"])
@@ -808,6 +819,12 @@ def run_once(
             "telemetre-shipper: cursor row is missing or changed; replaying the centre database",
             file=sys.stderr,
         )
+        # Persist the invalidation before the replay attempt. If that attempt
+        # loses its ACK, the durable cursor is already reset instead of still
+        # pointing into the old database.
+        state["cursor_rowid"] = 0
+        state["cursor_sample_id"] = None
+        _save_state(state_path, state)
 
     chunks = _chunks(observations, scanned_row_id, scanned_sample_id)
     if chunks:

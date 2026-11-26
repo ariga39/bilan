@@ -134,6 +134,7 @@ class _IngestState:
         self.oversized = 0
         self.invalid = 0
         self.drop_next_response = False
+        self.drop_request_number: Optional[int] = None
 
     def receive(
         self,
@@ -184,9 +185,12 @@ class _IngestState:
                     self.commits += 1
                     status = 200
 
-            drop = self.drop_next_response
+            request_number = len(self.requests) + 1
+            drop = self.drop_next_response or self.drop_request_number == request_number
             if drop:
                 self.drop_next_response = False
+                if self.drop_request_number == request_number:
+                    self.drop_request_number = None
             self.requests.append(
                 {
                     "body": body,
@@ -970,6 +974,46 @@ class TelemetreShipperTests(unittest.TestCase):
         self.assertIsNone(codex_windows[0]["resets_at"])
         self.assertIsNone(codex_windows[0]["window_duration_mins"])
 
+    def test_long_slot_dedup_suffixes_stay_within_the_contract(self) -> None:
+        long_slot = "s" * 64
+        self.add_sample(
+            sample_id="codex-long-slot",
+            provider="codex",
+            account="work",
+            windows=(
+                window(
+                    group_name="default",
+                    bucket_id="primary",
+                    limit_id=None,
+                    slot=long_slot,
+                ),
+                window(
+                    group_name="default",
+                    bucket_id="primary",
+                    limit_id=None,
+                    slot=long_slot,
+                ),
+                window(
+                    group_name="default",
+                    bucket_id="primary",
+                    limit_id=None,
+                    slot=long_slot,
+                ),
+            ),
+        )
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.ingest.failure_counts(), (0, 0))
+        payload = self.ingest.snapshot_requests()[0]["payload"]
+        windows = payload["quota_observations"][0]["windows"]
+        slots = [item["slot"] for item in windows]
+        self.assertEqual(len(slots), 3)
+        self.assertTrue(all(slot and len(slot) <= 64 for slot in slots))
+        self.assertEqual(len(set(slots)), 3)
+        self.assertEqual(slots[0], long_slot)
+        self.assertTrue(slots[1].endswith("#2"))
+        self.assertTrue(slots[2].endswith("#3"))
+
     # -- durable replay / ACK / heartbeat ---------------------------------
 
     def test_lost_ack_retries_identical_batch_then_heartbeats(self) -> None:
@@ -1155,6 +1199,62 @@ class TelemetreShipperTests(unittest.TestCase):
             set(self.observations_by_id()), {"old-sample", "rebuilt-sample"}
         )
         self.assertEqual(self.read_state()["cursor_sample_id"], "rebuilt-sample")
+
+    def test_rebuilt_centre_with_lost_replay_ack_persists_cursor_reset(self) -> None:
+        self.add_sample(
+            sample_id="old-sample",
+            provider="agy",
+            account="personal",
+            windows=(window(group_name="Gemini", bucket_id="weekly"),),
+        )
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        state = self.read_state()
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+        self.assertEqual(state["cursor_rowid"], 0)
+
+        # Replace the centre database while the old batch is still pending.
+        os.unlink(self.database_path)
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(self.database_path + suffix)
+            except FileNotFoundError:
+                pass
+        connection = sqlite3.connect(self.database_path)
+        connection.executescript(SCHEMA)
+        connection.commit()
+        connection.close()
+        self.add_sample(
+            sample_id="new-sample",
+            provider="agy",
+            account="personal",
+            windows=(window(group_name="Gemini", bucket_id="weekly"),),
+        )
+
+        # Request 2 is the pending retry; request 3 is the rebuilt-database
+        # replay whose ACK is lost. The durable cursor reset must already be
+        # persisted when that replay fails.
+        self.ingest.drop_request_number = 3
+        second = self.run_cli()
+        self.assertNotEqual(second.returncode, 0)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["pending"]["batch_seq"], 2)
+        self.assertEqual(state["pending"]["cursor_rowid_after"], 1)
+        self.assertEqual(state["pending"]["cursor_sample_id_after"], "new-sample")
+        self.assertEqual(state["cursor_rowid"], 0)
+        self.assertIsNone(state["cursor_sample_id"])
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(
+            set(self.observations_by_id()), {"old-sample", "new-sample"}
+        )
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 2)
+        self.assertEqual(state["cursor_rowid"], 1)
+        self.assertEqual(state["cursor_sample_id"], "new-sample")
+        self.assertIsNone(state["pending"])
 
 
 if __name__ == "__main__":

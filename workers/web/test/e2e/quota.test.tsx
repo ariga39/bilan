@@ -143,6 +143,10 @@ interface UsageHistoryRecord {
   monthly?: UsageWindowRecord;
 }
 
+function utcSecond(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/u, "Z");
+}
+
 function usageRecord(
   timestamp: string,
   keyFingerprint: string,
@@ -150,18 +154,20 @@ function usageRecord(
   includeMonthly: boolean,
   keyAlias?: string,
 ): UsageHistoryRecord {
+  const sampled = Date.parse(timestamp);
+  const resetAt = (minutes: number) => utcSecond(new Date(sampled + minutes * 60_000));
   const record: UsageHistoryRecord = {
     timestamp,
     key_fingerprint: keyFingerprint,
     rolling: {
       status: "ok",
       percent: rollingPercent,
-      resetsAt: "2026-11-27T12:15:00Z",
+      resetsAt: resetAt(15),
     },
     weekly: {
       status: "ok",
       percent: 20,
-      resetsAt: "2026-12-01T00:00:00Z",
+      resetsAt: resetAt(5 * 24 * 60),
     },
   };
   if (keyAlias) {
@@ -171,7 +177,7 @@ function usageRecord(
     record.monthly = {
       status: "ok",
       percent: 30,
-      resetsAt: "2026-12-31T00:00:00Z",
+      resetsAt: resetAt(30 * 24 * 60),
     };
   }
   return record;
@@ -418,18 +424,30 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     const ingestUrl = baseUrl(ingest);
     const webUrl = baseUrl(web);
 
+    // Anchor at yesterday noon UTC: always historical, never future, and
+    // stable inside one calendar month even when the suite runs at a boundary.
+    const today = new Date();
+    const usageAnchor = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1, 12, 0, 0),
+    );
+    const usageMonth = usageAnchor.toISOString().slice(0, 7);
+    const usageDay = usageAnchor.toISOString().slice(0, 10);
+    const usageBucketStart = usageAnchor.toISOString().slice(0, 13) + ":00:00Z";
+    const usageAt = (minutes: number) =>
+      utcSecond(new Date(usageAnchor.getTime() + minutes * 60_000));
+
     const auditPath = path.join(tempDir, "audit.jsonl");
     const usageDir = path.join(tempDir, "usage");
     const statePath = path.join(tempDir, "shipper-state.json");
     mkdirSync(usageDir, { recursive: true });
     writeJsonl(auditPath, [
-      auditRecord("2026-11-26T14:05:00.123Z", "req-success", 200, true),
-      auditRecord("2026-11-26T14:20:00.000Z", "req-failed", 500, false),
+      auditRecord(usageAt(5), "req-success", 200, true),
+      auditRecord(usageAt(20), "req-failed", 500, false),
     ]);
-    writeJsonl(path.join(usageDir, "2026-11-26.jsonl"), [
-      usageRecord("2026-11-26T14:30:00.000Z", "fp_a", 42.5, true, "go-key-1"),
-      usageRecord("2026-11-26T14:35:00.000Z", "fp_a", 43.5, false, "go-key-1"),
-      usageRecord("2026-11-26T14:31:00.000Z", "fp_b", 90, true),
+    writeJsonl(path.join(usageDir, `${usageDay}.jsonl`), [
+      usageRecord(usageAt(30), "fp_a", 42.5, true, "go-key-1"),
+      usageRecord(usageAt(35), "fp_a", 43.5, false, "go-key-1"),
+      usageRecord(usageAt(31), "fp_b", 90, true),
     ]);
 
     const ingestPing = await httpCall(`${ingestUrl}/api/v1/ingest`);
@@ -489,7 +507,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
             actor_id: "machine-a",
             model: "gpt-5",
             effort: "high",
-            bucket_start: "2026-11-26T14:00:00Z",
+            bucket_start: usageBucketStart,
             unit_kind: "request",
             unit_count: 1,
             coverage_gaps: 0,
@@ -515,7 +533,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     });
     expect(codexPush.status, codexPush.body).toBe(200);
 
-    const overviewResponse = await httpCall(`${webUrl}/api/v1/overview?tz=UTC&month=2026-11`);
+    const overviewResponse = await httpCall(`${webUrl}/api/v1/overview?tz=UTC&month=${usageMonth}`);
     expect(overviewResponse.status, overviewResponse.body).toBe(200);
     const parsedOverview = overviewResponseSchema.safeParse(JSON.parse(overviewResponse.body));
     expect(parsedOverview.success, overviewResponse.body).toBe(true);
@@ -554,7 +572,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
         usage={overview.usage}
         daily={null}
         timezone="UTC"
-        month="2026-11"
+        month={usageMonth}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
@@ -594,6 +612,17 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     const python = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
     const centrePath = path.join(tempDir, "telemetre-quota.sqlite3");
     const statePath = path.join(tempDir, "telemetre-state.json");
+    // Normal samples are now-relative and safely historical; only the explicit
+    // anomaly sample is future-dated.
+    const clock = Date.now();
+    const current = utcSecond(new Date(clock - 60_000));
+    const received = utcSecond(new Date(clock));
+    const older = utcSecond(new Date(clock - 30 * 60_000));
+    const future = utcSecond(new Date(clock + 24 * 60 * 60_000));
+    const resetFiveHour = utcSecond(new Date(clock + 5 * 60 * 60_000));
+    const resetWeekly = utcSecond(new Date(clock + 7 * 24 * 60 * 60_000));
+    const resetFutureWeek = utcSecond(new Date(clock + 8 * 24 * 60 * 60_000));
+    const overviewMonth = new Date(clock).toISOString().slice(0, 7);
 
     let centre = new DatabaseSync(centrePath);
     centre.exec(CENTRE_SCHEMA);
@@ -602,7 +631,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "agy",
       account: "agy-main",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:00:00Z",
+      sampledAt: current,
       windows: [
         {
           groupName: "Gemini",
@@ -612,8 +641,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.4,
           remainingUnit: "fraction",
           remainingDisplay: 40,
-          resetRaw: "2026-11-26T19:00:00Z",
-          resetAt: "2026-11-26T19:00:00Z",
+          resetRaw: resetFiveHour,
+          resetAt: resetFiveHour,
         },
         {
           groupName: "Gemini",
@@ -623,8 +652,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.8,
           remainingUnit: "fraction",
           remainingDisplay: 80,
-          resetRaw: "2026-12-03T00:00:00Z",
-          resetAt: "2026-12-03T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -633,7 +662,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "codex",
       account: "codex-main",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:00:00Z",
+      sampledAt: current,
       windows: [
         {
           groupName: "codex",
@@ -645,8 +674,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 10,
           remainingUnit: "percent_used",
           remainingDisplay: 90,
-          resetRaw: 1_798_761_600,
-          resetAt: "2026-12-01T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -655,7 +684,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "agy",
       account: "agy-error",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:01:00Z",
+      sampledAt: current,
       status: "failure",
       errorKind: "timeout",
       errorDetail: "provider did not finish within 60s",
@@ -665,7 +694,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "codex",
       account: "codex-empty",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:01:00Z",
+      sampledAt: current,
       emptyWindows: true,
     });
     insertCentreSample(centre, {
@@ -673,8 +702,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "agy",
       account: "agy-future",
       machine: "studio-a",
-      sampledAt: "2099-01-01T00:00:00Z",
-      receivedAt: "2026-11-26T14:02:00Z",
+      sampledAt: future,
+      receivedAt: received,
       timeAnomaly: true,
       windows: [
         {
@@ -685,8 +714,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.01,
           remainingUnit: "fraction",
           remainingDisplay: 1,
-          resetRaw: "2099-01-08T00:00:00Z",
-          resetAt: "2099-01-08T00:00:00Z",
+          resetRaw: resetFutureWeek,
+          resetAt: resetFutureWeek,
         },
       ],
     });
@@ -702,8 +731,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "agy",
       account: "agy-late",
       machine: "studio-a",
-      sampledAt: "2026-11-26T13:30:00Z",
-      receivedAt: "2026-11-26T14:05:00Z",
+      sampledAt: older,
+      receivedAt: received,
       windows: [
         {
           groupName: "Gemini",
@@ -713,8 +742,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.6,
           remainingUnit: "fraction",
           remainingDisplay: 60,
-          resetRaw: "2026-12-03T00:00:00Z",
-          resetAt: "2026-12-03T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -723,8 +752,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "codex",
       account: "codex-late",
       machine: "studio-a",
-      sampledAt: "2026-11-26T13:30:00Z",
-      receivedAt: "2026-11-26T14:05:00Z",
+      sampledAt: older,
+      receivedAt: received,
       windows: [
         {
           groupName: "codex",
@@ -736,8 +765,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 30,
           remainingUnit: "percent_used",
           remainingDisplay: 70,
-          resetRaw: 1_798_761_600,
-          resetAt: "2026-12-01T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -746,8 +775,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "agy",
       account: "agy-main",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:00:00Z",
-      receivedAt: "2026-11-26T14:05:00Z",
+      sampledAt: current,
+      receivedAt: received,
       windows: [
         {
           groupName: "Gemini",
@@ -757,8 +786,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.3,
           remainingUnit: "fraction",
           remainingDisplay: 30,
-          resetRaw: "2026-11-26T19:00:00Z",
-          resetAt: "2026-11-26T19:00:00Z",
+          resetRaw: resetFiveHour,
+          resetAt: resetFiveHour,
         },
         {
           groupName: "Gemini",
@@ -768,8 +797,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 0.5,
           remainingUnit: "fraction",
           remainingDisplay: 50,
-          resetRaw: "2026-12-03T00:00:00Z",
-          resetAt: "2026-12-03T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -778,8 +807,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       provider: "codex",
       account: "codex-main",
       machine: "studio-a",
-      sampledAt: "2026-11-26T14:00:00Z",
-      receivedAt: "2026-11-26T14:05:00Z",
+      sampledAt: current,
+      receivedAt: received,
       windows: [
         {
           groupName: "codex",
@@ -791,8 +820,8 @@ describe("B3/B4 shipper to dashboard E2E", () => {
           remainingValue: 20,
           remainingUnit: "percent_used",
           remainingDisplay: 80,
-          resetRaw: 1_798_761_600,
-          resetAt: "2026-12-01T00:00:00Z",
+          resetRaw: resetWeekly,
+          resetAt: resetWeekly,
         },
       ],
     });
@@ -800,7 +829,9 @@ describe("B3/B4 shipper to dashboard E2E", () => {
 
     runTelemetre(python, centrePath, statePath, ingestUrl);
 
-    const overviewResponse = await httpCall(`${webUrl}/api/v1/overview?tz=UTC&month=2026-11`);
+    const overviewResponse = await httpCall(
+      `${webUrl}/api/v1/overview?tz=UTC&month=${overviewMonth}`,
+    );
     expect(overviewResponse.status, overviewResponse.body).toBe(200);
     const parsedOverview = overviewResponseSchema.safeParse(JSON.parse(overviewResponse.body));
     expect(parsedOverview.success, overviewResponse.body).toBe(true);
@@ -846,14 +877,14 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     // their own subjects instead of being skipped by a timestamp cursor.
     expect(subjectMap.get("agy\u0000agy-late")?.latest_valid).toMatchObject({
       sample_id: "agy-late-1",
-      sampled_at: "2026-11-26T13:30:00Z",
+      sampled_at: older,
     });
     expect(subjectMap.get("agy\u0000agy-late")?.latest_valid?.windows[0]?.remaining_percent).toBe(
       60,
     );
     expect(subjectMap.get("codex\u0000codex-late")?.latest_valid).toMatchObject({
       sample_id: "codex-late-1",
-      sampled_at: "2026-11-26T13:30:00Z",
+      sampled_at: older,
     });
     expect(
       subjectMap.get("codex\u0000codex-late")?.latest_valid?.windows[0]?.remaining_percent,
@@ -875,7 +906,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(agyFuture?.latest_attempt).toBeNull();
     expect(agyFuture?.anomalies[0]).toMatchObject({
       sample_id: "agy-future-1",
-      sampled_at: "2099-01-01T00:00:00Z",
+      sampled_at: future,
       time_anomaly: "future_sampled_at",
     });
 

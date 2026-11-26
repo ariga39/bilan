@@ -67,7 +67,8 @@ const CLOCK_SKEW_TOLERANCE_SECONDS = 5 * 60;
 const FUTURE_CLOCK_ANOMALY = "future_clock_skew";
 
 const LATEST_VALID_WITH_WINDOWS = `WITH assessed AS (
-  SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
+  SELECT rowid AS insertion_order,
+         producer_id, sample_id, source, account, observer_machine, sampled_at,
          interval_seconds, status, time_anomaly, error_summary, ingested_at,
          CASE
            WHEN time_anomaly IS NOT NULL
@@ -81,7 +82,7 @@ const LATEST_VALID_WITH_WINDOWS = `WITH assessed AS (
          interval_seconds, status, time_anomaly, error_summary, ingested_at,
          ROW_NUMBER() OVER (
            PARTITION BY source, account
-           ORDER BY sampled_at DESC, ingested_at DESC
+           ORDER BY sampled_at DESC, ingested_at DESC, insertion_order DESC
          ) AS rank_number
   FROM assessed
   WHERE is_anomaly = 0
@@ -110,7 +111,8 @@ ORDER BY l.source, l.account, w.bucket_id,
 // windows, and an anomaly cannot silently replace them. The anomaly test
 // includes future-clock skew even when the upstream flag is absent.
 const LATEST_ATTEMPTS_WITH_ANOMALIES = `WITH assessed AS (
-  SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
+  SELECT rowid AS insertion_order,
+         producer_id, sample_id, source, account, observer_machine, sampled_at,
          interval_seconds, status, time_anomaly, error_summary, ingested_at,
          CASE
            WHEN time_anomaly IS NOT NULL
@@ -124,7 +126,7 @@ const LATEST_ATTEMPTS_WITH_ANOMALIES = `WITH assessed AS (
          is_anomaly,
          ROW_NUMBER() OVER (
            PARTITION BY source, account, is_anomaly
-           ORDER BY sampled_at DESC, ingested_at DESC
+           ORDER BY sampled_at DESC, ingested_at DESC, insertion_order DESC
          ) AS rank_number
   FROM assessed
 )
