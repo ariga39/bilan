@@ -13,6 +13,7 @@
     "lint": "oxlint .",
     "test": "pnpm -r --if-present test",
     "test:e2e": "pnpm --filter bilan-web test:e2e",
+    "test:e2e:b5": "pnpm --filter bilan-web test:e2e:b5",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {

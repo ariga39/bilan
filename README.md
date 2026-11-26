@@ -34,7 +34,9 @@ packages/shared/            Shared API types, schemas, and timezone helpers
 workers/ingest/             Scoped Push endpoint + scheduled balance pulls
 workers/web/                Read API + React/Tailwind/shadcn/Recharts SPA
 shippers/                   Standalone Python 3 stdlib host shippers
-docs/                       Design, tasks, and Access guidance
+acceptance/                 B5 multi-host acceptance entry points
+ops/                        Synthetic producer, systemd, and cron templates
+docs/                       Design, tasks, operations, and Access guidance
 ```
 
 ## Install and checks
@@ -56,7 +58,8 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-pnpm test:e2e   # requires pnpm build; starts local Workers and the real shippers
+pnpm test:e2e     # requires pnpm build; starts local Workers and the real shippers
+pnpm test:e2e:b5  # focused B5 five-platform and host-migration acceptance
 ```
 
 `pnpm test` runs:
@@ -390,6 +393,41 @@ pnpm test:e2e
 ```
 
 The E2E uses only synthetic accounts, machine names, quota windows, and logs.
+
+## B5: Multi-host operations and acceptance
+
+B5 closes v1 with an operator runbook and a reproducible full-stack acceptance
+run. The runbook covers the effective Cloudflare Access order, one shared D1
+database across both Workers, scoped producer-token setup, independent
+per-host systemd/cron schedules, host migration with copied log and state, and
+the security/privacy checklist:
+
+- [docs/OPERATIONS.md](docs/OPERATIONS.md)
+- [`ops/producers.example.json`](ops/producers.example.json)
+- [`ops/systemd/`](ops/systemd/) and [`ops/cron/bilan-shippers.example`](ops/cron/bilan-shippers.example)
+
+Run the five-platform acceptance after building the SPA:
+
+```sh
+pnpm build
+pnpm test:e2e:b5
+```
+
+It starts both real local Workers against one temporary D1 database, runs the
+real `debitmetre.py`, `orihsus.py`, and `telemetre.py` CLIs from separate host
+directories with separate state and scoped tokens, and mocks only the scheduled
+OpenRouter/DeepSeek upstream calls with fixed synthetic balances. It verifies
+Codex usage/quota, OpenCode Go usage/quota, AGY quota without any AGY token
+total, and OpenRouter/DeepSeek balances through the normal read API and dashboard
+sections. It also copies a
+collector log and state to a migrated host to assert zero double-counting, and
+checks route/secret isolation plus cross-scope `403` rejection.
+
+No live credentials, cloud calls, deployment, or production changes are
+involved; all host aliases, tokens, keys, accounts, and logs are synthetic. The
+B5 fixture gives each quota subject one distinct latest valid sample, so B5 does
+not depend on same-second tie ordering; that ordering remains covered by the B4
+quota tests.
 
 ## Production configuration
 

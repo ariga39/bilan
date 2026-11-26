@@ -177,14 +177,15 @@ scheduled OpenRouter/DeepSeek responses. It performs no cloud call.
 
 ```sh
 pnpm build
-pnpm --filter bilan-web exec vitest run --config vitest.e2e.config.ts test/e2e/b5.test.tsx
+pnpm test:e2e:b5
 ```
 
 The test:
 
 - applies the real migrations to a temporary persisted D1 database;
-- starts `bilan-ingest` through a test-only entry that redirects only the two
-  scheduled upstream URLs to a loopback mock;
+- starts `bilan-ingest` through a test-only entry that mocks only the two
+  scheduled adapter network calls against a loopback server; the real scheduled
+  orchestration, failure isolation, and D1 writes stay unchanged;
 - starts `bilan-web` against the same D1 state;
 - triggers the real scheduled handler and verifies both provider calls;
 - runs `shippers/debitmetre.py`, `shippers/orihsus.py`, and
@@ -195,6 +196,11 @@ The test:
   double-counting;
 - probes read/write route isolation, rejects cross-scope pushes with `403`, and
   checks that no token or upstream key appears in read output.
+
+The B5 quota fixtures give each subject one distinct latest valid sample. The
+run therefore does not depend on same-second tie ordering; that behavior stays
+covered by the B4 quota tests, so a B4 ordering change does not require a B5
+fixture change unless the shared read contract itself changes.
 
 Full project checks:
 
