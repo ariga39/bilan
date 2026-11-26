@@ -1,4 +1,4 @@
-import type { QuotaResponse } from "@bilan/shared";
+import type { OverviewResponse, QuotaResponse } from "@bilan/shared";
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -266,6 +266,108 @@ describe("B3 quota read query", () => {
     });
   });
 
+  it("excludes future-clock samples without an explicit flag from valid windows and freshness", async () => {
+    await seedObservation({
+      sampleId: "agy-valid",
+      source: "agy",
+      account: "agy-main",
+      sampledAt: "2026-11-27T11:50:00Z",
+      ingestedAt: "2026-11-27T11:50:00Z",
+      windows: [
+        {
+          bucketId: "Gemini",
+          slot: "five-hour",
+          label: "5h",
+          usedPercent: 30,
+          remainingPercent: 70,
+        },
+      ],
+    });
+    await seedObservation({
+      sampleId: "agy-future",
+      source: "agy",
+      account: "agy-main",
+      sampledAt: "2099-01-01T00:00:00Z",
+      ingestedAt: "2026-11-27T11:55:00Z",
+      windows: [
+        {
+          bucketId: "Gemini",
+          slot: "five-hour",
+          label: "5h",
+          usedPercent: 99,
+          remainingPercent: 1,
+        },
+      ],
+    });
+
+    const body = await getQuotaOverview(env.DB, NOW);
+    const subject = body.subjects.find(
+      (candidate) => candidate.source === "agy" && candidate.account === "agy-main",
+    );
+
+    // The far-future sample arrived within normal ingest time but the shipper
+    // did not set telemetre's anomaly flag. The read boundary must still keep
+    // it out of the current reading and freshness.
+    expect(subject?.latest_valid).toMatchObject({
+      sample_id: "agy-valid",
+      sample_age_seconds: 600,
+      is_stale: false,
+    });
+    expect(subject?.latest_valid?.windows[0]?.used_percent).toBe(30);
+    expect(subject?.latest_attempt).toMatchObject({ sample_id: "agy-valid" });
+    expect(subject?.anomalies).toHaveLength(1);
+    expect(subject?.anomalies[0]).toMatchObject({
+      sample_id: "agy-future",
+      sampled_at: "2099-01-01T00:00:00Z",
+      status: "ok",
+      time_anomaly: "future_clock_skew",
+    });
+  });
+
+  it("does not invent valid windows or a latest attempt from future-clock-only samples", async () => {
+    await seedObservation({
+      sampleId: "agy-future-only",
+      source: "agy",
+      account: "agy-future-only",
+      sampledAt: "2099-01-01T00:00:00Z",
+      ingestedAt: "2026-11-27T11:55:00Z",
+      windows: [{ bucketId: "Gemini", slot: "weekly", usedPercent: 99, remainingPercent: 1 }],
+    });
+    await seedObservation({
+      sampleId: "codex-future-error",
+      source: "codex",
+      account: "codex-future-error",
+      sampledAt: "2099-01-01T00:00:00Z",
+      ingestedAt: "2026-11-27T11:56:00Z",
+      status: "error",
+      errorSummary: "provider timed out",
+    });
+
+    const body = await getQuotaOverview(env.DB, NOW);
+    const byAccount = new Map(body.subjects.map((subject) => [subject.account, subject]));
+
+    const onlyFuture = byAccount.get("agy-future-only");
+    expect(onlyFuture?.latest_valid).toBeNull();
+    expect(onlyFuture?.latest_attempt).toBeNull();
+    expect(onlyFuture?.anomalies).toHaveLength(1);
+    expect(onlyFuture?.anomalies[0]).toMatchObject({
+      sample_id: "agy-future-only",
+      status: "ok",
+      time_anomaly: "future_clock_skew",
+    });
+
+    const futureError = byAccount.get("codex-future-error");
+    expect(futureError?.latest_valid).toBeNull();
+    expect(futureError?.latest_attempt).toBeNull();
+    expect(futureError?.anomalies).toHaveLength(1);
+    expect(futureError?.anomalies[0]).toMatchObject({
+      sample_id: "codex-future-error",
+      status: "error",
+      time_anomaly: "future_clock_skew",
+      error_summary: "provider timed out",
+    });
+  });
+
   it("returns no fabricated windows when only invalid attempts exist", async () => {
     await seedObservation({
       sampleId: "only-error",
@@ -404,6 +506,118 @@ describe("B3 quota read query", () => {
           },
         ],
       },
+    });
+  });
+
+  it("includes AGY and Codex quota subjects without collecting AGY token usage", async () => {
+    await seedUsageBucket({
+      bucketStart: "2026-11-26T14:00:00Z",
+      source: "codex",
+      actorKind: "machine",
+      actorId: "machine-a",
+      model: "gpt-5",
+      effort: "high",
+      unitCount: 1,
+      inputTokens: 10,
+      inputCounted: 1,
+      outputTokens: 5,
+      outputCounted: 1,
+    });
+    await seedObservation({
+      sampleId: "agy-main-valid",
+      source: "agy",
+      account: "agy-main",
+      observerMachine: "studio-a",
+      sampledAt: "2026-11-26T14:30:00Z",
+      windows: [
+        {
+          bucketId: "Gemini",
+          slot: "five-hour",
+          label: "5h",
+          usedPercent: 40,
+          remainingPercent: 60,
+          resetsAt: "2026-11-26T19:30:00Z",
+          windowDurationMins: 300,
+        },
+        {
+          bucketId: "Gemini",
+          slot: "weekly",
+          label: "7d",
+          usedPercent: 20,
+          remainingPercent: 80,
+          resetsAt: "2026-12-03T00:00:00Z",
+          windowDurationMins: 10_080,
+        },
+      ],
+    });
+    await seedObservation({
+      sampleId: "codex-main-valid",
+      source: "codex",
+      account: "codex-main",
+      observerMachine: "studio-a",
+      sampledAt: "2026-11-26T14:30:00Z",
+      windows: [
+        {
+          bucketId: "codex",
+          slot: "primary",
+          usedPercent: 10,
+          remainingPercent: 90,
+          resetsAt: "2026-12-01T00:00:00Z",
+          windowDurationMins: 10_080,
+        },
+      ],
+    });
+
+    const response = await app.request(
+      "https://bilan-web.example/api/v1/overview?tz=UTC&month=2026-11",
+      {},
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    const body: OverviewResponse = await response.json();
+    const agySubject = body.quotas.subjects.find(
+      (subject) => subject.source === "agy" && subject.account === "agy-main",
+    );
+    expect(agySubject?.latest_valid).toMatchObject({ observer_machine: "studio-a" });
+    const agyWindows = new Map(
+      (agySubject?.latest_valid?.windows ?? []).map((window) => [window.slot, window]),
+    );
+    expect(agyWindows.get("five-hour")).toMatchObject({
+      bucket_id: "Gemini",
+      slot: "five-hour",
+      label: "5h",
+      used_percent: 40,
+      remaining_percent: 60,
+      window_duration_mins: 300,
+    });
+    expect(agyWindows.get("weekly")).toMatchObject({
+      bucket_id: "Gemini",
+      slot: "weekly",
+      label: "7d",
+      used_percent: 20,
+      remaining_percent: 80,
+      window_duration_mins: 10_080,
+    });
+
+    const codexSubject = body.quotas.subjects.find(
+      (subject) => subject.source === "codex" && subject.account === "codex-main",
+    );
+    expect(codexSubject?.latest_valid?.windows).toEqual([
+      expect.objectContaining({
+        bucket_id: "codex",
+        slot: "primary",
+        used_percent: 10,
+        remaining_percent: 90,
+      }),
+    ]);
+
+    // AGY has quota windows but no token usage collection. It must not appear
+    // as a zero-valued usage row.
+    expect(body.usage.rows.map((row) => row.source)).not.toContain("agy");
+    expect(body.usage.rows.find((row) => row.source === "codex")).toMatchObject({
+      actor_id: "machine-a",
+      unit_count: 1,
     });
   });
 

@@ -368,8 +368,9 @@ export function QuotaSection({ quota }: { quota: QuotaResponse }) {
         </CardTitle>
         <CardDescription className="mt-1">
           Latest valid sample per source and account. OpenCode Go keys are identified by fingerprint
-          and shown separately from Codex accounts. Missing windows disappear instead of carrying
-          forward.
+          and shown separately from AGY and Codex accounts. Missing windows disappear instead of
+          carrying forward. AGY quota is shown without token usage because AGY tokens are not
+          collected.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -405,7 +406,8 @@ export function QuotaSection({ quota }: { quota: QuotaResponse }) {
         )}
         <p className="text-[11px] text-muted-foreground">
           Sample age is measured from the latest valid observation. Reset countdowns are relative to{" "}
-          {formatDateTime(quota.generated_at)}.
+          {formatDateTime(quota.generated_at)}. AGY contributes quota windows only; its token usage
+          is not collected.
         </p>
       </CardContent>
     </Card>

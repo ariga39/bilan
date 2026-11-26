@@ -59,16 +59,32 @@ interface MutableSubject {
 
 const DEFAULT_INTERVAL_SECONDS = 300;
 const MAX_ANOMALIES_PER_SUBJECT = 5;
+// Telemetre already flags samples that are more than five minutes ahead of
+// their receive time. Apply the same allowance at the read boundary so a push
+// without that upstream flag still cannot pin freshness to a future clock.
+const CLOCK_SKEW_TOLERANCE_SECONDS = 5 * 60;
 
-const LATEST_VALID_WITH_WINDOWS = `WITH latest_valid AS (
+const FUTURE_CLOCK_ANOMALY = "future_clock_skew";
+
+const LATEST_VALID_WITH_WINDOWS = `WITH assessed AS (
+  SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
+         interval_seconds, status, time_anomaly, error_summary, ingested_at,
+         CASE
+           WHEN time_anomaly IS NOT NULL
+             OR julianday(sampled_at) > julianday(ingested_at) + (? / 86400.0)
+           THEN 1 ELSE 0
+         END AS is_anomaly
+  FROM quota_observations
+  WHERE status = 'ok'
+), latest_valid AS (
   SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
          interval_seconds, status, time_anomaly, error_summary, ingested_at,
          ROW_NUMBER() OVER (
            PARTITION BY source, account
            ORDER BY sampled_at DESC, ingested_at DESC
          ) AS rank_number
-  FROM quota_observations
-  WHERE status = 'ok' AND time_anomaly IS NULL
+  FROM assessed
+  WHERE is_anomaly = 0
 )
 SELECT l.producer_id, l.sample_id, l.source, l.account, l.observer_machine,
        l.sampled_at, l.interval_seconds, l.status, l.time_anomaly, l.error_summary,
@@ -91,17 +107,26 @@ ORDER BY l.source, l.account, w.bucket_id,
 
 // The latest non-anomalous attempt and the newest anomalous attempts are
 // selected separately so a failed/empty sample cannot hide the latest valid
-// windows, and an anomaly cannot silently replace them.
-const LATEST_ATTEMPTS_WITH_ANOMALIES = `WITH ranked AS (
+// windows, and an anomaly cannot silently replace them. The anomaly test
+// includes future-clock skew even when the upstream flag is absent.
+const LATEST_ATTEMPTS_WITH_ANOMALIES = `WITH assessed AS (
   SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
          interval_seconds, status, time_anomaly, error_summary, ingested_at,
-         CASE WHEN time_anomaly IS NOT NULL THEN 1 ELSE 0 END AS is_anomaly,
+         CASE
+           WHEN time_anomaly IS NOT NULL
+             OR julianday(sampled_at) > julianday(ingested_at) + (? / 86400.0)
+           THEN 1 ELSE 0
+         END AS is_anomaly
+  FROM quota_observations
+), ranked AS (
+  SELECT producer_id, sample_id, source, account, observer_machine, sampled_at,
+         interval_seconds, status, time_anomaly, error_summary, ingested_at,
+         is_anomaly,
          ROW_NUMBER() OVER (
-           PARTITION BY source, account,
-             CASE WHEN time_anomaly IS NOT NULL THEN 1 ELSE 0 END
+           PARTITION BY source, account, is_anomaly
            ORDER BY sampled_at DESC, ingested_at DESC
          ) AS rank_number
-  FROM quota_observations
+  FROM assessed
 )
 SELECT * FROM ranked
 WHERE (is_anomaly = 0 AND rank_number = 1)
@@ -214,7 +239,7 @@ function attemptView(row: AttemptRow, nowMs: number): QuotaAttempt {
     sampled_at: row.sampled_at,
     sample_age_seconds: ageSeconds(nowMs, row.sampled_at),
     status: observationStatus(row.status),
-    time_anomaly: row.time_anomaly,
+    time_anomaly: row.time_anomaly ?? (row.is_anomaly === 1 ? FUTURE_CLOCK_ANOMALY : null),
     error_summary: row.error_summary,
   };
 }
@@ -223,14 +248,12 @@ function attemptView(row: AttemptRow, nowMs: number): QuotaAttempt {
  * Latest valid quota per (source, account).
  *
  * The current view is built exclusively from the single latest observation with
- * `status = 'ok' AND time_anomaly IS NULL`. Older samples are never merged into
- * it, so a window that disappeared from the latest sample disappears from the
- * view. Failed/empty attempts and anomalous observations are returned
- * separately and never converted into percentages.
- *
- * Explicit `time_anomaly` values are handled here. Future-clock skew without an
- * upstream anomaly flag is the B4 clock-safety extension, not reimplemented in
- * this B3 base query.
+ * `status = 'ok'`, no explicit `time_anomaly`, and no future-clock skew beyond
+ * the allowed tolerance. Older samples are never merged into it, so a window
+ * that disappeared from the latest sample disappears from the view.
+ * Failed/empty attempts and anomalous observations are returned separately and
+ * never converted into percentages or allowed to pin freshness to a future
+ * clock.
  */
 export async function getQuotaOverview(
   db: D1Database,
@@ -238,8 +261,11 @@ export async function getQuotaOverview(
 ): Promise<QuotaResponse> {
   const nowMs = now.getTime();
   const [validResult, attemptResult] = await Promise.all([
-    db.prepare(LATEST_VALID_WITH_WINDOWS).all<LatestValidRow>(),
-    db.prepare(LATEST_ATTEMPTS_WITH_ANOMALIES).bind(MAX_ANOMALIES_PER_SUBJECT).all<AttemptRow>(),
+    db.prepare(LATEST_VALID_WITH_WINDOWS).bind(CLOCK_SKEW_TOLERANCE_SECONDS).all<LatestValidRow>(),
+    db
+      .prepare(LATEST_ATTEMPTS_WITH_ANOMALIES)
+      .bind(CLOCK_SKEW_TOLERANCE_SECONDS, MAX_ANOMALIES_PER_SUBJECT)
+      .all<AttemptRow>(),
   ]);
 
   const subjects = new Map<string, MutableSubject>();
