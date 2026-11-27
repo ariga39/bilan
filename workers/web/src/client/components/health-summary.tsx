@@ -31,14 +31,20 @@ function LivenessBadge({ producer }: { producer: ProducerHealth }) {
   }
   if (producer.is_stale) {
     return (
-      <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+      <Badge
+        variant="outline"
+        className="rounded-full border-amber-400/40 bg-amber-500/15 text-amber-200"
+      >
         <Clock3 />
         Stale
       </Badge>
     );
   }
   return (
-    <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">
+    <Badge
+      variant="outline"
+      className="rounded-full border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+    >
       <CheckCircle2 />
       Healthy
     </Badge>

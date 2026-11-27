@@ -72,13 +72,45 @@ describe("QuotaOverview display", () => {
 
   it("shows 5h and weekly windows directly with progress bars and omits null status badges", () => {
     render(<QuotaOverview quota={quota([subject()])} />);
-    expect(screen.getByText("Gemini")).toBeTruthy();
+    expect(screen.getByText("Google AI Subs")).toBeTruthy();
+    expect(screen.getByText("ChatGPT Subs")).toBeTruthy();
+    expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
     expect(screen.getByText("5h")).toBeTruthy();
     expect(screen.getByText("weekly")).toBeTruthy();
     expect(screen.getByText("58%")).toBeTruthy();
-    expect(screen.getByText("80%")).toBeTruthy();
+    expect(screen.getAllByText("80%").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("progressbar")).toHaveLength(2);
     expect(screen.queryByText("Not reported")).toBeNull();
+  });
+
+  it("omits Claude and GPT models buckets from Google AI Subs while keeping Gemini", () => {
+    const base = subject();
+    if (!base.latest_valid) {
+      throw new Error("fixture must have a valid observation");
+    }
+    const mixed = subject({
+      latest_valid: {
+        ...base.latest_valid,
+        windows: [
+          ...base.latest_valid.windows,
+          {
+            bucket_id: "Claude and GPT models",
+            slot: "five-hour",
+            label: "5h",
+            used_percent: 0,
+            remaining_percent: 100,
+            status: "ok",
+            resets_at: null,
+            reset_in_seconds: null,
+            window_duration_mins: 300,
+          },
+        ],
+      },
+    });
+    render(<QuotaOverview quota={quota([mixed])} />);
+    expect(screen.queryByText("Claude and GPT models")).toBeNull();
+    expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("progressbar")).toHaveLength(2);
   });
 
   it("shows limited status and missing percentage without inventing zero", () => {

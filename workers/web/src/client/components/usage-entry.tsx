@@ -61,8 +61,13 @@ export function UsageEntry({
       <CardHeader className="px-4 pb-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-baseline gap-2">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <BarChart3 className="size-4 text-muted-foreground" />
+            <CardTitle
+              style={{ fontFamily: "var(--font-display)" }}
+              className="flex items-center gap-2 text-sm tracking-[0.08em] text-[#fef3c7]"
+            >
+              <span className="flex size-6 items-center justify-center rounded-full border border-pink-300/40 bg-pink-400/15 text-pink-200">
+                <BarChart3 className="size-3.5" />
+              </span>
               Token usage
             </CardTitle>
             <span className="text-xs text-muted-foreground">
@@ -71,7 +76,12 @@ export function UsageEntry({
               {period.isCurrentMonth ? ` · Today ${period.today}` : ""}
             </span>
           </div>
-          <Button asChild variant="outline" size="sm">
+          <Button
+            asChild
+            variant="outline"
+            size="sm"
+            className="rounded-full border-[#f5d08a]/35 bg-[#241c47] text-[#fef3c7] hover:bg-[#312661]"
+          >
             <a
               href={dashboardHref(next)}
               onClick={(event) => {
@@ -96,7 +106,10 @@ export function UsageEntry({
               const meteredPct =
                 item.requests > 0 ? Math.round((item.counted / item.requests) * 1000) / 10 : null;
               return (
-                <div key={item.key} className="min-w-0 rounded-lg border bg-muted/20 px-3 py-2.5">
+                <div
+                  key={item.key}
+                  className="min-w-0 rounded-xl border border-[#f5d08a]/20 bg-[#140f2c]/80 px-3.5 py-2.5"
+                >
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="text-sm font-medium">{sourceLabel(item.source)}</span>
                     {meteredPct !== null && item.counted < item.requests ? (

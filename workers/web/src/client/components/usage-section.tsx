@@ -45,7 +45,7 @@ const TIMEZONES = [
 ];
 
 const SELECT_CLASS =
-  "h-8 rounded-md border bg-card px-2 text-xs shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "h-8 rounded-full border border-[#f5d08a]/30 bg-[#140f2c] px-3 text-xs text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 type NumberMode = "compact" | "exact";
 
@@ -253,7 +253,7 @@ function SourceFreshness({ usage }: { usage: MonthlyUsage }) {
           {source.is_stale ? (
             <Badge
               variant="outline"
-              className="border-amber-300 bg-amber-50 px-1 py-0 text-[10px] text-amber-800"
+              className="rounded-full border-amber-400/40 bg-amber-500/15 px-1.5 py-0 text-[10px] text-amber-200"
             >
               Delayed
             </Badge>
@@ -278,7 +278,10 @@ function SummaryCards({
       {groups.map((group) => {
         const metered = meteredCaption(group);
         return (
-          <div key={group.key} className="min-w-0 rounded-lg border p-3">
+          <div
+            key={group.key}
+            className="min-w-0 rounded-xl border border-[#f5d08a]/20 bg-[#120d28]/75 p-3"
+          >
             <div className="flex items-baseline justify-between gap-2">
               <p className="font-medium">{sourceLabel(group.source)}</p>
               {metered ? (
@@ -327,7 +330,7 @@ function SummaryTable({
   mode: NumberMode;
 }) {
   return (
-    <div className="hidden overflow-x-auto rounded-lg border md:block">
+    <div className="hidden overflow-x-auto rounded-xl border border-[#f5d08a]/20 bg-[#120d28]/70 md:block">
       <table className="w-full text-sm" aria-label={label}>
         <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
           <tr>
@@ -456,7 +459,7 @@ function DailyTrendCard({
   const points = buildDailyTrendPoints(group.dailyRows, month);
   const metered = meteredCaption(group);
   return (
-    <div className="min-w-0 rounded-lg border p-3">
+    <div className="min-w-0 rounded-xl border border-[#f5d08a]/20 bg-[#120d28]/75 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <p className="text-sm font-medium">{sourceLabel(group.source)}</p>
@@ -494,6 +497,19 @@ function DailyTrendCard({
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={points} margin={{ top: 8, right: 6, bottom: 0, left: 0 }}>
+            <defs>
+              <linearGradient id={`bar-grad-${group.source}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={group.source === "opencode" ? "#fef08a" : "#f9a8d4"} />
+                <stop
+                  offset="55%"
+                  stopColor={group.source === "opencode" ? "#f59e0b" : "#ec4899"}
+                />
+                <stop
+                  offset="100%"
+                  stopColor={group.source === "opencode" ? "#db2777" : "#7e22ce"}
+                />
+              </linearGradient>
+            </defs>
             <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 3" />
             <XAxis
               dataKey="day"
@@ -511,27 +527,29 @@ function DailyTrendCard({
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             />
             <Tooltip
-              cursor={{ fill: "var(--muted)", opacity: 0.45 }}
+              cursor={{ fill: "rgba(244, 114, 182, 0.12)" }}
               labelFormatter={(value) => `${month}-${String(Number(value)).padStart(2, "0")}`}
               formatter={(value) => [formatNumber(Number(value)), "Requests"]}
               contentStyle={{
+                backgroundColor: "#1b1536",
                 borderRadius: "var(--radius-md)",
-                borderColor: "var(--border)",
+                borderColor: "rgba(245, 208, 138, 0.35)",
+                color: "#f8f3ff",
                 fontSize: "12px",
               }}
             />
             <Bar
               dataKey="requests"
               name="Requests"
-              fill="var(--chart-1)"
-              radius={[3, 3, 0, 0]}
+              fill={`url(#bar-grad-${group.source})`}
+              radius={[8, 8, 2, 2]}
               maxBarSize={20}
               isAnimationActive={false}
             />
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <details className="mt-2 rounded-md border bg-card px-2.5 py-1.5 text-xs">
+      <details className="mt-2 rounded-lg border border-[#f5d08a]/18 bg-[#0e0a20]/80 px-2.5 py-1.5 text-xs">
         <summary className="cursor-pointer font-medium text-muted-foreground">
           Daily values ({group.dailyRows.length})
         </summary>
@@ -614,7 +632,10 @@ function MonthlyBreakdown({ groups, mode }: { groups: Array<SummaryGroup>; mode:
         groups.map((group) => {
           const metered = meteredCaption(group);
           return (
-            <details key={group.key} className="min-w-0 rounded-lg border bg-card px-3 py-2">
+            <details
+              key={group.key}
+              className="min-w-0 rounded-xl border border-[#f5d08a]/20 bg-[#120d28]/75 px-3 py-2"
+            >
               <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2">
                 <div className="flex items-baseline gap-2">
                   <span className="text-sm font-medium">{sourceLabel(group.source)}</span>
@@ -689,23 +710,28 @@ export function UsageSection({
     <Card className="min-w-0">
       <CardHeader className="gap-2.5 pb-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <BarChart3 className="size-4 text-muted-foreground" />
+          <CardTitle
+            style={{ fontFamily: "var(--font-display)" }}
+            className="flex items-center gap-2 text-base tracking-[0.08em] text-[#fef3c7]"
+          >
+            <span className="flex size-6 items-center justify-center rounded-full border border-pink-300/40 bg-pink-400/15 text-pink-200">
+              <BarChart3 className="size-3.5" />
+            </span>
             Token usage
           </CardTitle>
           <div className="flex flex-wrap items-center gap-2">
             <div
               role="group"
               aria-label="Number format"
-              className="inline-flex h-8 items-center rounded-md border bg-muted/30 p-0.5 text-xs"
+              className="inline-flex h-8 items-center rounded-full border border-[#f5d08a]/30 bg-[#140f2c] p-0.5 text-xs"
             >
               <button
                 type="button"
                 aria-pressed={numberMode === "compact"}
                 className={cn(
-                  "rounded px-2 py-1 transition-colors",
+                  "rounded-full px-2.5 py-0.5 transition-all",
                   numberMode === "compact"
-                    ? "bg-card font-medium text-foreground shadow-xs"
+                    ? "bg-gradient-to-r from-[#f472b6] to-[#a855f7] font-medium text-white shadow-[0_0_12px_rgba(244,114,182,0.45)]"
                     : "text-muted-foreground hover:text-foreground",
                 )}
                 onClick={() => {
@@ -718,9 +744,9 @@ export function UsageSection({
                 type="button"
                 aria-pressed={numberMode === "exact"}
                 className={cn(
-                  "rounded px-2 py-1 transition-colors",
+                  "rounded-full px-2.5 py-0.5 transition-all",
                   numberMode === "exact"
-                    ? "bg-card font-medium text-foreground shadow-xs"
+                    ? "bg-gradient-to-r from-[#f472b6] to-[#a855f7] font-medium text-white shadow-[0_0_12px_rgba(244,114,182,0.45)]"
                     : "text-muted-foreground hover:text-foreground",
                 )}
                 onClick={() => {
