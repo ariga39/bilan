@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPopulatedDaily, buildPopulatedOverview, FIXTURE_MONTH } from "@/stories/fixtures";
+import {
+  buildEmptyDaily,
+  buildEmptyOverview,
+  buildPopulatedDaily,
+  buildPopulatedOverview,
+  FIXTURE_MONTH,
+} from "@/stories/fixtures";
 import { resolveStorybookScenario, STORYBOOK_SCENARIOS } from "@/stories/fetch-mock";
 
 describe("Storybook fixtures", () => {
@@ -23,6 +29,32 @@ describe("Storybook fixtures", () => {
     expect(buildPopulatedDaily("UTC", FIXTURE_MONTH).rows.length).toBeGreaterThan(0);
     expect(buildPopulatedDaily("UTC", "2026-10").rows).toEqual([]);
   });
+
+  it.each([
+    { timezone: "UTC", attribution: "exact", approximate: false },
+    { timezone: "Asia/Kolkata", attribution: "approximate", approximate: true },
+  ])(
+    "derives $timezone bucket attribution for populated and empty overview and daily responses",
+    ({ timezone, attribution, approximate }) => {
+      const overviews = [
+        buildPopulatedOverview(timezone, FIXTURE_MONTH),
+        buildEmptyOverview(timezone, FIXTURE_MONTH),
+      ];
+      const dailies = [
+        buildPopulatedDaily(timezone, FIXTURE_MONTH),
+        buildEmptyDaily(timezone, FIXTURE_MONTH),
+      ];
+
+      for (const response of [...overviews.map((overview) => overview.usage), ...dailies]) {
+        expect(response.bucket_attribution).toBe(attribution);
+        if (approximate) {
+          expect(response.bucket_attribution_note).toContain("Asia/Kolkata");
+        } else {
+          expect(response.bucket_attribution_note).toBeNull();
+        }
+      }
+    },
+  );
 });
 
 describe("Storybook scenario vocabulary", () => {

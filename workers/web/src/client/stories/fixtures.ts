@@ -1,3 +1,4 @@
+import { bucketAttributionForMonth } from "@bilan/shared";
 import type {
   BalanceHistoryPoint,
   BalanceHistoryResponse,
@@ -616,8 +617,7 @@ function monthlyUsage(timezone: string, month: string): MonthlyUsage {
   return {
     timezone,
     month,
-    bucket_attribution: "exact",
-    bucket_attribution_note: null,
+    ...bucketAttributionForMonth(month, timezone),
     latest_bucket_start: hasRows ? "2026-11-27T11:00:00Z" : null,
     data_age_seconds: hasRows ? 3600 : null,
     is_stale: false,
@@ -659,8 +659,7 @@ export function buildEmptyOverview(timezone: string, month: string): OverviewRes
     usage: {
       timezone,
       month,
-      bucket_attribution: "exact",
-      bucket_attribution_note: null,
+      ...bucketAttributionForMonth(month, timezone),
       latest_bucket_start: null,
       data_age_seconds: null,
       is_stale: false,
@@ -675,8 +674,7 @@ export function buildPopulatedDaily(timezone: string, month: string): UsageDaily
   return {
     timezone,
     month,
-    bucket_attribution: "exact",
-    bucket_attribution_note: null,
+    ...bucketAttributionForMonth(month, timezone),
     rows: month === FIXTURE_MONTH ? DAILY_ROWS : [],
   };
 }
@@ -685,8 +683,7 @@ export function buildEmptyDaily(timezone: string, month: string): UsageDailyResp
   return {
     timezone,
     month,
-    bucket_attribution: "exact",
-    bucket_attribution_note: null,
+    ...bucketAttributionForMonth(month, timezone),
     rows: [],
   };
 }
