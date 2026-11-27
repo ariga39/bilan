@@ -63,6 +63,23 @@ pnpm test:e2e     # requires pnpm build; starts local Workers and the real shipp
 pnpm test:e2e:b5  # focused B5 five-platform and host-migration acceptance
 ```
 
+## Storybook dashboard preview
+
+Preview the real dashboard without Cloudflare, D1, a local Worker, or live
+credentials:
+
+```sh
+pnpm storybook        # http://localhost:6006
+pnpm build-storybook  # static build under workers/web/storybook-static/
+```
+
+The preview uses the existing React/Vite client, Tailwind styles, and UI
+components. Only the read-API `fetch` boundary is mocked, with deterministic
+synthetic fixtures and a fixed clock. Desktop (1440 x 900) and mobile
+(390 x 844) viewport presets are available in the toolbar, and the populated,
+loading, empty, and failure states are separate stories. Fixture locations and
+instructions for adding a scenario are in [docs/STORYBOOK.md](docs/STORYBOOK.md).
+
 `pnpm test` runs:
 
 - `bilan-ingest` Vitest worker-pool tests: scheduled pulls, push authentication
