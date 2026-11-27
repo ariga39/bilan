@@ -276,6 +276,30 @@ class OrihsusShipperTests(unittest.TestCase):
             handle.write(data)
         return os.path.getsize(self.audit_path)
 
+    @staticmethod
+    def _record(timestamp: str, tokens: int) -> dict[str, Any]:
+        return audit_record(
+            timestamp,
+            input_tokens=tokens,
+            cached_tokens=0,
+            uncached_tokens=tokens,
+            output_tokens=0,
+        )
+
+    @staticmethod
+    def _usage_row(rows: dict[tuple[Any, ...], dict[str, Any]], hour: str) -> dict[str, Any]:
+        return rows[
+            (
+                "opencode",
+                "default",
+                "identity",
+                "laptop-key",
+                "deepseek-chat",
+                "",
+                hour,
+            )
+        ]
+
     def write_audit_archive(
         self,
         number: int,
@@ -283,8 +307,9 @@ class OrihsusShipperTests(unittest.TestCase):
         *,
         compressed: bool = False,
     ) -> str:
-        name = "audit.jsonl.%d%s" % (number, ".gz" if compressed else "")
-        path = os.path.join(self.tempdir, name)
+        path = os.path.join(
+            self.tempdir, "audit.jsonl.%d%s" % (number, ".gz" if compressed else "")
+        )
         data = self._encode(records)
         if compressed:
             with gzip.open(path, "wb") as handle:
@@ -293,45 +318,6 @@ class OrihsusShipperTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(data)
         return path
-
-    def append_audit_archive(self, number: int, records: list[dict[str, Any]]) -> str:
-        path = os.path.join(self.tempdir, "audit.jsonl.%d" % number)
-        with open(path, "ab") as handle:
-            handle.write(self._encode(records))
-        return path
-
-    def rotate_audit(
-        self,
-        *,
-        keep: int,
-        new_active: list[dict[str, Any]],
-    ) -> None:
-        """Rotate like logrotate compress + delaycompress for a numbered set."""
-
-        existing: dict[int, str] = {}
-        for name in os.listdir(self.tempdir):
-            if not name.startswith("audit.jsonl."):
-                continue
-            suffix = name[len("audit.jsonl.") :]
-            number_text = suffix[:-3] if suffix.endswith(".gz") else suffix
-            if number_text.isdigit():
-                existing[int(number_text)] = os.path.join(self.tempdir, name)
-        for number in sorted(existing, reverse=True):
-            path = existing[number]
-            if number + 1 > keep:
-                os.remove(path)
-                continue
-            target = os.path.join(self.tempdir, "audit.jsonl.%d.gz" % (number + 1))
-            if path.endswith(".gz"):
-                os.replace(path, target)
-                continue
-            with open(path, "rb") as handle:
-                payload = handle.read()
-            with gzip.open(target, "wb") as handle:
-                handle.write(payload)
-            os.remove(path)
-        os.replace(self.audit_path, os.path.join(self.tempdir, "audit.jsonl.1"))
-        self.write_audit(new_active)
 
     def write_usage(
         self,
@@ -399,12 +385,6 @@ class OrihsusShipperTests(unittest.TestCase):
                 row["model"],
             ): row
             for row in payload["usage_buckets"]
-        }
-
-    def received_buckets(self) -> dict[tuple[str, str, str], dict[str, Any]]:
-        return {
-            (row["bucket_start"], row["actor_id"], row["model"]): row
-            for row in self.ingest.snapshot_usage_rows().values()
         }
 
     def assert_ok(self, result: subprocess.CompletedProcess[str]) -> None:
@@ -1231,38 +1211,6 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(state["audit_cursor"], full_size)
         self.assertIsNone(state["pending"])
 
-    def test_cold_multibatch_snapshot_resumes_after_archive_expiry(self) -> None:
-        records = [
-            audit_record(
-                "2026-11-26T08:05:00.000Z",
-                gateway_key="staged-%03d" % index,
-                **self._tokens(1),
-            )
-            for index in range(501)
-        ]
-        archive = self.write_audit_archive(1, records)
-        self.ingest.drop_next_response = True
-
-        first = self.run_cli()
-        self.assertNotEqual(first.returncode, 0)
-        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
-        state = self.read_state()
-        self.assertIsNotNone(state["audit_staged"])
-        self.assertEqual(state["pending"]["batch_seq"], 1)
-
-        # The source archive expires before the remaining staged row is sent.
-        os.remove(archive)
-        self.assert_ok(self.run_cli())
-
-        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 501)
-        state = self.read_state()
-        self.assertIsNone(state["pending"])
-        self.assertIsNone(state["audit_staged"])
-
-        before = self.received_buckets()
-        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
-        self.assertEqual(self.received_buckets(), before)
-
     def test_incremental_aggregation_is_bounded_to_captured_extent(self) -> None:
         first = audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")
         self.write_audit([first])
@@ -1589,884 +1537,6 @@ class OrihsusShipperTests(unittest.TestCase):
             buckets[("2026-02-01T00:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 9
         )
 
-    # -- retained logrotate generations -----------------------------------
-
-    @staticmethod
-    def _tokens(input_tokens: int) -> dict[str, Any]:
-        return {
-            "input_tokens": input_tokens,
-            "cached_tokens": 0,
-            "uncached_tokens": input_tokens,
-            "output_tokens": 0,
-        }
-
-    def test_initial_import_combines_plain_and_compressed_rotations(self) -> None:
-        self.write_audit_archive(
-            2,
-            [
-                audit_record(
-                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-            compressed=True,
-        )
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:59:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                ),
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:55:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ]
-        )
-
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        hour8 = buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
-        hour9 = buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
-        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 12))
-
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:58:00.000Z", gateway_key="laptop-key", **self._tokens(16)
-                )
-            ],
-            append=True,
-        )
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        self.assertEqual(
-            (buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
-             buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
-            (3, 28),
-        )
-
-        # logrotate with compress + delaycompress expires .2.gz, compresses the
-        # previous .1 to .2.gz, and makes the previous active log the new .1.
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(32)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        self.assertEqual(
-            (buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
-             buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
-            (2, 3),
-        )
-        self.assertEqual(
-            (buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
-             buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
-            (3, 28),
-        )
-        self.assertEqual(
-            (buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
-             buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
-            (1, 32),
-        )
-
-        # A repeat run must not replace the complete oldest hour with its
-        # retained suffix after the earlier generation expired.
-        self.assert_ok(self.run_cli())
-        self.assertEqual(self.received_buckets(), buckets)
-
-    def test_append_to_renamed_generation_keeps_its_previous_contribution(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:01:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:02:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
-
-        # logrotate create+HUP leaves the writer on the renamed .1 file, which
-        # can still be appended after it became a rotation. That does not make
-        # it a new generation: its immutable start still matches, so the old
-        # contribution must not be retired a second time.
-        self.append_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:03:00.000Z", gateway_key="laptop-key", **self._tokens(3)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 6))
-        self.assertEqual(self.read_state()["audit_retired"], {})
-
-        # Compression/rename of that same generation also keeps the identity.
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 6))
-
-    def test_rotation_recovers_a_late_record_from_the_new_archive(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:01:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T10:03:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        self.assertEqual(
-            self.received_buckets()[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")][
-                "unit_count"
-            ],
-            1,
-        )
-
-        # A late 08:02 record lands while the shipper is offline, then the
-        # previous active generation (with that late record) becomes .1.
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:02:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ],
-            append=True,
-        )
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T11:00:00.000Z", gateway_key="laptop-key", **self._tokens(16)
-                )
-            ],
-        )
-
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        hour8 = buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
-        self.assertEqual(
-            buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 1
-        )
-        self.assertEqual(
-            buckets[("2026-11-26T11:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 1
-        )
-
-        # A later late append lands in the new active log, whose current hour is
-        # 11. The retained archives still hold the 08 contribution, so the
-        # acknowledged bucket is completed rather than replaced by active-only
-        # records.
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:03:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-            append=True,
-        )
-        self.assert_ok(self.run_cli())
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 7))
-
-    def test_append_to_newest_archived_hour_keeps_archived_counts(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        self.assertEqual(
-            self.received_buckets()[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")][
-                "unit_count"
-            ],
-            1,
-        )
-
-        # The active log was empty during the rotation scan; the next append is
-        # still in the newest archived hour and must be added to its carry.
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:20:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        hour9 = self.received_buckets()[
-            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 6))
-
-    def test_never_published_prefix_hour_is_not_frozen_after_downtime(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T07:30:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        self.assertNotIn(
-            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat"), self.received_buckets()
-        )
-
-        # Long downtime: the old oldest generation expires and the new oldest
-        # starts mid-hour 09, which the receiver has never seen.
-        self.rotate_audit(keep=2, new_active=[])
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T10:00:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ],
-        )
-        os.remove(os.path.join(self.tempdir, "audit.jsonl.2.gz"))
-        self.write_audit_archive(
-            2,
-            [
-                audit_record(
-                    "2026-11-26T09:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-            compressed=True,
-        )
-
-        self.assert_ok(self.run_cli())
-        hour9 = self.received_buckets()[
-            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (1, 4))
-
-    def test_expiry_retires_exact_group_contributions_and_accepts_new_rows(self) -> None:
-        self.write_audit_archive(
-            2,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:10:00.000Z", gateway_key="desktop-key", **self._tokens(2)
-                ),
-            ],
-            compressed=True,
-        )
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:20:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                ),
-                audit_record(
-                    "2026-11-26T08:30:00.000Z", gateway_key="tablet-key", **self._tokens(8)
-                ),
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(16)
-                ),
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        self.assertEqual(
-            (buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
-             buckets[("2026-11-26T08:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
-             buckets[("2026-11-26T08:00:00Z", "tablet-key", "deepseek-chat")]["input_tokens"]),
-            (5, 2, 8),
-        )
-
-        # Expire the generation holding laptop=1 and desktop=2 for hour 08.
-        # The retained file still has laptop and tablet rows for that hour.
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(32)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        state = self.read_state()
-        self.assertEqual(
-            sorted(state["audit_retired"]), ["2026-11-26T08:00:00Z"]
-        )
-
-        # Late rows, including a new group, must combine with the retired
-        # contributions instead of replacing the hour with active-only counts.
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:40:00.000Z", gateway_key="laptop-key", **self._tokens(6)
-                ),
-                audit_record(
-                    "2026-11-26T08:41:00.000Z", gateway_key="desktop-key", **self._tokens(3)
-                ),
-                audit_record(
-                    "2026-11-26T08:42:00.000Z", gateway_key="tablet-key", **self._tokens(3)
-                ),
-                audit_record(
-                    "2026-11-26T08:43:00.000Z", gateway_key="phone-key", **self._tokens(7)
-                ),
-            ],
-            append=True,
-        )
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        self.assertEqual(
-            buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
-            11,
-        )
-        self.assertEqual(
-            buckets[("2026-11-26T08:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
-            5,
-        )
-        self.assertEqual(
-            buckets[("2026-11-26T08:00:00Z", "tablet-key", "deepseek-chat")]["input_tokens"],
-            11,
-        )
-        self.assertEqual(
-            buckets[("2026-11-26T08:00:00Z", "phone-key", "deepseek-chat")]["input_tokens"],
-            7,
-        )
-
-    def test_expiry_retires_out_of_order_and_skipped_hours(self) -> None:
-        self.write_audit_archive(
-            2,
-            [
-                audit_record(
-                    "2026-11-26T11:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="desktop-key", **self._tokens(2)
-                ),
-            ],
-            compressed=True,
-        )
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T11:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-
-        self.rotate_audit(
-            keep=2,
-            new_active=[
-                audit_record(
-                    "2026-11-26T12:05:00.000Z", gateway_key="laptop-key", **self._tokens(16)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        buckets = self.received_buckets()
-        self.assertEqual(
-            buckets[("2026-11-26T11:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
-            5,
-        )
-        # Hour 09 left retention entirely. Its acknowledged row stays put and
-        # is not republished as a suffix.
-        self.assertEqual(
-            buckets[("2026-11-26T09:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
-            2,
-        )
-        self.assertNotIn(
-            "2026-11-26T09:00:00Z", self.read_state()["audit_retired"]
-        )
-
-    def test_late_append_to_older_archived_hour_after_empty_active(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        state = self.read_state()
-        self.assertIsNone(state["audit_active_hour"])
-
-        # 08 is not the newest archived hour, so this exercises the archived
-        # lookup rather than a single boundary carry.
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual(hour8["input_tokens"], 5)
-
-    def test_normal_tick_does_not_read_retained_archives(self) -> None:
-        archive = self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ]
-        )
-        self.assertTrue(self.run_in_process())
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:10:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-            append=True,
-        )
-
-        with measure_read_bytes(archive) as meter:
-            self.assertTrue(self.run_in_process())
-
-        self.assertEqual(meter["bytes"], 0)
-        hour9 = self.received_buckets()[
-            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual(hour9["input_tokens"], 6)
-
-    def test_truncated_plain_rotation_fails_without_acking_a_smaller_snapshot(self) -> None:
-        archive = self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        acknowledged = self.received_buckets()
-        hour8 = acknowledged[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
-        requests = len(self.ingest.snapshot_requests())
-
-        # Cut midway through the second record, leaving only its first line
-        # complete. The size change triggers a reconstruction on the next run.
-        first_line = self.offset_after_lines(archive, 1)
-        size = os.path.getsize(archive)
-        with open(archive, "r+b") as handle:
-            handle.truncate(first_line + (size - first_line) // 2)
-
-        result = self.run_cli()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("audit.jsonl.1", result.stderr)
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
-        self.assertEqual(self.received_buckets(), acknowledged)
-
-    def test_rotation_losing_a_whole_acknowledged_line_fails_without_posting(self) -> None:
-        archive = self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        acknowledged = self.received_buckets()
-        requests = len(self.ingest.snapshot_requests())
-
-        # Keep only the first complete line. The start record and generation
-        # identity survive, but the acknowledged second request is gone.
-        with open(archive, "r+b") as handle:
-            handle.truncate(self.offset_after_lines(archive, 1))
-
-        result = self.run_cli()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("2026-11-26T08:00:00Z/laptop-key/deepseek-chat", result.stderr)
-        self.assertIn("unit_count 2 -> 1", result.stderr)
-        self.assertIn("refusing to publish a smaller snapshot", result.stderr)
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
-        self.assertEqual(self.received_buckets(), acknowledged)
-
-    def test_offline_double_rotation_preserves_acknowledged_active_generation(self) -> None:
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        self.assertEqual(len(self.read_state()["audit_active_generation"]), 1)
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
-
-        # retention=1: rotate twice while the shipper is offline. The first
-        # rotation would have exposed A as .1, but the second expires it before
-        # any run observes the numbered file. Both retained files still hold
-        # hour 08, so its absolute snapshot must retain A plus the new records.
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ],
-        )
-
-        self.assert_ok(self.run_cli())
-
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
-
-    def test_same_size_archive_replacement_after_two_rotations_keeps_active(self) -> None:
-        archive = self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T07:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        original_size = os.path.getsize(archive)
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ]
-        )
-        self.assert_ok(self.run_cli())
-
-        # retention=1: the acknowledged active generation expires, and the new
-        # .1 has the same name and byte size as the replaced one. Its changed
-        # device/inode must still trigger the cold reconstruction.
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ],
-        )
-        self.assertEqual(
-            os.path.getsize(os.path.join(self.tempdir, "audit.jsonl.1")),
-            original_size,
-        )
-
-        self.assert_ok(self.run_cli())
-
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
-        self.assertEqual(len(self.read_state()["audit_archives"][0]), 4)
-
-    def test_legacy_name_size_archive_fingerprint_is_accepted(self) -> None:
-        archive = self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-        acknowledged = self.received_buckets()
-
-        state = self.read_state()
-        state["audit_archives"] = [
-            [os.path.basename(archive), os.path.getsize(archive)]
-        ]
-        with open(self.state_path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle)
-
-        self.assert_ok(self.run_cli())
-        self.assertEqual(self.received_buckets(), acknowledged)
-        self.assertEqual(len(self.read_state()["audit_archives"][0]), 4)
-
-    def test_legacy_eof_without_archives_recovers_active_generation_once(self) -> None:
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ]
-        )
-        self.assert_ok(self.run_cli())
-        legacy = self.read_state()
-        del legacy["audit_active_generation"]
-        del legacy["audit_active_generation_checked"]
-        with open(self.state_path, "w", encoding="utf-8") as handle:
-            json.dump(legacy, handle)
-        requests = len(self.ingest.snapshot_requests())
-
-        # The cursor is already at EOF with no numbered archive. Recover the
-        # acknowledged active generation locally without replaying its rows.
-        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
-        recovered = self.read_state()
-        self.assertTrue(recovered["audit_active_generation_checked"])
-        self.assertEqual(len(recovered["audit_active_generation"]), 1)
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
-
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
-
-    def test_noncanonical_active_prefix_still_recovers_generation_identity(self) -> None:
-        with open(self.audit_path, "wb") as handle:
-            handle.write(b"not-canonical\n")
-        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
-        state = self.read_state()
-        self.assertFalse(state["audit_active_generation_checked"])
-        self.assertEqual(state["audit_active_generation"], {})
-
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-            append=True,
-        )
-        self.assert_ok(self.run_cli())
-        state = self.read_state()
-        self.assertTrue(state["audit_active_generation_checked"])
-        self.assertEqual(len(state["audit_active_generation"]), 1)
-
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ],
-        )
-        self.rotate_audit(
-            keep=1,
-            new_active=[
-                audit_record(
-                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-        self.assert_ok(self.run_cli())
-
-        hour8 = self.received_buckets()[
-            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
-        ]
-        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 7))
-
-    def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
-        payload = self._encode(
-            [
-                audit_record(
-                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                ),
-                audit_record(
-                    "2026-11-26T08:30:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                ),
-            ]
-        )
-        corrupt = gzip.compress(payload)[:-8]
-        with open(os.path.join(self.tempdir, "audit.jsonl.2.gz"), "wb") as handle:
-            handle.write(corrupt)
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T09:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
-                )
-            ],
-        )
-
-        result = self.run_cli()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("could not be read completely", result.stderr)
-        self.assertEqual(self.ingest.snapshot_requests(), [])
-
-    def test_rotation_race_aborts_the_snapshot_before_sending(self) -> None:
-        self.write_audit_archive(
-            1,
-            [
-                audit_record(
-                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
-                )
-            ],
-        )
-        self.write_audit(
-            [
-                audit_record(
-                    "2026-11-26T09:00:00.000Z", gateway_key="laptop-key", **self._tokens(2)
-                )
-            ]
-        )
-        real_scan = shipper_module._scan_retained_audit
-
-        def scan_then_rotate(*args: Any, **kwargs: Any):
-            rows = real_scan(*args, **kwargs)
-            self.write_audit_archive(
-                2,
-                [
-                    audit_record(
-                        "2026-11-26T07:00:00.000Z",
-                        gateway_key="laptop-key",
-                        **self._tokens(3),
-                    )
-                ],
-                compressed=True,
-            )
-            return rows
-
-        with mock.patch.object(
-            shipper_module, "_scan_retained_audit", side_effect=scan_then_rotate
-        ):
-            with self.assertRaises(shipper_module.ShipperError):
-                self.run_in_process()
-
-        self.assertEqual(self.ingest.snapshot_requests(), [])
-
     def test_quota_backlog_peak_memory_is_bounded_by_a_batch(self) -> None:
         start = datetime(2026, 11, 26, 0, 0, 0)
 
@@ -2748,6 +1818,86 @@ class OrihsusShipperTests(unittest.TestCase):
         state = self.read_state()
         self.assertNotIn(gone_day, state["usage_cursors"])
         self.assertIn(other_day, state["usage_cursors"])
+
+
+    def test_old_cursor_combines_plain_and_gzip_archives(self) -> None:
+        self.write_audit_archive(2, [self._record("2026-11-26T08:00:00.000Z", 1)], compressed=True)
+        self.write_audit_archive(
+            1,
+            [
+                self._record("2026-11-26T08:30:00.000Z", 2),
+                self._record("2026-11-26T09:05:00.000Z", 4),
+            ],
+        )
+        self.write_audit([self._record("2026-11-26T09:55:00.000Z", 8)])
+        size = os.path.getsize(self.audit_path)
+        legacy = {
+            "version": 4,
+            "producer_id": "orihsus-main",
+            "batch_seq": 0,
+            "audit_cursor": size,
+            "audit_active_hour": "2026-11-26T09:00:00Z",
+            "audit_active_hour_offset": 0,
+            "audit_file_id": [
+                os.stat(self.audit_path).st_dev,
+                os.stat(self.audit_path).st_ino,
+            ],
+            "usage_cursors": {},
+            "usage_files": {},
+            "pending": None,
+        }
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+
+        self.assert_ok(self.run_cli())
+        rows = self.ingest.snapshot_usage_rows()
+        hour8 = self._usage_row(rows, "2026-11-26T08:00:00Z")
+        hour9 = self._usage_row(rows, "2026-11-26T09:00:00Z")
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 12))
+
+    def test_append_to_archived_hour_includes_archive_contribution(self) -> None:
+        self.write_audit_archive(1, [self._record("2026-11-26T08:05:00.000Z", 1)])
+        self.write_audit([self._record("2026-11-26T09:05:00.000Z", 2)])
+        self.assert_ok(self.run_cli())
+
+        self.write_audit([self._record("2026-11-26T08:35:00.000Z", 4)], append=True)
+        self.assert_ok(self.run_cli())
+
+        rows = self.ingest.snapshot_usage_rows()
+        hour8 = self._usage_row(rows, "2026-11-26T08:00:00Z")
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 5))
+
+    def test_corrupt_retained_archive_fails_before_publishing(self) -> None:
+        corrupt = gzip.compress(self._encode([self._record("2026-11-26T08:05:00.000Z", 1)]))[:-8]
+        with open(os.path.join(self.tempdir, "audit.jsonl.2.gz"), "wb") as handle:
+            handle.write(corrupt)
+        self.write_audit_archive(1, [self._record("2026-11-26T09:05:00.000Z", 2)])
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not be read completely", result.stderr)
+        self.assertEqual(self.ingest.snapshot_requests(), [])
+
+    def test_lost_ack_replays_same_archive_snapshot_and_repeat_stays_cached(self) -> None:
+        archive = self.write_audit_archive(1, [self._record("2026-11-26T08:05:00.000Z", 1)])
+        self.write_audit([self._record("2026-11-26T09:05:00.000Z", 2)])
+        self.ingest.drop_next_response = True
+
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        first_body = self.ingest.snapshot_requests()[0]["body"]
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.ingest.snapshot_requests()[1]["body"], first_body)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 2)
+
+        before = self.ingest.snapshot_usage_rows()
+        with measure_read_bytes(archive) as meter:
+            self.assertTrue(self.run_in_process())
+        self.assertEqual(meter["bytes"], 0)
+        self.assertEqual(self.ingest.snapshot_usage_rows(), before)
 
 
 if __name__ == "__main__":
