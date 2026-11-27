@@ -187,41 +187,27 @@ function windowGroups(
   return [...groups.entries()].map(([bucketId, windows]) => ({ bucketId, windows }));
 }
 
-function statusPriority(status: QuotaWindow["status"]): number {
-  if (status === "limited") {
-    return 0;
-  }
-  if (status === "cooldown") {
-    return 1;
-  }
-  if (status === "ok") {
-    return 2;
-  }
-  if (status === "unknown") {
-    return 3;
-  }
-  return 4;
+function isWarningStatus(status: QuotaWindow["status"]): boolean {
+  return status === "limited" || status === "cooldown";
 }
 
 function limitingWindow(subject: QuotaSubject): QuotaWindow | null {
   const windows = subject.latest_valid?.windows ?? [];
-  return windows.reduce<QuotaWindow | null>((current, window) => {
-    if (current === null) {
-      return window;
-    }
-    const priority = statusPriority(window.status);
-    const currentPriority = statusPriority(current.status);
-    if (priority !== currentPriority) {
-      return priority < currentPriority ? window : current;
-    }
-    if (window.remaining_percent === null) {
-      return current;
-    }
-    if (current.remaining_percent === null) {
-      return window;
-    }
-    return window.remaining_percent < current.remaining_percent ? window : current;
-  }, null);
+  if (windows.length === 0) {
+    return null;
+  }
+  const warnings = windows.filter((window) => isWarningStatus(window.status));
+  const candidates = warnings.length > 0 ? warnings : windows;
+  const known = candidates.filter(
+    (window): window is QuotaWindow & { remaining_percent: number } =>
+      window.remaining_percent !== null,
+  );
+  if (known.length === 0) {
+    return candidates[0] ?? null;
+  }
+  return known.reduce((lowest, window) =>
+    window.remaining_percent < lowest.remaining_percent ? window : lowest,
+  );
 }
 
 function WindowReading({

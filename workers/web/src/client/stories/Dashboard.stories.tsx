@@ -22,21 +22,9 @@ import {
   FIXTURE_MONTH,
 } from "./fixtures";
 import type { StorybookScenario } from "./scenarios";
-import { buildScenarioOverview } from "./scenarios";
+import { STORYBOOK_SCENARIOS, buildScenarioOverview } from "./scenarios";
 import type { DashboardDataSource, UsageInput } from "../../query/dashboard";
 import { routeTree } from "../../routeTree.gen";
-
-const SCENARIO_OPTIONS = [
-  "populated",
-  "loading",
-  "empty",
-  "failure",
-  "stale",
-  "failed",
-  "anomalous",
-  "missing-reset",
-  "funded-provider",
-] as const;
 
 function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewResponse {
   const base =
@@ -137,7 +125,7 @@ const meta = {
   argTypes: {
     scenario: {
       control: "select",
-      options: SCENARIO_OPTIONS,
+      options: STORYBOOK_SCENARIOS,
     },
   },
   render: (args: { scenario: StorybookScenario }) => (

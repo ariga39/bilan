@@ -72,10 +72,11 @@ the exact seven-day boundary and a future-anomalous timestamp.
 
 1. Add a builder to `fixtures.ts` (or extend an existing one) that returns one
    of the schemas from `@bilan/shared/schemas`.
-2. Add the scenario to `SCENARIO_OPTIONS` and `buildScenarioOverview` in
-   `workers/web/src/client/stories/scenarios.ts`, then extend `createDataSource`
-   in `Dashboard.stories.tsx` if it needs different loading, empty, or failure
-   behavior.
+2. Add the scenario to `STORYBOOK_SCENARIOS` and, when it needs transformed
+   data, `buildScenarioOverview` in
+   `workers/web/src/client/stories/scenarios.ts`. Loading, empty and failure
+   behavior lives in `createDataSource` in `Dashboard.stories.tsx`; extend that
+   switch instead of adding a duplicate option list.
 3. Export a story in `Dashboard.stories.tsx`:
 
    ```tsx

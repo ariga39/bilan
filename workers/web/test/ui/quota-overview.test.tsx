@@ -110,6 +110,53 @@ describe("QuotaOverview display", () => {
     expect(summary.textContent).toContain("—");
   });
 
+  it("compares the lowest known percentage across ok, unknown and null-status windows", () => {
+    const base = subject();
+    if (!base.latest_valid) {
+      throw new Error("fixture must have a valid observation");
+    }
+    const mixed = subject({
+      source: "opencode",
+      account: "key-mixed",
+      latest_valid: {
+        ...base.latest_valid,
+        windows: [
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-mixed",
+            slot: "rolling",
+            used_percent: 20,
+            remaining_percent: 80,
+            status: "ok",
+          },
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-mixed",
+            slot: "weekly",
+            used_percent: 87.8,
+            remaining_percent: 12.2,
+            status: "unknown",
+          },
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-mixed",
+            slot: "monthly",
+            used_percent: 65.6,
+            remaining_percent: 34.4,
+            status: null,
+          },
+        ],
+      },
+    });
+    render(<QuotaOverview quota={quota([mixed])} />);
+    const summary = screen.getByText("key-mixed").closest("summary");
+    if (!summary) {
+      throw new Error("OpenCode summary was not rendered");
+    }
+    expect(summary.textContent).toContain("12%");
+    expect(summary.textContent).toContain("Unknown");
+  });
+
   it("keeps the seven-day visibility boundary and shows collapsed key warnings", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     render(<QuotaOverview quota={overview.quotas} />);
