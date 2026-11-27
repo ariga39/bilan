@@ -294,6 +294,12 @@ class OrihsusShipperTests(unittest.TestCase):
                 handle.write(data)
         return path
 
+    def append_audit_archive(self, number: int, records: list[dict[str, Any]]) -> str:
+        path = os.path.join(self.tempdir, "audit.jsonl.%d" % number)
+        with open(path, "ab") as handle:
+            handle.write(self._encode(records))
+        return path
+
     def rotate_audit(
         self,
         *,
@@ -1647,6 +1653,62 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assert_ok(self.run_cli())
         self.assertEqual(self.received_buckets(), buckets)
 
+    def test_append_to_renamed_generation_keeps_its_previous_contribution(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:01:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:02:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+
+        # logrotate create+HUP leaves the writer on the renamed .1 file, which
+        # can still be appended after it became a rotation. That does not make
+        # it a new generation: its immutable start still matches, so the old
+        # contribution must not be retired a second time.
+        self.append_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:03:00.000Z", gateway_key="laptop-key", **self._tokens(3)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 6))
+        self.assertEqual(self.read_state()["audit_retired"], {})
+
+        # Compression/rename of that same generation also keeps the identity.
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 6))
+
     def test_rotation_recovers_a_late_record_from_the_new_archive(self) -> None:
         self.write_audit_archive(
             1,
@@ -1799,6 +1861,216 @@ class OrihsusShipperTests(unittest.TestCase):
             ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
         ]
         self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (1, 4))
+
+    def test_expiry_retires_exact_group_contributions_and_accepts_new_rows(self) -> None:
+        self.write_audit_archive(
+            2,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:10:00.000Z", gateway_key="desktop-key", **self._tokens(2)
+                ),
+            ],
+            compressed=True,
+        )
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:20:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                ),
+                audit_record(
+                    "2026-11-26T08:30:00.000Z", gateway_key="tablet-key", **self._tokens(8)
+                ),
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(16)
+                ),
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        self.assertEqual(
+            (buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
+             buckets[("2026-11-26T08:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
+             buckets[("2026-11-26T08:00:00Z", "tablet-key", "deepseek-chat")]["input_tokens"]),
+            (5, 2, 8),
+        )
+
+        # Expire the generation holding laptop=1 and desktop=2 for hour 08.
+        # The retained file still has laptop and tablet rows for that hour.
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(32)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertEqual(
+            sorted(state["audit_retired"]), ["2026-11-26T08:00:00Z"]
+        )
+
+        # Late rows, including a new group, must combine with the retired
+        # contributions instead of replacing the hour with active-only counts.
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:40:00.000Z", gateway_key="laptop-key", **self._tokens(6)
+                ),
+                audit_record(
+                    "2026-11-26T08:41:00.000Z", gateway_key="desktop-key", **self._tokens(3)
+                ),
+                audit_record(
+                    "2026-11-26T08:42:00.000Z", gateway_key="tablet-key", **self._tokens(3)
+                ),
+                audit_record(
+                    "2026-11-26T08:43:00.000Z", gateway_key="phone-key", **self._tokens(7)
+                ),
+            ],
+            append=True,
+        )
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        self.assertEqual(
+            buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
+            11,
+        )
+        self.assertEqual(
+            buckets[("2026-11-26T08:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
+            5,
+        )
+        self.assertEqual(
+            buckets[("2026-11-26T08:00:00Z", "tablet-key", "deepseek-chat")]["input_tokens"],
+            11,
+        )
+        self.assertEqual(
+            buckets[("2026-11-26T08:00:00Z", "phone-key", "deepseek-chat")]["input_tokens"],
+            7,
+        )
+
+    def test_expiry_retires_out_of_order_and_skipped_hours(self) -> None:
+        self.write_audit_archive(
+            2,
+            [
+                audit_record(
+                    "2026-11-26T11:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="desktop-key", **self._tokens(2)
+                ),
+            ],
+            compressed=True,
+        )
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T11:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T12:05:00.000Z", gateway_key="laptop-key", **self._tokens(16)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        self.assertEqual(
+            buckets[("2026-11-26T11:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"],
+            5,
+        )
+        # Hour 09 left retention entirely. Its acknowledged row stays put and
+        # is not republished as a suffix.
+        self.assertEqual(
+            buckets[("2026-11-26T09:00:00Z", "desktop-key", "deepseek-chat")]["input_tokens"],
+            2,
+        )
+        self.assertNotIn(
+            "2026-11-26T09:00:00Z", self.read_state()["audit_retired"]
+        )
+
+    def test_late_append_to_older_archived_hour_after_empty_active(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertIsNone(state["audit_active_hour"])
+
+        # 08 is not the newest archived hour, so this exercises the archived
+        # lookup rather than a single boundary carry.
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual(hour8["input_tokens"], 5)
+
+    def test_normal_tick_does_not_read_retained_archives(self) -> None:
+        archive = self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ]
+        )
+        self.assertTrue(self.run_in_process())
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:10:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+            append=True,
+        )
+
+        with measure_read_bytes(archive) as meter:
+            self.assertTrue(self.run_in_process())
+
+        self.assertEqual(meter["bytes"], 0)
+        hour9 = self.received_buckets()[
+            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual(hour9["input_tokens"], 6)
 
     def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
         payload = self._encode(

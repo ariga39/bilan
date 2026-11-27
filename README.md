@@ -106,7 +106,8 @@ python -m unittest discover -s shippers/tests -v
 
 The Python suite covers synthetic CLI runs against a local replay-safe ingest
 mock, including missing/empty logs, bounded streaming with active-hour anchors,
-rotation/truncation restarts, exact pending replay before a missing source,
+numbered plain/compressed audit rotations, generation-boundary hour combining,
+late records across rotations, exact pending replay before a missing source,
 interrupted multi-chunk backfill resume across rotation, backfill-first extents,
 lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety, per-key
 quota windows, AGY/Codex quota windows with late and same-second samples, clock
@@ -226,13 +227,16 @@ only `usage.jsonl` is not enough:
    | Collector    | Copy with the state file                                                             | State file                                                                    |
    | :----------- | :----------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
    | `debitmetre` | `usage.jsonl`                                                                        | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
-   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `orihsus`    | `audit.jsonl`, every retained `audit.jsonl.N[.gz]`, **and every `usage/YYYY-MM-DD.jsonl`** | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
    | `telemetre`  | SQLite backup API/CLI backup, or verified offline backup after stopping the database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
 
    Omitting `orihsus` daily usage files treats them as empty and drops unsent
-   observations. Use `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"` or a
-   verified offline backup; do not casually copy a live database or rely on
-   ad-hoc `-wal`/`-shm` copies.
+   observations. Keep the active `audit.jsonl` and **every retained
+   `audit.jsonl.N[.gz]` generation together with the state file**: the shipper
+   needs them to reconstruct UTC hours split across logrotate boundaries. Use
+   `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"` or a verified offline
+   backup; do not casually copy a live database or rely on ad-hoc `-wal`/`-shm`
+   copies.
 
 3. Start the new shipper first with the same `--producer-id` and copied state
    restored at its final `--state-file` path. Run its final catch-up and
@@ -319,19 +323,33 @@ python shippers/orihsus.py \
 
 `--state-file` defaults next to `audit.jsonl`; use an explicit durable path for
 a production host. The shipper streams the complete touched UTC hours from the
-audit log, streams every unsent daily quota file (offline backlog included) in
-bounded batches, and retries the exact in-flight envelope and `batch_seq` after
-a lost ACK.
+audit log and its retained logrotate generations, streams every unsent daily
+quota file (offline backlog included) in bounded batches, and retries the exact
+in-flight envelope and `batch_seq` after a lost ACK.
 
 Audit log recovery:
 
+- The first archive-aware run (new install or upgraded pre-rotation state)
+  combines `audit.jsonl`, `audit.jsonl.1`, and every retained
+  `audit.jsonl.N.gz` into one absolute snapshot per UTC hour.
+- Ordinary ticks still read only the active tail. A rotation or compressor
+  change reconstructs the retained history once, so an hour split across
+  generations stays combined and a late record from the previous active
+  generation is recovered.
+- If `logrotate` expires the oldest generation, its exact contribution is moved
+  into a retired map keyed by hour/actor/model and combined with the retained
+  rows, so an already-acknowledged hour never shrinks. New groups or new rows in
+  the same hour are still published, and a prefix hour never seen by the
+  receiver is imported normally.
+- A corrupt/truncated rotation, a failed gzip CRC, or a rotation observed during
+  the reconstruction makes the run fail before any ACK so the snapshot is
+  retried instead of committing partial counts.
 - A missing audit log fails before any new audit data is read, but an
   already-built pending envelope is replayed first.
 - If the audit file shrinks or is replaced, the shipper logs a warning and
   restarts its audit cursor/anchor from byte `0`. A shortened replacement can
-  overwrite an already-published part of the active hour; unread tails or late
-  records can affect more than one hour, and same-inode `copytruncate` fast
-  regrowth may escape detection.
+  overwrite an already-published part of the active hour; same-inode
+  `copytruncate` fast regrowth may escape detection.
 - Exact totals require a quiesced writer and complete logs/state. Restore the
   original audit log/state pair, or recover the recorded sequence deliberately,
   before running again.
