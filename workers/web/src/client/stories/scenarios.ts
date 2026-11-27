@@ -10,6 +10,7 @@ export const STORYBOOK_SCENARIOS = [
   "anomalous",
   "missing-reset",
   "funded-provider",
+  "usage-sparse",
 ] as const;
 export type StorybookScenario = (typeof STORYBOOK_SCENARIOS)[number];
 
@@ -107,6 +108,15 @@ export function buildScenarioOverview(
               }
             : subject,
         ),
+      },
+    };
+  }
+  if (scenario === "usage-sparse") {
+    return {
+      ...base,
+      usage: {
+        ...base.usage,
+        rows: base.usage.rows.filter((row) => row.is_partial),
       },
     };
   }

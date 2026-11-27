@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -90,11 +90,44 @@ describe("shipped dashboard route", () => {
     const { router, queryClient } = createRouterFor(dataSource, "usage");
     rendered(router, queryClient);
 
-    expect(await screen.findByText("Token usage breakdown")).toBeTruthy();
+    expect(await screen.findByText("Token usage")).toBeTruthy();
     expect((await screen.findAllByText("machine-a")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("Daily usage for this selection is unavailable.")).toBeTruthy();
+    expect(
+      (
+        await screen.findAllByText(
+          "Daily usage could not be loaded. Monthly totals remain available.",
+        )
+      ).length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("Dashboard data could not be loaded.")).toBeNull();
     expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy();
+  });
+
+  it("deep-links the usage view and preserves the selected month through navigation", async () => {
+    const dataSource: DashboardDataSource = {
+      overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
+      daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      history: async (provider) => buildPopulatedHistory(provider),
+    };
+    const { router, queryClient } = createRouterFor(dataSource, "usage");
+    rendered(router, queryClient);
+
+    expect(await screen.findByText("Today · 2026-11-27")).toBeTruthy();
+    expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("UTC");
+    expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
+    const todaySummary = screen.getByLabelText("Today's usage summary");
+    expect(within(todaySummary).getByText("11")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2026-10" } });
+
+    expect(await screen.findByText("No token usage for this month")).toBeTruthy();
+    expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe("2026-10");
+    expect(screen.getByText("Today outside this range")).toBeTruthy();
+
+    router.history.back();
+
+    expect(await screen.findByText("Today · 2026-11-27")).toBeTruthy();
+    expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
   });
 
   it("keeps cached overview and histories while surfacing a failed refresh", async () => {
