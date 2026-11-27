@@ -854,10 +854,14 @@ describe("B5 multi-host acceptance", () => {
     expect(agyCardText).toContain("90%");
 
     const openCodeCardText = quotaCard(main, "OpenCode Go").textContent ?? "";
-    expect(openCodeCardText).toContain("fp_a");
-    expect(openCodeCardText).toContain("fp_b");
+    expect(openCodeCardText).toContain("Go#1");
+    expect(openCodeCardText).toContain("Go#2");
     expect(openCodeCardText).toContain("58%");
     expect(openCodeCardText).toContain("10%");
+    expect(openCodeCardText).not.toContain("fp_a");
+    expect(openCodeCardText).not.toContain("fp_b");
+    expect(overviewPage.body).not.toContain("fp_a");
+    expect(overviewPage.body).not.toContain("fp_b");
 
     const balanceHtml = renderToStaticMarkup(
       <div>

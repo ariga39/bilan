@@ -1,5 +1,5 @@
 /* oxlint-disable typescript/no-unsafe-assignment, typescript/no-unsafe-call, typescript/no-unsafe-return, typescript/no-unsafe-member-access, typescript/no-unsafe-argument -- TanStack Start server-function boundary with framework-generated types */
-import { filterVisibleQuotaSubjects, isValidMonth, isValidTimeZone } from "@bilan/shared";
+import { dashboardQuotaSubjects, isValidMonth, isValidTimeZone } from "@bilan/shared";
 import type { BalanceProvider, OverviewResponse } from "@bilan/shared";
 import { createServerFn } from "@tanstack/react-start";
 import { setResponseHeader } from "@tanstack/react-start/server";
@@ -25,7 +25,7 @@ const getOverviewData = createServerFn({ method: "GET" })
       ...overview,
       quotas: {
         ...overview.quotas,
-        subjects: filterVisibleQuotaSubjects(overview.quotas.subjects, now),
+        subjects: dashboardQuotaSubjects(overview.quotas.subjects, now),
       },
     };
   });

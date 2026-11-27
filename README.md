@@ -226,7 +226,7 @@ only `usage.jsonl` is not enough:
    | Collector    | Copy with the state file                                                             | State file                                                                    |
    | :----------- | :----------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
    | `debitmetre` | `usage.jsonl`                                                                        | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
-   | `orihsus`    | `audit.jsonl`, all retained `audit.jsonl.N[.gz]`, and every `usage/YYYY-MM-DD.jsonl`                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `orihsus`    | `audit.jsonl`, all retained `audit.jsonl.N[.gz]`, and every `usage/YYYY-MM-DD.jsonl` | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
    | `telemetre`  | SQLite backup API/CLI backup, or verified offline backup after stopping the database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
 
    Omitting `orihsus` daily usage files treats them as empty and drops unsent

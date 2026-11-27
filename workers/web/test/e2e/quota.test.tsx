@@ -567,9 +567,11 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(pageResponse.body).toContain("OpenCode Go");
     expect(pageResponse.body).toContain("/assets/");
     expect(pageResponse.body).not.toContain("Something went wrong");
-    expect(pageResponse.body).toContain("fp_a");
-    expect(pageResponse.body).toContain("fp_b");
-    expect(pageResponse.body).toContain("go-key-1");
+    expect(pageResponse.body).toContain("Go#1");
+    expect(pageResponse.body).toContain("Go#2");
+    expect(pageResponse.body).not.toContain("fp_a");
+    expect(pageResponse.body).not.toContain("fp_b");
+    expect(pageResponse.body).not.toContain("go-key-1");
     expect(pageResponse.body).toContain("43.5%");
     expect(pageResponse.body).toContain("monthly");
 
@@ -755,13 +757,37 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(push.status, push.body).toBe(200);
 
     const month = new Date(now).toISOString().slice(0, 7);
+    const rawResponse = await httpCall(`${baseUrl(web)}/api/v1/overview?tz=UTC&month=${month}`);
+    expect(rawResponse.status, rawResponse.body).toBe(200);
+    const rawParsed = overviewResponseSchema.safeParse(JSON.parse(rawResponse.body));
+    expect(rawParsed.success, rawResponse.body).toBe(true);
+    if (!rawParsed.success) {
+      throw new Error("overview response did not match the shared schema");
+    }
+    const openCodeOrder = rawParsed.data.quotas.subjects
+      .filter((subject) => subject.source === "opencode")
+      .map((subject) => subject.account);
+    const labelFor = (account: string): string => {
+      const index = openCodeOrder.indexOf(account);
+      expect(index, `${account} missing from the raw overview`).toBeGreaterThanOrEqual(0);
+      return `Go#${index + 1}`;
+    };
+    const visibleLabel = labelFor("key-e2e-visible");
+    const reappearedLabel = labelFor("key-e2e-reappeared");
+    const pastLabel = labelFor("key-e2e-past");
+
     const page = await httpCall(`${baseUrl(web)}/?view=overview&tz=UTC&month=${month}`);
     expect(page.status, page.body).toBe(200);
-    expect(page.body).toContain("key-e2e-visible");
+    expect(page.body).toMatch(new RegExp(`${visibleLabel}(?!\\d)`, "u"));
+    expect(page.body).toMatch(new RegExp(`${reappearedLabel}(?!\\d)`, "u"));
     expect(page.body).toContain("11.5%");
-    expect(page.body).toContain("key-e2e-reappeared");
     expect(page.body).toContain("Latest attempt failed");
+    expect(page.body).not.toMatch(new RegExp(`${pastLabel}(?!\\d)`, "u"));
+    expect(page.body).not.toContain("key-e2e-visible");
+    expect(page.body).not.toContain("key-e2e-reappeared");
     expect(page.body).not.toContain("key-e2e-past");
+    expect(page.body).not.toContain("visible-key");
+    expect(page.body).not.toContain("reappeared-key");
     expect(page.body).not.toContain("22.25%");
   });
 

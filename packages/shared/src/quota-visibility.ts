@@ -1,4 +1,4 @@
-import type { QuotaObservation, QuotaSubject } from "./index";
+import type { QuotaAttempt, QuotaObservation, QuotaSubject } from "./index";
 
 const DAY_MS = 86_400_000;
 const FUTURE_CLOCK_TOLERANCE_MS = 5 * 60_000;
@@ -52,4 +52,79 @@ export function filterVisibleQuotaSubjects(
   now: Date,
 ): Array<QuotaSubject> {
   return subjects.filter((subject) => isQuotaSubjectVisible(subject, now));
+}
+
+function withoutFingerprint(value: string, fingerprint: string, label: string): string {
+  return fingerprint.length === 0 ? value : value.split(fingerprint).join(label);
+}
+
+function publicErrorSummary(
+  summary: string | null,
+  fingerprint: string,
+  label: string,
+): string | null {
+  return summary === null ? null : withoutFingerprint(summary, fingerprint, label);
+}
+
+function publicAttempt(attempt: QuotaAttempt, fingerprint: string, label: string): QuotaAttempt {
+  return {
+    ...attempt,
+    sample_id: withoutFingerprint(attempt.sample_id, fingerprint, label),
+    error_summary: publicErrorSummary(attempt.error_summary, fingerprint, label),
+  };
+}
+
+function publicOpenCodeSubject(subject: QuotaSubject, label: string): QuotaSubject {
+  return {
+    source: subject.source,
+    account: label,
+    latest_valid:
+      subject.latest_valid === null
+        ? null
+        : {
+            ...subject.latest_valid,
+            sample_id: withoutFingerprint(subject.latest_valid.sample_id, subject.account, label),
+            error_summary: publicErrorSummary(
+              subject.latest_valid.error_summary,
+              subject.account,
+              label,
+            ),
+            windows: subject.latest_valid.windows.map((window) => ({
+              ...window,
+              bucket_id: withoutFingerprint(window.bucket_id, subject.account, label),
+              // Upstream key aliases are not a verified public label, so they
+              // never reach the dashboard surface.
+              label: null,
+            })),
+          },
+    latest_attempt:
+      subject.latest_attempt === null
+        ? null
+        : publicAttempt(subject.latest_attempt, subject.account, label),
+    anomalies: subject.anomalies.map((anomaly) => publicAttempt(anomaly, subject.account, label)),
+  };
+}
+
+/**
+ * The public dashboard projection for quota subjects.
+ *
+ * Every OpenCode Go key is exposed only as an anonymous `Go#N`. Numbering runs
+ * over the full subject list before the freshness filter, so an aged-out legacy
+ * key still holds its number instead of renumbering the visible keys. Raw key
+ * fingerprints are also removed from every sample, bucket, and error identity
+ * sent to the dashboard. Other sources keep their existing display fields.
+ */
+export function dashboardQuotaSubjects(
+  subjects: ReadonlyArray<QuotaSubject>,
+  now: Date,
+): Array<QuotaSubject> {
+  let openCodeNumber = 0;
+  const projected = subjects.map((subject) => {
+    if (subject.source !== "opencode") {
+      return subject;
+    }
+    openCodeNumber += 1;
+    return publicOpenCodeSubject(subject, `Go#${openCodeNumber}`);
+  });
+  return filterVisibleQuotaSubjects(projected, now);
 }

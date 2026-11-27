@@ -1,5 +1,5 @@
 import type { QuotaSubject } from "@bilan/shared";
-import { filterVisibleQuotaSubjects } from "@bilan/shared";
+import { dashboardQuotaSubjects } from "@bilan/shared";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -153,13 +153,13 @@ describe("QuotaOverview display", () => {
     }
     const limited = subject({
       source: "opencode",
-      account: "key-limited",
+      account: "Go#12",
       latest_valid: {
         ...base.latest_valid,
         windows: [
           {
             ...base.latest_valid.windows[0]!,
-            bucket_id: "key-limited",
+            bucket_id: "Go#12",
             slot: "rolling",
             label: null,
             used_percent: null,
@@ -168,7 +168,7 @@ describe("QuotaOverview display", () => {
           },
           {
             ...base.latest_valid.windows[0]!,
-            bucket_id: "key-limited",
+            bucket_id: "Go#12",
             slot: "weekly",
             label: null,
             used_percent: 20,
@@ -179,7 +179,7 @@ describe("QuotaOverview display", () => {
       },
     });
     render(<QuotaOverview quota={quota([limited])} />);
-    expect(screen.getByText("key-limited")).toBeTruthy();
+    expect(screen.getByText("Go#12")).toBeTruthy();
     expect(screen.getByText("Limited")).toBeTruthy();
     expect(screen.getByText("—")).toBeTruthy();
     expect(screen.getByText("80%")).toBeTruthy();
@@ -189,16 +189,16 @@ describe("QuotaOverview display", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     const visibleQuota = {
       ...overview.quotas,
-      subjects: filterVisibleQuotaSubjects(overview.quotas.subjects, new Date(FIXED_NOW)),
+      subjects: dashboardQuotaSubjects(overview.quotas.subjects, new Date(FIXED_NOW)),
     };
     render(<QuotaOverview quota={visibleQuota} />);
 
-    expect(screen.getByText("key-fp-1")).toBeTruthy();
-    expect(screen.getByText("key-fp-2")).toBeTruthy();
-    expect(screen.getByText("key-fp-3")).toBeTruthy();
-    expect(screen.queryByText("key-fp-4")).toBeNull();
-    expect(screen.queryByText("key-fp-5")).toBeNull();
-    expect(screen.queryByText("key-fp-7")).toBeNull();
+    expect(screen.getByText("Go#1")).toBeTruthy();
+    expect(screen.getByText("Go#2")).toBeTruthy();
+    expect(screen.getByText("Go#3")).toBeTruthy();
+    expect(screen.queryByText("Go#4")).toBeNull();
+    expect(screen.queryByText("key-fp-1")).toBeNull();
+    expect(JSON.stringify(visibleQuota)).not.toMatch(/key-fp-/u);
 
     // Only the latest valid sample's windows are visible with exact values,
     // countdowns, and sample ages.
@@ -218,20 +218,47 @@ describe("QuotaOverview display", () => {
     expect(screen.queryByText("0%")).toBeNull();
   });
 
+  it("numbers legacy OpenCode keys before hiding stale ones", () => {
+    const base = subject();
+    const stale = subject({
+      source: "opencode",
+      account: "key-fp-old",
+      latest_valid: {
+        ...base.latest_valid!,
+        sampled_at: "2026-11-10T12:00:00Z",
+        sample_age_seconds: 1_468_800,
+        is_stale: true,
+      },
+      latest_attempt: {
+        ...base.latest_attempt!,
+        sampled_at: "2026-11-10T12:00:00Z",
+        sample_age_seconds: 1_468_800,
+      },
+    });
+    const fresh = subject({ source: "opencode", account: "key-fp-new" });
+
+    const visible = dashboardQuotaSubjects([stale, fresh], new Date(FIXED_NOW));
+
+    render(<QuotaOverview quota={quota(visible)} />);
+    expect(screen.getByText("Go#2")).toBeTruthy();
+    expect(screen.queryByText("Go#1")).toBeNull();
+    expect(JSON.stringify(visible)).not.toMatch(/key-fp-/u);
+  });
+
   it("keeps the last valid windows while warning about empty and failed attempts", () => {
-    const base = subject({ source: "opencode", account: "key-attempts" });
+    const base = subject({ source: "opencode", account: "key-fp-a" });
     if (!base.latest_valid) {
       throw new Error("fixture must have a valid observation");
     }
     const emptyAttempt = subject({
       source: "opencode",
-      account: "key-empty-attempt",
+      account: "key-fp-a",
       latest_valid: {
         ...base.latest_valid,
         windows: [
           {
             ...base.latest_valid.windows[0]!,
-            bucket_id: "key-empty-attempt",
+            bucket_id: "key-fp-a",
             slot: "rolling",
             label: null,
             used_percent: 0,
@@ -254,26 +281,42 @@ describe("QuotaOverview display", () => {
     });
     const failedOnly = subject({
       source: "opencode",
-      account: "key-failed-only",
+      account: "key-fp-b",
       latest_valid: null,
       latest_attempt: {
-        sample_id: "failed-only",
+        sample_id: "opencode:key-fp-b:2026-11-27T11:57:00Z:abc",
         observer_machine: "gateway-a",
         sampled_at: "2026-11-27T11:57:00Z",
         sample_age_seconds: 180,
         status: "error",
         time_anomaly: null,
-        error_summary: "upstream_error",
+        error_summary: "upstream_error for key-fp-b",
       },
+      anomalies: [
+        {
+          sample_id: "opencode:key-fp-b:2099-01-01T00:00:00Z:def",
+          observer_machine: "gateway-a",
+          sampled_at: "2099-01-01T00:00:00Z",
+          sample_age_seconds: null,
+          status: "error",
+          time_anomaly: "future_clock_skew",
+          error_summary: "key-fp-b clock rejected",
+        },
+      ],
     });
 
-    render(<QuotaOverview quota={quota([emptyAttempt, failedOnly])} />);
+    const visible = dashboardQuotaSubjects([emptyAttempt, failedOnly], new Date(FIXED_NOW));
+    render(<QuotaOverview quota={quota(visible)} />);
 
+    expect(screen.getByText("Go#1")).toBeTruthy();
+    expect(screen.getByText("Go#2")).toBeTruthy();
     expect(screen.getByText("100%")).toBeTruthy();
     expect(screen.getByText(/Latest attempt was empty/u)).toBeTruthy();
     expect(screen.getByText(/Latest attempt failed/u)).toBeTruthy();
-    expect(screen.getByText(/upstream_error/u)).toBeTruthy();
+    expect(screen.getByText(/upstream_error for Go#2/u)).toBeTruthy();
     expect(screen.getByText("No valid quota windows.")).toBeTruthy();
+    expect(screen.queryByText(/key-fp-/u)).toBeNull();
+    expect(JSON.stringify(visible)).not.toMatch(/key-fp-/u);
     expect(screen.queryByText("0%")).toBeNull();
   });
 

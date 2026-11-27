@@ -1,4 +1,4 @@
-import { filterVisibleQuotaSubjects } from "@bilan/shared";
+import { dashboardQuotaSubjects } from "@bilan/shared";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -33,16 +33,15 @@ describe("Storybook fixtures", () => {
 
   it("keeps the nine-key fixture to the three recently reporting OpenCode keys", () => {
     const subjects = buildPopulatedOverview("UTC", FIXTURE_MONTH).quotas.subjects;
-    const visible = filterVisibleQuotaSubjects(subjects, new Date(FIXED_NOW));
+    const projected = dashboardQuotaSubjects(subjects, new Date(FIXED_NOW));
+    const visible = projected.filter((subject) => subject.source === "opencode");
     expect(subjects.filter((subject) => subject.source === "opencode")).toHaveLength(9);
-    expect(
-      visible.filter((subject) => subject.source === "opencode").map((subject) => subject.account),
-    ).toEqual(["key-fp-1", "key-fp-2", "key-fp-3"]);
-    expect(visible.find((subject) => subject.account === "key-fp-3")?.latest_attempt?.status).toBe(
+    expect(visible.map((subject) => subject.account)).toEqual(["Go#1", "Go#2", "Go#3"]);
+    expect(visible.find((subject) => subject.account === "Go#3")?.latest_attempt?.status).toBe(
       "error",
     );
-    expect(visible.some((subject) => subject.account === "key-fp-4")).toBe(false);
-    expect(visible.some((subject) => subject.account === "key-fp-7")).toBe(false);
+    expect(visible.some((subject) => subject.account === "Go#4")).toBe(false);
+    expect(JSON.stringify(projected)).not.toMatch(/key-fp-/u);
   });
 
   it.each([
