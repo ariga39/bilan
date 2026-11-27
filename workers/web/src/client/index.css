@@ -30,6 +30,41 @@
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
 
+  --color-starlight-gold: var(--starlight-gold);
+  --color-starlight-parchment: var(--starlight-parchment);
+  --color-starlight-rose: var(--starlight-rose);
+  --color-starlight-blush: var(--starlight-blush);
+  --color-starlight-violet: var(--starlight-violet);
+  --color-starlight-lilac: var(--starlight-lilac);
+  --color-starlight-star: var(--starlight-star);
+  --color-starlight-mist: var(--starlight-mist);
+  --color-starlight-void: var(--starlight-void);
+  --color-starlight-night: var(--starlight-night);
+  --color-starlight-abyss: var(--starlight-abyss);
+  --color-starlight-dusk: var(--starlight-dusk);
+  --color-starlight-veil: var(--starlight-veil);
+  --color-starlight-gradient-mid: var(--starlight-gradient-mid);
+  --color-starlight-track: var(--starlight-track);
+  --color-starlight-cavern: var(--starlight-cavern);
+  --color-starlight-tooltip: var(--starlight-tooltip);
+  --color-starlight-ember: var(--starlight-ember);
+  --color-starlight-ember-soft: var(--starlight-ember-soft);
+  --color-starlight-amber: var(--starlight-amber);
+  --color-starlight-arcane: var(--starlight-arcane);
+  --color-starlight-arcane-pale: var(--starlight-arcane-pale);
+  --color-starlight-teal: var(--starlight-teal);
+  --color-starlight-teal-soft: var(--starlight-teal-soft);
+  --color-starlight-violet-muted: var(--starlight-violet-muted);
+  --color-starlight-periwinkle: var(--starlight-periwinkle);
+  --color-starlight-codex: var(--starlight-codex);
+  --color-starlight-codex-soft: var(--starlight-codex-soft);
+  --color-starlight-opencode: var(--starlight-opencode);
+  --color-starlight-agy: var(--starlight-agy);
+  --color-starlight-chart-amber-mid: var(--starlight-chart-amber-mid);
+  --color-starlight-chart-amber-end: var(--starlight-chart-amber-end);
+  --color-starlight-chart-rose-mid: var(--starlight-chart-rose-mid);
+  --color-starlight-chart-rose-end: var(--starlight-chart-rose-end);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -61,6 +96,41 @@
   --ring: #f472b6;
   --chart-1: #f472b6;
   --chart-2: #fcd34d;
+
+  --starlight-gold: #f5d08a;
+  --starlight-parchment: #fef3c7;
+  --starlight-rose: #f472b6;
+  --starlight-blush: #f9a8d4;
+  --starlight-violet: #a855f7;
+  --starlight-lilac: #e9d5ff;
+  --starlight-star: #fef08a;
+  --starlight-mist: #f8f3ff;
+  --starlight-void: #120d28;
+  --starlight-night: #140f2c;
+  --starlight-abyss: #0e0a20;
+  --starlight-dusk: #161130;
+  --starlight-veil: #130e2b;
+  --starlight-gradient-mid: #1e133b;
+  --starlight-track: #241b45;
+  --starlight-cavern: #0f0a22;
+  --starlight-tooltip: #1b1536;
+  --starlight-ember: #fb7185;
+  --starlight-ember-soft: #fda4af;
+  --starlight-amber: #fcd34d;
+  --starlight-arcane: #c084fc;
+  --starlight-arcane-pale: #f3e8ff;
+  --starlight-teal: #5eead4;
+  --starlight-teal-soft: #a7f3d0;
+  --starlight-violet-muted: #d8c7f7;
+  --starlight-periwinkle: #c4b5fd;
+  --starlight-codex: #f1f5f9;
+  --starlight-codex-soft: #e2e8f0;
+  --starlight-opencode: #bae6fd;
+  --starlight-agy: #ddd6fe;
+  --starlight-chart-amber-mid: #f59e0b;
+  --starlight-chart-amber-end: #db2777;
+  --starlight-chart-rose-mid: #ec4899;
+  --starlight-chart-rose-end: #7e22ce;
 }
 
 @keyframes twinkle {

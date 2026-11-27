@@ -27,8 +27,8 @@ function NavLink({
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all",
         active
-          ? "bg-gradient-to-r from-[#f472b6] to-[#a855f7] text-white shadow-[0_0_16px_rgba(244,114,182,0.5)]"
-          : "border border-[#f5d08a]/20 bg-[#120d28]/70 text-muted-foreground hover:border-[#f5d08a]/45 hover:text-foreground",
+          ? "bg-gradient-to-r from-starlight-rose to-starlight-violet text-white shadow-[0_0_16px_rgba(244,114,182,0.5)]"
+          : "border border-starlight-gold/20 bg-starlight-void/70 text-muted-foreground hover:border-starlight-gold/45 hover:text-foreground",
       )}
     >
       <span aria-hidden="true" className="text-[10px]">
@@ -53,16 +53,16 @@ export function DashboardHeader({
   onRefresh: () => void;
 }) {
   return (
-    <header className="grimoire-header rounded-2xl border border-[#f5d08a]/35 px-4 py-3 backdrop-blur-md">
+    <header className="grimoire-header rounded-2xl border border-starlight-gold/35 px-4 py-3 backdrop-blur-md">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <h1
             style={{ fontFamily: "var(--font-display)" }}
-            className="bg-gradient-to-r from-[#fef08a] via-[#f9a8d4] to-[#c4b5fd] bg-clip-text text-xl font-bold tracking-[0.14em] text-transparent sm:text-2xl"
+            className="bg-gradient-to-r from-starlight-star via-starlight-blush to-starlight-periwinkle bg-clip-text text-xl font-bold tracking-[0.14em] text-transparent sm:text-2xl"
           >
             bilan
           </h1>
-          <Sparkles className="grimoire-twinkle size-4 text-[#fcd34d]" aria-hidden="true" />
+          <Sparkles className="grimoire-twinkle size-4 text-starlight-amber" aria-hidden="true" />
           <nav aria-label="Dashboard views" className="flex items-center gap-1.5">
             <NavLink to="/" active={view === "overview"} label="Overview" search={search} />
             <NavLink to="/usage" active={view === "usage"} label="Usage" search={search} />
@@ -71,16 +71,20 @@ export function DashboardHeader({
 
         <div className="flex items-center gap-2.5">
           {generatedAt ? (
-            <span className="text-[11px] text-[#d8c7f7]">☽ {formatDateTime(generatedAt)}</span>
+            <span className="text-[11px] text-starlight-violet-muted">
+              ☽ {formatDateTime(generatedAt)}
+            </span>
           ) : null}
           <Button
             variant="outline"
             size="sm"
-            className="rounded-full border-[#f5d08a]/45 bg-gradient-to-r from-[#2e1e5c] to-[#43205c] text-[#fef3c7] shadow-[0_0_16px_-4px_rgba(244,114,182,0.45)] hover:from-[#3b2675] hover:to-[#542874]"
+            className="rounded-full border-starlight-gold/45 bg-gradient-to-r from-[#2e1e5c] to-[#43205c] text-starlight-parchment shadow-[0_0_16px_-4px_rgba(244,114,182,0.45)] hover:from-[#3b2675] hover:to-[#542874]"
             onClick={onRefresh}
             disabled={refreshing}
           >
-            <RefreshCw className={cn("size-3.5 text-[#f9a8d4]", refreshing && "animate-spin")} />
+            <RefreshCw
+              className={cn("size-3.5 text-starlight-blush", refreshing && "animate-spin")}
+            />
             Refresh
           </Button>
         </div>
