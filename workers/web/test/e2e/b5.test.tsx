@@ -779,12 +779,13 @@ describe("B5 multi-host acceptance", () => {
         daily={daily}
         timezone={TIMEZONE}
         month={MONTH}
+        generatedAt={overview.generated_at}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
     );
-    expect(usageHtml).toContain("Codex token usage by machine, model, and effort");
-    expect(usageHtml).toContain("OpenCode Go token usage by identity, model, and effort");
+    expect(usageHtml).toContain("Monthly detail for Codex · debitmetre-audit-v1 · request");
+    expect(usageHtml).toContain("Monthly detail for OpenCode Go · orihsus-audit-v1 · request");
     expect(usageHtml).toContain("machine-a");
     expect(usageHtml).toContain("laptop-key");
     expect(usageHtml).not.toContain("AGY");

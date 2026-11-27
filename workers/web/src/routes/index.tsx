@@ -149,6 +149,7 @@ function DashboardRoute() {
   const historyQueries = useQueries({
     queries: historyProviders.map((provider) => ({
       ...historyQueryOptions(dataSource, provider),
+      enabled: search.view === "overview",
       refetchInterval: 60_000,
     })),
   });
@@ -184,6 +185,12 @@ function DashboardRoute() {
       }
       refreshError={refreshError}
       refreshing={refreshing}
+      dailyLoading={daily.isPending}
+      dailyError={
+        daily.isError && daily.data === undefined
+          ? "Daily usage could not be loaded. Monthly totals remain available."
+          : null
+      }
       onNavigate={(next) => {
         void navigate({
           to: "/",

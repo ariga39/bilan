@@ -4,18 +4,9 @@ import { ArrowRight, BarChart3, Clock3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAge, formatDateTime } from "@/lib/format";
+import { monthLabel, monthRangeLabel, sourceLabel, usagePeriod } from "@/lib/usage";
 import type { DashboardSearch } from "../../search";
 import { dashboardHref } from "../../search";
-
-function sourceLabel(source: string): string {
-  if (source === "codex") {
-    return "Codex";
-  }
-  if (source === "opencode") {
-    return "OpenCode Go";
-  }
-  return source;
-}
 
 export function UsageEntry({
   overview,
@@ -27,6 +18,7 @@ export function UsageEntry({
   onNavigate: (navigation: DashboardSearch) => void;
 }) {
   const usage = overview.usage;
+  const period = usagePeriod(usage.month, usage.timezone, overview.generated_at);
   const next = { ...navigation, view: "usage" as const };
   return (
     <Card>
@@ -36,13 +28,27 @@ export function UsageEntry({
           Token usage
         </CardTitle>
         <CardDescription>
-          Open today&apos;s and this month&apos;s requests, tokens, and coverage on the usage view.
+          Open today&apos;s and the selected month&apos;s requests, tokens, coverage and daily trend
+          on the Usage view.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1 text-sm">
-          <p>
-            {usage.month} · {usage.timezone}
+          <p className="flex flex-wrap items-center gap-2">
+            <span>
+              {period.isCurrentMonth ? "This month" : "Historical month"} ·{" "}
+              {monthLabel(usage.month)} · {monthRangeLabel(usage.month, usage.timezone)} ·{" "}
+              {usage.timezone}
+            </span>
+            {period.isCurrentMonth ? (
+              <span className="rounded-full border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground">
+                Today {period.today}
+              </span>
+            ) : (
+              <span className="rounded-full border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground">
+                Today is outside this historical range
+              </span>
+            )}
           </p>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <Clock3 className="size-3.5" />

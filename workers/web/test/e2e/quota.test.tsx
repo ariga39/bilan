@@ -1,4 +1,4 @@
-import { overviewResponseSchema } from "@bilan/shared/schemas";
+import { overviewResponseSchema, usageDailyResponseSchema } from "@bilan/shared/schemas";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -569,6 +569,24 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(pageResponse.body).toContain("43.5%");
     expect(pageResponse.body).toContain("monthly");
 
+    const dailyResponse = await httpCall(`${webUrl}/api/v1/usage/daily?tz=UTC&month=${usageMonth}`);
+    expect(dailyResponse.status, dailyResponse.body).toBe(200);
+    const parsedDaily = usageDailyResponseSchema.safeParse(JSON.parse(dailyResponse.body));
+    expect(parsedDaily.success, dailyResponse.body).toBe(true);
+    if (!parsedDaily.success) {
+      throw new Error("daily usage response did not match the shared schema");
+    }
+
+    const usagePageResponse = await httpCall(`${webUrl}/?view=usage&tz=UTC&month=${usageMonth}`);
+    expect(usagePageResponse.status, usagePageResponse.body).toBe(200);
+    expect(usagePageResponse.body).toContain("Token usage");
+    expect(usagePageResponse.body).toContain("Requests");
+    expect(usagePageResponse.body).toContain("Daily trend");
+    expect(usagePageResponse.body).toContain(usageDay);
+    expect(usagePageResponse.body).toContain("machine-a");
+    expect(usagePageResponse.body).toContain("laptop-key");
+    expect(usagePageResponse.body).not.toContain("Something went wrong");
+
     expect(overview.usage.rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -597,20 +615,26 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     const usageHtml = renderToStaticMarkup(
       <UsageSection
         usage={overview.usage}
-        daily={null}
+        daily={parsedDaily.data}
         timezone="UTC"
         month={usageMonth}
+        generatedAt={overview.generated_at}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
     );
-    expect(usageHtml).toContain("Token usage breakdown");
-    expect(usageHtml).toContain("Codex token usage by machine, model, and effort");
-    expect(usageHtml).toContain("OpenCode Go token usage by identity, model, and effort");
+    expect(usageHtml).toContain("Token usage");
+    expect(usageHtml).toContain("Monthly detail for Codex · debitmetre-audit-v1 · request");
+    expect(usageHtml).toContain("Monthly detail for OpenCode Go · orihsus-audit-v1 · request");
+    expect(usageHtml).toContain("Daily trend");
+    expect(usageHtml).toContain("Exact daily values");
     expect(usageHtml).toContain("machine-a");
     expect(usageHtml).toContain("laptop-key");
     expect(usageHtml).toContain(">Identity<");
     expect(usageHtml).toContain(">Machine<");
+    expect(usageHtml.indexOf("Requests")).toBeLessThan(
+      usageHtml.indexOf("Monthly breakdown by machine"),
+    );
   });
 
   it("renders visible and >=7d hidden OpenCode keys from the shipped SSR overview", async () => {

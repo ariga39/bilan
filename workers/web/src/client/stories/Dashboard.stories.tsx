@@ -20,6 +20,7 @@ import {
   buildPopulatedHistory,
   buildPopulatedOverview,
   FIXTURE_MONTH,
+  FIXTURE_TIMEZONE,
 } from "./fixtures";
 import type { StorybookScenario } from "./scenarios";
 import { STORYBOOK_SCENARIOS, buildScenarioOverview } from "./scenarios";
@@ -45,9 +46,13 @@ function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewRe
 }
 
 function dailyFor(input: UsageInput, scenario: StorybookScenario): UsageDailyResponse {
-  return scenario === "empty"
-    ? buildEmptyDaily(input.timezone, input.month)
-    : buildPopulatedDaily(input.timezone, input.month);
+  const daily =
+    scenario === "empty"
+      ? buildEmptyDaily(input.timezone, input.month)
+      : buildPopulatedDaily(input.timezone, input.month);
+  return scenario === "usage-sparse"
+    ? { ...daily, rows: daily.rows.filter((row) => row.is_partial) }
+    : daily;
 }
 
 function pending<T>(): Promise<T> {
@@ -83,7 +88,14 @@ function createDataSource(scenario: StorybookScenario): DashboardDataSource {
   };
 }
 
-function StoryRouter({ scenario }: { scenario: StorybookScenario }) {
+interface StoryArgs {
+  scenario: StorybookScenario;
+  view?: "overview" | "usage";
+  timezone?: string;
+  month?: string;
+}
+
+function StoryRouter({ scenario, view, timezone, month }: StoryArgs) {
   const queryClient = useMemo(
     () =>
       new QueryClient({
@@ -99,12 +111,16 @@ function StoryRouter({ scenario }: { scenario: StorybookScenario }) {
         routeTree,
         context: { queryClient, dataSource: createDataSource(scenario) },
         history: createMemoryHistory({
-          initialEntries: [`/?view=overview&tz=UTC&month=${FIXTURE_MONTH}`],
+          initialEntries: [
+            `/?view=${view ?? "overview"}&tz=${encodeURIComponent(
+              timezone ?? FIXTURE_TIMEZONE,
+            )}&month=${month ?? FIXTURE_MONTH}`,
+          ],
         }),
         defaultPreload: "intent",
         defaultPreloadStaleTime: 0,
       }),
-    [queryClient, scenario],
+    [month, queryClient, scenario, timezone, view],
   );
 
   if (scenario === "loading") {
@@ -127,11 +143,15 @@ const meta = {
       control: "select",
       options: STORYBOOK_SCENARIOS,
     },
+    view: {
+      control: "select",
+      options: ["overview", "usage"],
+    },
   },
-  render: (args: { scenario: StorybookScenario }) => (
-    <StoryRouter key={args.scenario} scenario={args.scenario} />
+  render: (args: StoryArgs) => (
+    <StoryRouter key={`${args.scenario}-${args.view}-${args.timezone}-${args.month}`} {...args} />
   ),
-} satisfies Meta<{ scenario: StorybookScenario }>;
+} satisfies Meta<StoryArgs>;
 
 export default meta;
 
@@ -156,4 +176,25 @@ export const MissingReset: Story = {
 export const FundedProvider: Story = {
   name: "Funded provider",
   args: { scenario: "funded-provider" },
+};
+export const Usage: Story = {
+  name: "Usage (populated)",
+  args: { scenario: "populated", view: "usage" },
+};
+export const UsageMobile: Story = {
+  name: "Usage (mobile)",
+  args: { scenario: "populated", view: "usage" },
+  globals: { viewport: { value: "mobile" } },
+};
+export const UsageSparse: Story = {
+  name: "Usage (sparse partial and unknown coverage)",
+  args: { scenario: "usage-sparse", view: "usage" },
+};
+export const UsageEmptyMonth: Story = {
+  name: "Usage (empty historical month)",
+  args: { scenario: "populated", view: "usage", month: "2026-10" },
+};
+export const UsageKolkata: Story = {
+  name: "Usage (Asia/Kolkata approximation)",
+  args: { scenario: "populated", view: "usage", timezone: "Asia/Kolkata" },
 };

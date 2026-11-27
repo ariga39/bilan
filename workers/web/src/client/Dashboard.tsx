@@ -154,6 +154,8 @@ export function Dashboard({
   historyLoading = false,
   historyError = null,
   refreshError = null,
+  dailyLoading = false,
+  dailyError = null,
   onNavigate,
   onRefresh,
   refreshing = false,
@@ -165,6 +167,8 @@ export function Dashboard({
   historyLoading?: boolean;
   historyError?: string | null;
   refreshError?: string | null;
+  dailyLoading?: boolean;
+  dailyError?: string | null;
   onNavigate: (search: DashboardSearch) => void;
   onRefresh: () => void;
   refreshing?: boolean;
@@ -285,29 +289,25 @@ export function Dashboard({
             />
           </>
         ) : (
-          <section>
-            <SectionHeading
-              icon={Activity}
-              title="Token usage"
-              description="Codex machines and OpenCode Go identities, with monthly and daily coverage."
-            />
-            <UsageSection
-              usage={
-                overview.usage.timezone === search.tz && overview.usage.month === search.month
-                  ? overview.usage
-                  : null
-              }
-              daily={selectedDaily}
-              timezone={search.tz}
-              month={search.month}
-              onTimezoneChange={(tz) => {
-                onNavigate({ ...search, tz });
-              }}
-              onMonthChange={(month) => {
-                onNavigate({ ...search, month });
-              }}
-            />
-          </section>
+          <UsageSection
+            usage={
+              overview.usage.timezone === search.tz && overview.usage.month === search.month
+                ? overview.usage
+                : null
+            }
+            daily={selectedDaily}
+            timezone={search.tz}
+            month={search.month}
+            generatedAt={overview.generated_at}
+            dailyLoading={dailyLoading}
+            dailyError={dailyError}
+            onTimezoneChange={(tz) => {
+              onNavigate({ ...search, tz });
+            }}
+            onMonthChange={(month) => {
+              onNavigate({ ...search, month });
+            }}
+          />
         )}
 
         {overview.producers.length === 0 && overview.balances.length === 0 ? (
