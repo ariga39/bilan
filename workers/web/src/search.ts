@@ -6,13 +6,16 @@ import {
 } from "@bilan/shared";
 import { z } from "zod";
 
-export const DASHBOARD_VIEWS = ["overview", "usage"] as const;
-export type DashboardView = (typeof DASHBOARD_VIEWS)[number];
+export type DashboardView = "overview" | "usage";
 
 export interface DashboardSearch {
-  view: DashboardView;
   tz: string;
   month: string;
+}
+
+/** The overview route keeps `view` only to resolve legacy `/?view=usage` links. */
+export interface OverviewSearch extends DashboardSearch {
+  view?: "usage";
 }
 
 const rawSearchSchema = z.object({
@@ -21,22 +24,31 @@ const rawSearchSchema = z.object({
   month: z.string().optional(),
 });
 
-export function validateDashboardSearch(search: unknown): DashboardSearch {
-  const raw = rawSearchSchema.parse(search);
+type RawSearch = z.infer<typeof rawSearchSchema>;
+
+function normalizeSearch(raw: RawSearch): DashboardSearch {
   const tz = raw.tz !== undefined && isValidTimeZone(raw.tz) ? raw.tz : DEFAULT_TIMEZONE;
   const month =
     raw.month !== undefined && isValidMonth(raw.month)
       ? raw.month
       : currentMonthInTimeZone(new Date(), tz);
-  const view = raw.view === "usage" ? "usage" : "overview";
-  return { view, tz, month };
+  return { tz, month };
 }
 
-export function dashboardHref(search: DashboardSearch): string {
-  const query = new URLSearchParams({
-    view: search.view,
-    tz: search.tz,
-    month: search.month,
-  });
-  return `/?${query.toString()}`;
+export function validateDashboardSearch(search: unknown): DashboardSearch {
+  return normalizeSearch(rawSearchSchema.parse(search));
+}
+
+export function validateOverviewSearch(search: unknown): OverviewSearch {
+  const raw = rawSearchSchema.parse(search);
+  const normalized = normalizeSearch(raw);
+  return raw.view === "usage" ? { ...normalized, view: "usage" } : normalized;
+}
+
+function searchString(search: DashboardSearch): string {
+  return new URLSearchParams({ tz: search.tz, month: search.month }).toString();
+}
+
+export function usageHref(search: DashboardSearch): string {
+  return `/usage?${searchString(search)}`;
 }

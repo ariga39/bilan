@@ -420,17 +420,20 @@ describe("Token usage dashboard section", () => {
     expect(screen.queryByText("Usage could not be loaded")).toBeNull();
   });
 
-  it("links the overview usage entry to the selected usage period", () => {
+  it("links the overview usage entry to the selected usage route", () => {
+    const onOpenUsage = vi.fn();
     render(
       <UsageEntry
         overview={buildPopulatedOverview("UTC", "2026-11")}
-        navigation={{ view: "overview", tz: "UTC", month: "2026-11" }}
-        onNavigate={() => undefined}
+        navigation={{ tz: "UTC", month: "2026-11" }}
+        onOpenUsage={onOpenUsage}
       />,
     );
 
     const link = screen.getByRole("link", { name: /Open usage/u });
-    expect(link.getAttribute("href")).toBe("/?view=usage&tz=UTC&month=2026-11");
+    expect(link.getAttribute("href")).toBe("/usage?tz=UTC&month=2026-11");
+    fireEvent.click(link);
+    expect(onOpenUsage).toHaveBeenCalled();
     expect(screen.getByText(/This month · November 2026/u)).toBeTruthy();
     expect(screen.getByText(/Today 2026-11-27/u)).toBeTruthy();
   });

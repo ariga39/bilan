@@ -10,7 +10,7 @@ import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/rea
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useMemo } from "react";
 
-import { DashboardLoading } from "@/Dashboard";
+import { DashboardPending } from "@/components/dashboard-shell";
 
 import {
   buildEmptyDaily,
@@ -32,7 +32,11 @@ function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewRe
     scenario === "empty"
       ? buildEmptyOverview(input.timezone, input.month)
       : buildPopulatedOverview(input.timezone, input.month);
-  const overview = buildScenarioOverview(base, scenario);
+  return buildScenarioOverview(base, scenario);
+}
+
+/** Storybook data sources stand in for the server functions, which own the visibility boundary. */
+function visibleQuotas(overview: OverviewResponse): OverviewResponse {
   return {
     ...overview,
     quotas: {
@@ -81,7 +85,7 @@ function createDataSource(scenario: StorybookScenario): DashboardDataSource {
     };
   }
   return {
-    overview: async (input) => overviewFor(input, scenario),
+    overview: async (input) => visibleQuotas(overviewFor(input, scenario)),
     daily: async (input) => dailyFor(input, scenario),
     history: async (provider: BalanceProvider) =>
       scenario === "empty" ? buildEmptyHistory(provider) : buildPopulatedHistory(provider),
@@ -112,9 +116,13 @@ function StoryRouter({ scenario, view, timezone, month }: StoryArgs) {
         context: { queryClient, dataSource: createDataSource(scenario) },
         history: createMemoryHistory({
           initialEntries: [
-            `/?view=${view ?? "overview"}&tz=${encodeURIComponent(
-              timezone ?? FIXTURE_TIMEZONE,
-            )}&month=${month ?? FIXTURE_MONTH}`,
+            view === "usage"
+              ? `/usage?tz=${encodeURIComponent(timezone ?? FIXTURE_TIMEZONE)}&month=${
+                  month ?? FIXTURE_MONTH
+                }`
+              : `/?tz=${encodeURIComponent(timezone ?? FIXTURE_TIMEZONE)}&month=${
+                  month ?? FIXTURE_MONTH
+                }`,
           ],
         }),
         defaultPreload: "intent",
@@ -124,7 +132,7 @@ function StoryRouter({ scenario, view, timezone, month }: StoryArgs) {
   );
 
   if (scenario === "loading") {
-    return <DashboardLoading />;
+    return <DashboardPending label="Loading overview…" />;
   }
   return (
     <QueryClientProvider client={queryClient}>

@@ -1,4 +1,5 @@
 import type { QuotaSubject } from "@bilan/shared";
+import { filterVisibleQuotaSubjects } from "@bilan/shared";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -184,9 +185,13 @@ describe("QuotaOverview display", () => {
     expect(screen.getByText("80%")).toBeTruthy();
   });
 
-  it("keeps the seven-day visibility boundary and surfaces stale and failure warnings", () => {
+  it("renders server-visible subjects while surfacing stale and failure warnings", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
-    render(<QuotaOverview quota={overview.quotas} />);
+    const visibleQuota = {
+      ...overview.quotas,
+      subjects: filterVisibleQuotaSubjects(overview.quotas.subjects, new Date(FIXED_NOW)),
+    };
+    render(<QuotaOverview quota={visibleQuota} />);
 
     expect(screen.getByText("key-fp-2")).toBeTruthy();
     expect(screen.getByText("key-fp-3")).toBeTruthy();

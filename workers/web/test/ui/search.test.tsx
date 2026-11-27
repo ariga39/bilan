@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { dashboardHref, validateDashboardSearch } from "../../src/search";
+import { usageHref, validateDashboardSearch, validateOverviewSearch } from "../../src/search";
 import { FIXED_NOW } from "@/stories/fixtures";
 
 beforeEach(() => {
@@ -13,20 +13,34 @@ afterEach(() => {
 });
 
 describe("dashboard search contract", () => {
-  it("keeps linkable view, timezone and month values", () => {
-    expect(
-      validateDashboardSearch({ view: "usage", tz: "Asia/Kolkata", month: "2026-10" }),
-    ).toEqual({ view: "usage", tz: "Asia/Kolkata", month: "2026-10" });
-    expect(dashboardHref({ view: "usage", tz: "Asia/Kolkata", month: "2026-10" })).toBe(
-      "/?view=usage&tz=Asia%2FKolkata&month=2026-10",
+  it("keeps linkable timezone and month values on each route", () => {
+    expect(validateDashboardSearch({ tz: "Asia/Kolkata", month: "2026-10" })).toEqual({
+      tz: "Asia/Kolkata",
+      month: "2026-10",
+    });
+    expect(usageHref({ tz: "Asia/Kolkata", month: "2026-10" })).toBe(
+      "/usage?tz=Asia%2FKolkata&month=2026-10",
     );
   });
 
-  it("normalizes invalid and missing values to the default view", () => {
-    expect(validateDashboardSearch({ view: "other", tz: "Not/AZone", month: "2026-13" })).toEqual({
-      view: "overview",
+  it("normalizes invalid and missing values to the defaults", () => {
+    expect(validateDashboardSearch({ tz: "Not/AZone", month: "2026-13" })).toEqual({
       tz: "Asia/Shanghai",
       month: "2026-11",
+    });
+  });
+
+  it("retains only the legacy usage marker on the overview route", () => {
+    expect(validateOverviewSearch({ view: "usage", tz: "Asia/Kolkata", month: "2026-10" })).toEqual(
+      { view: "usage", tz: "Asia/Kolkata", month: "2026-10" },
+    );
+    expect(validateOverviewSearch({ view: "other", tz: "UTC", month: "2026-10" })).toEqual({
+      tz: "UTC",
+      month: "2026-10",
+    });
+    expect(validateDashboardSearch({ view: "usage", tz: "UTC", month: "2026-10" })).toEqual({
+      tz: "UTC",
+      month: "2026-10",
     });
   });
 });

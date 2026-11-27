@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 import { monthLabel, sourceLabel, usagePeriod } from "@/lib/usage";
 import type { DashboardSearch } from "../../search";
-import { dashboardHref } from "../../search";
+import { usageHref } from "../../search";
 
 interface SourceRowSummary {
   key: string;
@@ -61,15 +61,14 @@ function formatCoverageTag(counted: number, total: number): string {
 export function UsageEntry({
   overview,
   navigation,
-  onNavigate,
+  onOpenUsage,
 }: {
   overview: OverviewResponse;
   navigation: DashboardSearch;
-  onNavigate: (navigation: DashboardSearch) => void;
+  onOpenUsage: () => void;
 }) {
   const usage = overview.usage;
   const period = usagePeriod(usage.month, usage.timezone, overview.generated_at);
-  const next = { ...navigation, view: "usage" as const };
   const summaries = summarizeBySource(overview);
 
   return (
@@ -99,10 +98,10 @@ export function UsageEntry({
             className="rounded-full border-[#f5d08a]/35 bg-[#241c47] text-[#fef3c7] hover:bg-[#312661]"
           >
             <a
-              href={dashboardHref(next)}
+              href={usageHref(navigation)}
               onClick={(event) => {
                 event.preventDefault();
-                onNavigate(next);
+                onOpenUsage();
               }}
             >
               Open usage

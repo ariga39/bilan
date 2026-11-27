@@ -70,6 +70,7 @@ function baseUrl(worker: DevWorker): string {
 interface HttpResponse {
   status: number;
   body: string;
+  location: string | null;
 }
 
 function httpCall(
@@ -93,6 +94,7 @@ function httpCall(
           resolve({
             status: response.statusCode ?? 0,
             body: Buffer.concat(chunks).toString("utf8"),
+            location: response.headers.location ?? null,
           });
         });
       },
@@ -579,7 +581,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       throw new Error("daily usage response did not match the shared schema");
     }
 
-    const usagePageResponse = await httpCall(`${webUrl}/?view=usage&tz=UTC&month=${usageMonth}`);
+    const usagePageResponse = await httpCall(`${webUrl}/usage?tz=UTC&month=${usageMonth}`);
     expect(usagePageResponse.status, usagePageResponse.body).toBe(200);
     expect(usagePageResponse.body).toContain("Token usage");
     expect(usagePageResponse.body).toContain("Requests");
@@ -588,6 +590,13 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(usagePageResponse.body).toContain("machine-a");
     expect(usagePageResponse.body).toContain("laptop-key");
     expect(usagePageResponse.body).not.toContain("Something went wrong");
+
+    const legacyUsagePage = await httpCall(`${webUrl}/?view=usage&tz=UTC&month=${usageMonth}`);
+    expect([302, 307]).toContain(legacyUsagePage.status);
+    const legacyLocation = new URL(legacyUsagePage.location ?? "", webUrl);
+    expect(legacyLocation.pathname).toBe("/usage");
+    expect(legacyLocation.searchParams.get("tz")).toBe("UTC");
+    expect(legacyLocation.searchParams.get("month")).toBe(usageMonth);
 
     expect(overview.usage.rows).toEqual(
       expect.arrayContaining([

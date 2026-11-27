@@ -476,7 +476,7 @@ Keep v1 focused strictly on **seeing real, accurate data clearly** (zero manual-
   - Balance time-series for sparklines/tables.
 
 ### Minimal v1 Page Sections
-0. **TanStack Start Overview / Usage navigation**: file routes with validated URL search (`view`, `tz`, `month`), TanStack Router back/forward, and TanStack Query route-loader prefetch with SSR dehydration/hydration. No custom bootstrap, history layer or manual query cache. The first document is server-rendered with real data; 30-day history and charts load secondarily.
+0. **TanStack Start Overview / Usage routes**: dedicated file routes `/` (overview) and `/usage` (token usage) with validated URL search (`tz`, `month`), a shared layout shell for navigation/loading/error chrome, TanStack Router back/forward, and TanStack Query route-loader prefetch with SSR dehydration/hydration. Legacy `/?view=usage&tz=…&month=…` links redirect to `/usage` with the same search. No custom bootstrap, history layer or manual query cache. The first document is server-rendered with real data; 30-day history and charts load secondarily.
 1. **Overview quotas first**: compact Codex, AGY and recently observed OpenCode Go summaries with the limiting reading, reset time and sample age visible; expandable details retain every window and status. OpenCode Go keys whose latest trustworthy observation is seven days old or older are omitted from the dashboard display (the read API still returns them), while a newer failed/empty attempt restores visibility.
 2. **Health Strip**: Producer liveness (`last_heartbeat_at` / errors) clearly distinguished from each data source's own `sampled_at` / `bucket_start` freshness. Healthy collectors collapse to one line.
 3. **Balances & history**:
