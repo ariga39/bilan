@@ -612,29 +612,32 @@ const DAILY_ROWS: Array<DailyUsageRow> = [
 ];
 
 function monthlyUsage(timezone: string, month: string): MonthlyUsage {
+  const hasRows = month === FIXTURE_MONTH;
   return {
     timezone,
     month,
     bucket_attribution: "exact",
     bucket_attribution_note: null,
-    latest_bucket_start: "2026-11-27T11:00:00Z",
-    data_age_seconds: 3600,
+    latest_bucket_start: hasRows ? "2026-11-27T11:00:00Z" : null,
+    data_age_seconds: hasRows ? 3600 : null,
     is_stale: false,
-    source_freshness: [
-      {
-        source: "codex",
-        latest_bucket_start: "2026-11-27T11:00:00Z",
-        data_age_seconds: 3600,
-        is_stale: false,
-      },
-      {
-        source: "opencode",
-        latest_bucket_start: "2026-11-27T10:00:00Z",
-        data_age_seconds: 7200,
-        is_stale: true,
-      },
-    ],
-    rows: MONTHLY_ROWS,
+    source_freshness: hasRows
+      ? [
+          {
+            source: "codex",
+            latest_bucket_start: "2026-11-27T11:00:00Z",
+            data_age_seconds: 3600,
+            is_stale: false,
+          },
+          {
+            source: "opencode",
+            latest_bucket_start: "2026-11-27T10:00:00Z",
+            data_age_seconds: 7200,
+            is_stale: true,
+          },
+        ]
+      : [],
+    rows: hasRows ? MONTHLY_ROWS : [],
   };
 }
 
@@ -674,7 +677,7 @@ export function buildPopulatedDaily(timezone: string, month: string): UsageDaily
     month,
     bucket_attribution: "exact",
     bucket_attribution_note: null,
-    rows: DAILY_ROWS,
+    rows: month === FIXTURE_MONTH ? DAILY_ROWS : [],
   };
 }
 

@@ -2,8 +2,7 @@ import { install } from "@sinonjs/fake-timers";
 import type { Preview } from "@storybook/react-vite";
 
 import "../src/client/index.css";
-import { installScenarioFetch } from "../src/client/stories/fetch-mock";
-import type { StorybookScenario } from "../src/client/stories/fetch-mock";
+import { installScenarioFetch, resolveStorybookScenario } from "../src/client/stories/fetch-mock";
 
 // The dashboard derives its default month and renders relative sample ages, so
 // pin Date for every story. Timers stay real for Storybook and play functions.
@@ -33,11 +32,7 @@ const preview: Preview = {
   decorators: [
     (Story, context) => {
       const scenarioValue: unknown = context.parameters.bilanScenario;
-      const scenario: StorybookScenario =
-        scenarioValue === "loading" || scenarioValue === "empty" || scenarioValue === "failure"
-          ? scenarioValue
-          : "populated";
-      installScenarioFetch(scenario);
+      installScenarioFetch(resolveStorybookScenario(scenarioValue));
       return <Story />;
     },
   ],

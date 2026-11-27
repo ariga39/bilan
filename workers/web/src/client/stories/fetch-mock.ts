@@ -21,7 +21,27 @@ import {
   FIXTURE_TIMEZONE,
 } from "./fixtures";
 
-export type StorybookScenario = "populated" | "loading" | "empty" | "failure";
+export const STORYBOOK_SCENARIOS = ["populated", "loading", "empty", "failure"] as const;
+export type StorybookScenario = (typeof STORYBOOK_SCENARIOS)[number];
+
+/**
+ * Resolve a story parameter against the shared scenario vocabulary. Unknown
+ * values throw instead of silently falling back, so a typo is visible in the
+ * Storybook error overlay.
+ */
+export function resolveStorybookScenario(value: unknown): StorybookScenario {
+  if (value === undefined) {
+    return "populated";
+  }
+  const scenario = STORYBOOK_SCENARIOS.find((candidate) => candidate === value);
+  if (scenario) {
+    return scenario;
+  }
+  throw new Error(
+    `Unknown Bilan Storybook scenario ${JSON.stringify(value)}. ` +
+      `Expected one of: ${STORYBOOK_SCENARIOS.join(", ")}.`,
+  );
+}
 
 const realFetch = globalThis.fetch.bind(globalThis);
 

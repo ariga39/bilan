@@ -53,14 +53,20 @@ are synthetic and deterministic. They use the fixed clock
 `2026-11-27T12:00:00Z`, synthetic accounts such as `primary`, `machine-a`, and
 `key-fp-1`, and no production identifiers. The set intentionally includes
 current samples, a delayed DeepSeek balance, a stale OpenCode Go key, a failed
-producer, and a future-clock anomaly.
+producer, and a future-clock anomaly. Usage rows only exist for November 2026:
+selecting another month returns empty usage rows (and empty freshness metadata)
+for both the overview and daily responses, while producers, balances, and live
+quota windows stay populated.
 
 ## Add a scenario
 
 1. Add a builder to `fixtures.ts` (or extend an existing one) that returns one
    of the schemas from `@bilan/shared/schemas`.
-2. If the scenario needs a new fetch behavior, add it to
-   `workers/web/src/client/stories/fetch-mock.ts` and extend `StorybookScenario`.
+2. If the scenario needs a new fetch behavior, add its name to
+   `STORYBOOK_SCENARIOS` and handle it in `installScenarioFetch` / the response
+   builders in `workers/web/src/client/stories/fetch-mock.ts`. Storybook and the
+   mock share that list; the preview throws a visible error for any value that
+   is not in it instead of silently showing the populated fixtures.
 3. Export a story in `Dashboard.stories.tsx`:
 
    ```tsx
@@ -71,6 +77,8 @@ producer, and a future-clock anomaly.
 
 4. Read query parameters from the request URL when a fixture should respond to
    the timezone or month controls, rather than hard-coding one selection.
+   Omitted scenario parameters default to `populated`; misspelled or unsupported
+   values fail visibly.
 
 Storybook resolves the scenario through `.storybook/preview.tsx`, installs the
 mock before the story renders, and pins `Date` so relative ages and the default
