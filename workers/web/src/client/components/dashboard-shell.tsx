@@ -1,6 +1,6 @@
 import { useQueryClient, useQueryErrorResetBoundary } from "@tanstack/react-query";
 import { Link, useRouter } from "@tanstack/react-router";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -62,9 +62,7 @@ export function DashboardHeader({
           >
             bilan
           </h1>
-          <span aria-hidden="true" className="grimoire-twinkle text-sm text-[#fcd34d]">
-            ✦
-          </span>
+          <Sparkles className="grimoire-twinkle size-4 text-[#fcd34d]" aria-hidden="true" />
           <nav aria-label="Dashboard views" className="flex items-center gap-1.5">
             <NavLink to="/" active={view === "overview"} label="Overview" search={search} />
             <NavLink to="/usage" active={view === "usage"} label="Usage" search={search} />
