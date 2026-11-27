@@ -20,7 +20,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAge, formatDateTime, formatNumber } from "@/lib/format";
-import { monthLabel, monthRangeLabel, sourceLabel, usagePeriod } from "@/lib/usage";
+import {
+  monthLabel,
+  monthRangeLabel,
+  sourceLabel,
+  usagePeriod,
+  buildDailyTrendPoints,
+} from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 const TOKEN_COLUMNS: ReadonlyArray<{
@@ -415,11 +421,9 @@ function DailyDetailTable({ group }: { group: SummaryGroup }) {
   );
 }
 
-function DailyTrendCard({ group }: { group: SummaryGroup }) {
-  const points = group.dailyRows.map((row) => ({
-    date: row.date,
-    requests: row.unit_count,
-  }));
+function DailyTrendCard({ group, month }: { group: SummaryGroup; month: string }) {
+  const points = buildDailyTrendPoints(group.dailyRows, month);
+  const days = points.length;
   return (
     <div className="min-w-0 rounded-lg border p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -446,7 +450,10 @@ function DailyTrendCard({ group }: { group: SummaryGroup }) {
           <LineChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 3" />
             <XAxis
-              dataKey="date"
+              dataKey="day"
+              type="number"
+              domain={[1, days]}
+              allowDecimals={false}
               tickLine={false}
               axisLine={false}
               minTickGap={20}
@@ -460,7 +467,7 @@ function DailyTrendCard({ group }: { group: SummaryGroup }) {
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             />
             <Tooltip
-              labelFormatter={String}
+              labelFormatter={(value) => `${month}-${String(Number(value)).padStart(2, "0")}`}
               formatter={(value) => [formatNumber(Number(value)), "Requests"]}
               contentStyle={{
                 borderRadius: "var(--radius-md)",
@@ -469,13 +476,14 @@ function DailyTrendCard({ group }: { group: SummaryGroup }) {
               }}
             />
             <Line
-              type="monotone"
+              type="linear"
               dataKey="requests"
               name="Requests"
               stroke="var(--chart-1)"
               strokeWidth={2}
-              dot={points.length === 1 ? { r: 3 } : false}
+              dot={{ r: 2 }}
               activeDot={{ r: 4 }}
+              connectNulls={false}
               isAnimationActive={false}
             />
           </LineChart>
@@ -782,7 +790,8 @@ export function UsageSection({
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="text-sm font-medium">Daily trend</h3>
                 <span className="text-xs text-muted-foreground">
-                  {periodName} · {monthLabel(month)} · {monthRangeLabel(month, timezone)}
+                  {periodName} · {monthLabel(month)} · {monthRangeLabel(month, timezone)} ·{" "}
+                  {timezone}
                 </span>
               </div>
               {dailyUnavailable ? (
@@ -794,7 +803,7 @@ export function UsageSection({
               ) : allDailyGroups.length > 0 ? (
                 <div className="grid gap-3 lg:grid-cols-2">
                   {allDailyGroups.map((group) => (
-                    <DailyTrendCard key={group.key} group={group} />
+                    <DailyTrendCard key={group.key} group={group} month={month} />
                   ))}
                 </div>
               ) : (
