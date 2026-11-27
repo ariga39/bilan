@@ -7,18 +7,13 @@ import { UsageSection } from "@/components/usage-section";
 
 interface CapturedXAxisProps {
   dataKey?: unknown;
-  type?: unknown;
-  domain?: unknown;
-  allowDecimals?: unknown;
 }
 
-interface CapturedLineProps {
+interface CapturedBarProps {
   dataKey?: unknown;
-  type?: unknown;
-  connectNulls?: unknown;
 }
 
-interface CapturedLineChartProps {
+interface CapturedBarChartProps {
   data?: Array<TrendPoint> | undefined;
 }
 
@@ -30,20 +25,14 @@ interface TrendPoint {
 
 const captured = vi.hoisted(() => ({
   xAxisProps: null as CapturedXAxisProps | null,
-  lineProps: null as CapturedLineProps | null,
-  lineChartProps: null as CapturedLineChartProps | null,
+  barProps: null as CapturedBarProps | null,
+  barChartProps: null as CapturedBarChartProps | null,
 }));
 
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  LineChart: ({
-    data,
-    children,
-  }: {
-    data?: Array<TrendPoint> | undefined;
-    children: ReactNode;
-  }) => {
-    captured.lineChartProps = { data };
+  BarChart: ({ data, children }: { data?: Array<TrendPoint> | undefined; children: ReactNode }) => {
+    captured.barChartProps = { data };
     return <div>{children}</div>;
   },
   CartesianGrid: () => null,
@@ -53,8 +42,8 @@ vi.mock("recharts", () => ({
   },
   YAxis: () => null,
   Tooltip: () => null,
-  Line: (props: CapturedLineProps) => {
-    captured.lineProps = props;
+  Bar: (props: CapturedBarProps) => {
+    captured.barProps = props;
     return null;
   },
 }));
@@ -118,7 +107,7 @@ function dailyUsage(
   };
 }
 
-describe("daily usage trend calendar axis", () => {
+describe("daily usage bar chart calendar axis", () => {
   it("keeps every calendar day on the axis with null gaps and observed zeros intact", () => {
     render(
       <UsageSection
@@ -136,22 +125,13 @@ describe("daily usage trend calendar axis", () => {
       />,
     );
 
-    expect(captured.xAxisProps).toMatchObject({
-      dataKey: "day",
-      type: "number",
-      domain: [1, 30],
-      allowDecimals: false,
-    });
-    expect(captured.lineProps).toMatchObject({
-      dataKey: "requests",
-      type: "linear",
-      connectNulls: false,
-    });
+    expect(captured.xAxisProps).toMatchObject({ dataKey: "day" });
+    expect(captured.barProps).toMatchObject({ dataKey: "requests" });
 
-    const points = captured.lineChartProps?.data;
+    const points = captured.barChartProps?.data;
     expect(points).toBeDefined();
     if (!points) {
-      throw new Error("daily trend chart data was not captured");
+      throw new Error("daily bar chart data was not captured");
     }
     expect(points).toHaveLength(30);
     expect(points.filter((point) => point.requests !== null)).toHaveLength(3);
@@ -175,17 +155,10 @@ describe("daily usage trend calendar axis", () => {
       />,
     );
 
-    expect(captured.xAxisProps).toMatchObject({
-      dataKey: "day",
-      type: "number",
-      domain: [1, 28],
-      allowDecimals: false,
-    });
-
-    const points = captured.lineChartProps?.data;
+    const points = captured.barChartProps?.data;
     expect(points).toBeDefined();
     if (!points) {
-      throw new Error("daily trend chart data was not captured");
+      throw new Error("daily bar chart data was not captured");
     }
     expect(points).toHaveLength(28);
     expect(points.filter((point) => point.requests !== null)).toHaveLength(1);

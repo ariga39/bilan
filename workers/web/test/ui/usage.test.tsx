@@ -203,9 +203,7 @@ describe("Token usage dashboard section", () => {
     expect(screen.getByText("Token usage")).toBeTruthy();
     expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("Asia/Shanghai");
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe("2026-11");
-    expect(
-      screen.getByText("Monthly breakdown by machine, identity, model and effort"),
-    ).toBeTruthy();
+    expect(screen.getByText("Breakdown")).toBeTruthy();
 
     const codexTable = screen.getByLabelText(
       "Monthly detail for Codex · debitmetre-audit-v1 · request",
@@ -219,11 +217,10 @@ describe("Token usage dashboard section", () => {
     expect(within(codexTable).getByText("machine-b")).toBeTruthy();
     expect(within(codexTable).getByText("gpt-5")).toBeTruthy();
     expect(within(codexTable).getByText("high")).toBeTruthy();
-    expect(within(codexTable).getAllByText("Machine").length).toBeGreaterThan(0);
+    expect(within(codexTable).getByText("Machine")).toBeTruthy();
     expect(within(openCodeTable).getByText("laptop-key")).toBeTruthy();
     expect(within(openCodeTable).getByText("deepseek-chat")).toBeTruthy();
-    expect(within(openCodeTable).getAllByText("Identity").length).toBeGreaterThan(0);
-    expect(within(codexTable).getAllByText("Unlabelled").length).toBeGreaterThan(0);
+    expect(within(openCodeTable).getByText("Identity")).toBeTruthy();
     expect(screen.getAllByText("OpenCode Go").length).toBeGreaterThan(0);
 
     // Freshness is scoped per source, so fresh Codex cannot hide delayed OpenCode Go.
@@ -232,20 +229,18 @@ describe("Token usage dashboard section", () => {
       within(screen.getByLabelText("OpenCode Go freshness")).getByText("Delayed"),
     ).toBeTruthy();
 
-    // NULL stays absent; an explicitly reported zero is shown as 0.
-    expect(within(codexTable).getAllByText("Not reported").length).toBeGreaterThan(0);
+    // NULL stays absent (— with Not reported label); explicit zero stays 0; coverage is quiet text.
+    expect(within(codexTable).getAllByLabelText("Not reported").length).toBeGreaterThan(0);
     expect(within(codexTable).getAllByText("0").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Partial").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("1 gap").length).toBeGreaterThan(0);
-    expect(screen.getByText("(2/3)")).toBeTruthy();
-    expect(screen.getAllByText("Complete").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Partial")).toBeNull();
+    expect(screen.getAllByText(/metered/u).length).toBeGreaterThan(0);
 
     expect(screen.getByText("Today · 2026-11-02")).toBeTruthy();
     const todaySummary = screen.getByLabelText("Today's usage summary");
     expect(within(todaySummary).getByText("5")).toBeTruthy();
     expect(screen.getAllByText("This month · November 2026").length).toBeGreaterThan(0);
 
-    expect(screen.getByText("Daily trend")).toBeTruthy();
+    expect(screen.getByText("Daily requests")).toBeTruthy();
     expect(
       screen.getByRole("img", {
         name: "Daily requests trend for Codex · debitmetre-audit-v1 · request",
@@ -254,10 +249,45 @@ describe("Token usage dashboard section", () => {
     expect(
       screen.getByLabelText("Daily exact values for Codex · debitmetre-audit-v1 · request"),
     ).toBeTruthy();
-    expect(screen.getAllByText("Exact daily values").length).toBeGreaterThan(0);
     expect(screen.getByText("2026-11-01")).toBeTruthy();
     expect(screen.getAllByText("2026-11-02").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("(4/5)").length).toBeGreaterThan(0);
+  });
+
+  it("formats large token totals compactly by default and switches to exact numbers on toggle", () => {
+    const bigUsage: MonthlyUsage = {
+      ...usage,
+      rows: [
+        {
+          ...usage.rows[0]!,
+          unit_count: 87_467,
+          input_tokens: 11_332_976_155,
+          input_counted: 86_212,
+          output_tokens: 20_763_309,
+          output_counted: 86_212,
+        },
+      ],
+    };
+    render(
+      <UsageSection
+        usage={bigUsage}
+        daily={daily}
+        timezone="Asia/Shanghai"
+        month="2026-11"
+        generatedAt={GENERATED_AT}
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+      />,
+    );
+
+    const monthSummary = screen.getByLabelText("This month usage summary");
+    expect(within(monthSummary).getByText("11.3B")).toBeTruthy();
+    expect(within(monthSummary).getByText("20.8M")).toBeTruthy();
+    expect(within(monthSummary).getByText("87.5K")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Exact" }));
+    expect(within(monthSummary).getByText("11,332,976,155")).toBeTruthy();
+    expect(within(monthSummary).getByText("20,763,309")).toBeTruthy();
+    expect(within(monthSummary).getByText("87,467")).toBeTruthy();
   });
 
   it("reports timezone and month changes to the dashboard", () => {

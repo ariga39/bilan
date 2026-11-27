@@ -6,26 +6,19 @@ import type {
   UsageDailyResponse,
   UsageTokenColumn,
 } from "@bilan/shared";
-import { BarChart3, CalendarDays, CheckCircle2, Clock3, TriangleAlert } from "lucide-react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { BarChart3, CalendarDays, Clock3, TriangleAlert } from "lucide-react";
+import { useState } from "react";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatAge, formatDateTime, formatNumber } from "@/lib/format";
+import { formatAge, formatCompactNumber, formatDateTime, formatNumber } from "@/lib/format";
 import {
+  buildDailyTrendPoints,
   monthLabel,
   monthRangeLabel,
   sourceLabel,
   usagePeriod,
-  buildDailyTrendPoints,
 } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -52,7 +45,9 @@ const TIMEZONES = [
 ];
 
 const SELECT_CLASS =
-  "h-9 rounded-md border bg-card px-2.5 text-sm shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "h-8 rounded-md border bg-card px-2 text-xs shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+type NumberMode = "compact" | "exact";
 
 interface TokenAggregate {
   value: number | null;
@@ -68,21 +63,17 @@ type CountedColumn =
   | "output_counted"
   | "reasoning_counted";
 
-interface Coverage {
-  isPartial: boolean;
-  gaps: number;
-  columns: Array<UsageTokenColumn>;
-}
-
 interface SummaryGroup {
   key: string;
   source: string;
   accountingBasis: string;
   unitKind: string;
   requests: number;
+  gaps: number;
   input: TokenAggregate;
+  cached: TokenAggregate;
   output: TokenAggregate;
-  coverage: Coverage;
+  reasoning: TokenAggregate;
   monthlyRows: Array<UsageBreakdownRow>;
   dailyRows: Array<DailyUsageRow>;
 }
@@ -94,10 +85,11 @@ function actorLabel(actorKind: string): string {
   if (actorKind === "machine") {
     return "Machine";
   }
-  if (actorKind === "") {
-    return "Actor";
-  }
-  return actorKind;
+  return actorKind || "Actor";
+}
+
+function formatMetric(value: number, mode: NumberMode): string {
+  return mode === "compact" ? formatCompactNumber(value) : formatNumber(value);
 }
 
 function aggregateToken<T extends UsageCounters>(
@@ -119,28 +111,6 @@ function aggregateToken<T extends UsageCounters>(
   return { value, counted: countedTotal, units };
 }
 
-function summarizeCoverage(
-  rows: ReadonlyArray<{
-    is_partial: boolean;
-    coverage_gaps: number;
-    partial_columns: Array<UsageTokenColumn>;
-  }>,
-): Coverage {
-  const columns = new Set<UsageTokenColumn>();
-  let gaps = 0;
-  for (const row of rows) {
-    gaps += row.coverage_gaps;
-    for (const column of row.partial_columns) {
-      columns.add(column);
-    }
-  }
-  return {
-    isPartial: gaps > 0 || columns.size > 0,
-    gaps,
-    columns: [...columns],
-  };
-}
-
 function summaryGroupKey(row: {
   source: string;
   accounting_basis: string;
@@ -154,15 +124,18 @@ function emptyGroup(row: {
   accounting_basis: string;
   unit_kind: string;
 }): SummaryGroup {
+  const zero: TokenAggregate = { value: null, counted: 0, units: 0 };
   return {
     key: summaryGroupKey(row),
     source: row.source,
     accountingBasis: row.accounting_basis,
     unitKind: row.unit_kind,
     requests: 0,
-    input: { value: null, counted: 0, units: 0 },
-    output: { value: null, counted: 0, units: 0 },
-    coverage: { isPartial: false, gaps: 0, columns: [] },
+    gaps: 0,
+    input: zero,
+    cached: zero,
+    output: zero,
+    reasoning: zero,
     monthlyRows: [],
     dailyRows: [],
   };
@@ -177,6 +150,18 @@ function sortGroups(groups: Array<SummaryGroup>): Array<SummaryGroup> {
   );
 }
 
+function populateGroupMetrics<T extends UsageCounters & { coverage_gaps: number }>(
+  group: SummaryGroup,
+  rows: ReadonlyArray<T>,
+): void {
+  group.requests = rows.reduce((total, row) => total + row.unit_count, 0);
+  group.gaps = rows.reduce((total, row) => total + row.coverage_gaps, 0);
+  group.input = aggregateToken(rows, "input_tokens", "input_counted");
+  group.cached = aggregateToken(rows, "cached_tokens", "cached_counted");
+  group.output = aggregateToken(rows, "output_tokens", "output_counted");
+  group.reasoning = aggregateToken(rows, "reasoning_tokens", "reasoning_counted");
+}
+
 function monthlyGroups(rows: Array<UsageBreakdownRow>): Array<SummaryGroup> {
   const groups = new Map<string, SummaryGroup>();
   for (const row of rows) {
@@ -186,10 +171,14 @@ function monthlyGroups(rows: Array<UsageBreakdownRow>): Array<SummaryGroup> {
     groups.set(key, group);
   }
   for (const group of groups.values()) {
-    group.requests = group.monthlyRows.reduce((total, row) => total + row.unit_count, 0);
-    group.input = aggregateToken(group.monthlyRows, "input_tokens", "input_counted");
-    group.output = aggregateToken(group.monthlyRows, "output_tokens", "output_counted");
-    group.coverage = summarizeCoverage(group.monthlyRows);
+    group.monthlyRows.sort(
+      (left, right) =>
+        (right.input_tokens ?? -1) - (left.input_tokens ?? -1) ||
+        right.unit_count - left.unit_count ||
+        left.actor_id.localeCompare(right.actor_id) ||
+        left.model.localeCompare(right.model),
+    );
+    populateGroupMetrics(group, group.monthlyRows);
   }
   return sortGroups([...groups.values()]);
 }
@@ -204,63 +193,45 @@ function dailyGroups(rows: Array<DailyUsageRow>): Array<SummaryGroup> {
   }
   for (const group of groups.values()) {
     group.dailyRows.sort((left, right) => left.date.localeCompare(right.date));
-    group.requests = group.dailyRows.reduce((total, row) => total + row.unit_count, 0);
-    group.input = aggregateToken(group.dailyRows, "input_tokens", "input_counted");
-    group.output = aggregateToken(group.dailyRows, "output_tokens", "output_counted");
-    group.coverage = summarizeCoverage(group.dailyRows);
+    populateGroupMetrics(group, group.dailyRows);
   }
   return sortGroups([...groups.values()]);
 }
 
-function TokenValue({ aggregate }: { aggregate: TokenAggregate }) {
-  if (aggregate.value === null) {
-    return <span className="text-xs text-muted-foreground">Not reported</span>;
+function meteredCaption(group: Pick<SummaryGroup, "requests" | "gaps" | "input">): {
+  text: string;
+  title: string;
+} | null {
+  if (group.requests === 0) {
+    return null;
   }
-  const partial = aggregate.counted < aggregate.units;
-  return (
-    <span className={cn("tabular-nums", partial && "text-amber-700")}>
-      {formatNumber(aggregate.value)}
-      {partial ? (
-        <span className="ml-1 text-[10px] font-normal text-muted-foreground">
-          ({aggregate.counted}/{aggregate.units})
-        </span>
-      ) : null}
-    </span>
-  );
+  const counted = group.input.counted;
+  if (counted >= group.requests && group.gaps === 0) {
+    return null;
+  }
+  const pct = Math.round((counted / group.requests) * 1000) / 10;
+  return {
+    text: `${pct}% metered`,
+    title: `${formatNumber(counted)} of ${formatNumber(group.requests)} requests reported tokens (${formatNumber(group.gaps)} uncounted)`,
+  };
 }
 
-function CoverageBadge({ coverage }: { coverage: Coverage }) {
-  if (!coverage.isPartial) {
+function TokenCell({ aggregate, mode }: { aggregate: TokenAggregate; mode: NumberMode }) {
+  if (aggregate.value === null) {
     return (
-      <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">
-        <CheckCircle2 />
-        Complete
-      </Badge>
+      <span className="text-muted-foreground" title="Not reported" aria-label="Not reported">
+        —
+      </span>
     );
   }
-  const detail =
-    coverage.gaps > 0
-      ? `${coverage.gaps} gap${coverage.gaps === 1 ? "" : "s"}`
-      : `${coverage.columns.length} column${coverage.columns.length === 1 ? "" : "s"}`;
+  const titleParts = [formatNumber(aggregate.value)];
+  if (aggregate.counted < aggregate.units) {
+    titleParts.push(`${formatNumber(aggregate.counted)}/${formatNumber(aggregate.units)} requests`);
+  }
   return (
-    <div className="flex flex-col items-start gap-1">
-      <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-        <TriangleAlert />
-        Partial
-      </Badge>
-      <span className="text-[10px] text-muted-foreground">{detail}</span>
-    </div>
-  );
-}
-
-function GroupHeading({ group }: { group: SummaryGroup }) {
-  return (
-    <div className="min-w-0">
-      <p className="font-medium">{sourceLabel(group.source)}</p>
-      <p className="truncate text-xs text-muted-foreground">
-        {group.accountingBasis} · {group.unitKind}
-      </p>
-    </div>
+    <span className="tabular-nums" title={titleParts.join(" · ")}>
+      {formatMetric(aggregate.value, mode)}
+    </span>
   );
 }
 
@@ -274,17 +245,16 @@ function SourceFreshness({ usage }: { usage: MonthlyUsage }) {
         <span
           key={source.source}
           aria-label={`${sourceLabel(source.source)} freshness`}
-          className="inline-flex flex-wrap items-center gap-1.5 rounded-full border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground"
+          className="inline-flex items-center gap-1.5 rounded-full border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground"
         >
           <Clock3 className="size-3" />
           {sourceLabel(source.source)}
-          {source.latest_bucket_start
-            ? ` · data through ${formatDateTime(source.latest_bucket_start)} · ${formatAge(
-                source.data_age_seconds,
-              )}`
-            : " · no buckets"}
+          {source.latest_bucket_start ? ` · ${formatAge(source.data_age_seconds)}` : " · no data"}
           {source.is_stale ? (
-            <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+            <Badge
+              variant="outline"
+              className="border-amber-300 bg-amber-50 px-1 py-0 text-[10px] text-amber-800"
+            >
               Delayed
             </Badge>
           ) : null}
@@ -294,92 +264,143 @@ function SourceFreshness({ usage }: { usage: MonthlyUsage }) {
   );
 }
 
-function SummaryCards({ groups, label }: { groups: Array<SummaryGroup>; label: string }) {
+function SummaryCards({
+  groups,
+  label,
+  mode,
+}: {
+  groups: Array<SummaryGroup>;
+  label: string;
+  mode: NumberMode;
+}) {
   return (
     <div className="grid gap-2 md:hidden" aria-label={label}>
-      {groups.map((group) => (
-        <div key={group.key} className="min-w-0 rounded-lg border p-3">
-          <div className="flex items-start justify-between gap-2">
-            <GroupHeading group={group} />
-            <CoverageBadge coverage={group.coverage} />
+      {groups.map((group) => {
+        const metered = meteredCaption(group);
+        return (
+          <div key={group.key} className="min-w-0 rounded-lg border p-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <p className="font-medium">{sourceLabel(group.source)}</p>
+              {metered ? (
+                <span className="text-[11px] text-muted-foreground" title={metered.title}>
+                  {metered.text}
+                </span>
+              ) : null}
+            </div>
+            <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
+              <div className="min-w-0">
+                <dt className="text-[11px] text-muted-foreground">Requests</dt>
+                <dd
+                  className="truncate font-semibold tabular-nums"
+                  title={formatNumber(group.requests)}
+                >
+                  {formatMetric(group.requests, mode)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-[11px] text-muted-foreground">Input</dt>
+                <dd className="truncate font-medium">
+                  <TokenCell aggregate={group.input} mode={mode} />
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-[11px] text-muted-foreground">Output</dt>
+                <dd className="truncate font-medium">
+                  <TokenCell aggregate={group.output} mode={mode} />
+                </dd>
+              </div>
+            </dl>
           </div>
-          <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
-            <div>
-              <dt className="text-[11px] text-muted-foreground">Requests</dt>
-              <dd className="font-semibold tabular-nums">{formatNumber(group.requests)}</dd>
-            </div>
-            <div>
-              <dt className="text-[11px] text-muted-foreground">Input</dt>
-              <dd>
-                <TokenValue aggregate={group.input} />
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[11px] text-muted-foreground">Output</dt>
-              <dd>
-                <TokenValue aggregate={group.output} />
-              </dd>
-            </div>
-          </dl>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function SummaryTable({ groups, label }: { groups: Array<SummaryGroup>; label: string }) {
+function SummaryTable({
+  groups,
+  label,
+  mode,
+}: {
+  groups: Array<SummaryGroup>;
+  label: string;
+  mode: NumberMode;
+}) {
   return (
     <div className="hidden overflow-x-auto rounded-lg border md:block">
-      <table className="w-full min-w-[44rem] text-sm" aria-label={label}>
+      <table className="w-full text-sm" aria-label={label}>
         <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
           <tr>
             <th className="px-3 py-2 font-medium">Source</th>
-            <th className="px-3 py-2 font-medium">Accounting basis</th>
-            <th className="px-3 py-2 font-medium">Unit</th>
             <th className="px-3 py-2 text-right font-medium">Requests</th>
             <th className="px-3 py-2 text-right font-medium">Input</th>
+            <th className="px-3 py-2 text-right font-medium">Cached</th>
             <th className="px-3 py-2 text-right font-medium">Output</th>
-            <th className="px-3 py-2 font-medium">Coverage</th>
+            <th className="px-3 py-2 text-right font-medium">Reasoning</th>
           </tr>
         </thead>
         <tbody>
-          {groups.map((group) => (
-            <tr key={group.key} className="border-t">
-              <td className="px-3 py-2 font-medium">{sourceLabel(group.source)}</td>
-              <td className="px-3 py-2 text-xs">{group.accountingBasis}</td>
-              <td className="px-3 py-2 text-xs">{group.unitKind}</td>
-              <td className="px-3 py-2 text-right tabular-nums">{formatNumber(group.requests)}</td>
-              <td className="px-3 py-2 text-right">
-                <TokenValue aggregate={group.input} />
-              </td>
-              <td className="px-3 py-2 text-right">
-                <TokenValue aggregate={group.output} />
-              </td>
-              <td className="px-3 py-2">
-                <CoverageBadge coverage={group.coverage} />
-              </td>
-            </tr>
-          ))}
+          {groups.map((group) => {
+            const metered = meteredCaption(group);
+            return (
+              <tr key={group.key} className="border-t">
+                <td className="px-3 py-2" title={`${group.accountingBasis} · ${group.unitKind}`}>
+                  <span className="font-medium">{sourceLabel(group.source)}</span>
+                  {metered ? (
+                    <span className="ml-2 text-[11px] text-muted-foreground" title={metered.title}>
+                      {metered.text}
+                    </span>
+                  ) : null}
+                </td>
+                <td
+                  className="px-3 py-2 text-right font-medium tabular-nums"
+                  title={formatNumber(group.requests)}
+                >
+                  {formatMetric(group.requests, mode)}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <TokenCell aggregate={group.input} mode={mode} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <TokenCell aggregate={group.cached} mode={mode} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <TokenCell aggregate={group.output} mode={mode} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <TokenCell aggregate={group.reasoning} mode={mode} />
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
   );
 }
 
-function Summary({ groups, label }: { groups: Array<SummaryGroup>; label: string }) {
+function Summary({
+  groups,
+  label,
+  mode,
+}: {
+  groups: Array<SummaryGroup>;
+  label: string;
+  mode: NumberMode;
+}) {
   return (
     <>
-      <SummaryCards groups={groups} label={`${label} (mobile)`} />
-      <SummaryTable groups={groups} label={label} />
+      <SummaryCards groups={groups} label={`${label} (mobile)`} mode={mode} />
+      <SummaryTable groups={groups} label={label} mode={mode} />
     </>
   );
 }
 
-function DailyDetailTable({ group }: { group: SummaryGroup }) {
+function DailyDetailTable({ group, mode }: { group: SummaryGroup; mode: NumberMode }) {
   return (
     <div className="max-w-full overflow-x-auto rounded-lg border">
       <table
-        className="w-full min-w-[64rem] text-sm"
+        className="w-full text-sm"
         aria-label={`Daily exact values for ${sourceLabel(group.source)} · ${group.accountingBasis} · ${group.unitKind}`}
       >
         <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
@@ -391,28 +412,30 @@ function DailyDetailTable({ group }: { group: SummaryGroup }) {
                 {column.label}
               </th>
             ))}
-            <th className="px-3 py-2 font-medium">Coverage</th>
           </tr>
         </thead>
         <tbody>
           {group.dailyRows.map((row) => (
             <tr key={`${group.key}-${row.date}`} className="border-t">
-              <td className="px-3 py-2 font-mono text-xs">{row.date}</td>
-              <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.unit_count)}</td>
+              <td className="px-3 py-1.5 font-mono text-xs">{row.date}</td>
+              <td
+                className="px-3 py-1.5 text-right tabular-nums"
+                title={formatNumber(row.unit_count)}
+              >
+                {formatMetric(row.unit_count, mode)}
+              </td>
               {TOKEN_COLUMNS.map((column) => (
-                <td key={column.value} className="px-3 py-2 text-right">
-                  <TokenValue
+                <td key={column.value} className="px-3 py-1.5 text-right">
+                  <TokenCell
                     aggregate={{
                       value: row[column.value],
                       counted: row[column.counted],
                       units: row.unit_count,
                     }}
+                    mode={mode}
                   />
                 </td>
               ))}
-              <td className="px-3 py-2">
-                <CoverageBadge coverage={summarizeCoverage([row])} />
-              </td>
             </tr>
           ))}
         </tbody>
@@ -421,25 +444,48 @@ function DailyDetailTable({ group }: { group: SummaryGroup }) {
   );
 }
 
-function DailyTrendCard({ group, month }: { group: SummaryGroup; month: string }) {
+function DailyTrendCard({
+  group,
+  month,
+  mode,
+}: {
+  group: SummaryGroup;
+  month: string;
+  mode: NumberMode;
+}) {
   const points = buildDailyTrendPoints(group.dailyRows, month);
-  const days = points.length;
+  const metered = meteredCaption(group);
   return (
     <div className="min-w-0 rounded-lg border p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <GroupHeading group={group} />
-        <CoverageBadge coverage={group.coverage} />
-      </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>
-          Requests <strong className="text-foreground">{formatNumber(group.requests)}</strong>
-        </span>
-        <span>
-          Input <TokenValue aggregate={group.input} />
-        </span>
-        <span>
-          Output <TokenValue aggregate={group.output} />
-        </span>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <p className="text-sm font-medium">{sourceLabel(group.source)}</p>
+          {metered ? (
+            <span className="text-[11px] text-muted-foreground" title={metered.title}>
+              {metered.text}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+          <span title={formatNumber(group.requests)}>
+            <strong className="text-foreground tabular-nums">
+              {formatMetric(group.requests, mode)}
+            </strong>{" "}
+            req
+          </span>
+          <span>
+            In{" "}
+            <strong className="font-medium text-foreground">
+              <TokenCell aggregate={group.input} mode={mode} />
+            </strong>
+          </span>
+          <span>
+            Out{" "}
+            <strong className="font-medium text-foreground">
+              <TokenCell aggregate={group.output} mode={mode} />
+            </strong>
+          </span>
+        </div>
       </div>
       <div
         className="mt-3 h-44 w-full"
@@ -447,26 +493,25 @@ function DailyTrendCard({ group, month }: { group: SummaryGroup; month: string }
         aria-label={`Daily requests trend for ${sourceLabel(group.source)} · ${group.accountingBasis} · ${group.unitKind}`}
       >
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+          <BarChart data={points} margin={{ top: 8, right: 6, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 3" />
             <XAxis
               dataKey="day"
-              type="number"
-              domain={[1, days]}
-              allowDecimals={false}
               tickLine={false}
               axisLine={false}
-              minTickGap={20}
+              minTickGap={14}
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             />
             <YAxis
-              width={44}
+              width={40}
               allowDecimals={false}
+              tickFormatter={(value) => formatCompactNumber(Number(value))}
               tickLine={false}
               axisLine={false}
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             />
             <Tooltip
+              cursor={{ fill: "var(--muted)", opacity: 0.45 }}
               labelFormatter={(value) => `${month}-${String(Number(value)).padStart(2, "0")}`}
               formatter={(value) => [formatNumber(Number(value)), "Requests"]}
               contentStyle={{
@@ -475,42 +520,41 @@ function DailyTrendCard({ group, month }: { group: SummaryGroup; month: string }
                 fontSize: "12px",
               }}
             />
-            <Line
-              type="linear"
+            <Bar
               dataKey="requests"
               name="Requests"
-              stroke="var(--chart-1)"
-              strokeWidth={2}
-              dot={{ r: 2 }}
-              activeDot={{ r: 4 }}
-              connectNulls={false}
+              fill="var(--chart-1)"
+              radius={[3, 3, 0, 0]}
+              maxBarSize={20}
               isAnimationActive={false}
             />
-          </LineChart>
+          </BarChart>
         </ResponsiveContainer>
       </div>
-      <details className="mt-2 rounded-md border bg-card px-2.5 py-2 text-xs">
+      <details className="mt-2 rounded-md border bg-card px-2.5 py-1.5 text-xs">
         <summary className="cursor-pointer font-medium text-muted-foreground">
-          Exact daily values
+          Daily values ({group.dailyRows.length})
         </summary>
         <div className="mt-2">
-          <DailyDetailTable group={group} />
+          <DailyDetailTable group={group} mode={mode} />
         </div>
       </details>
     </div>
   );
 }
 
-function MonthlyDetailTable({ group }: { group: SummaryGroup }) {
+function MonthlyDetailTable({ group, mode }: { group: SummaryGroup; mode: NumberMode }) {
   return (
     <div className="max-w-full overflow-x-auto rounded-lg border">
       <table
-        className="w-full min-w-[64rem] text-sm"
+        className="w-full text-sm"
         aria-label={`Monthly detail for ${sourceLabel(group.source)} · ${group.accountingBasis} · ${group.unitKind}`}
       >
         <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-medium">Actor</th>
+            <th className="px-3 py-2 font-medium">
+              {actorLabel(group.monthlyRows[0]?.actor_kind ?? "")}
+            </th>
             <th className="px-3 py-2 font-medium">Model</th>
             <th className="px-3 py-2 font-medium">Effort</th>
             <th className="px-3 py-2 text-right font-medium">Requests</th>
@@ -519,7 +563,6 @@ function MonthlyDetailTable({ group }: { group: SummaryGroup }) {
                 {column.label}
               </th>
             ))}
-            <th className="px-3 py-2 font-medium">Coverage</th>
           </tr>
         </thead>
         <tbody>
@@ -528,33 +571,29 @@ function MonthlyDetailTable({ group }: { group: SummaryGroup }) {
               key={`${group.key}-${row.actor_kind}-${row.actor_id}-${row.model}-${row.effort}`}
               className="border-t"
             >
-              <td className="px-3 py-2">
-                <p className="font-medium">{row.actor_id}</p>
-                <p className="text-[10px] text-muted-foreground">{actorLabel(row.actor_kind)}</p>
+              <td className="px-3 py-1.5 font-medium">{row.actor_id}</td>
+              <td className="px-3 py-1.5 font-mono text-xs">{row.model}</td>
+              <td className="px-3 py-1.5 text-xs">
+                {row.effort === "" ? <span className="text-muted-foreground">—</span> : row.effort}
               </td>
-              <td className="px-3 py-2 font-mono text-xs">{row.model}</td>
-              <td className="px-3 py-2">
-                {row.effort === "" ? (
-                  <span className="text-muted-foreground">Unlabelled</span>
-                ) : (
-                  row.effort
-                )}
+              <td
+                className="px-3 py-1.5 text-right tabular-nums"
+                title={formatNumber(row.unit_count)}
+              >
+                {formatMetric(row.unit_count, mode)}
               </td>
-              <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.unit_count)}</td>
               {TOKEN_COLUMNS.map((column) => (
-                <td key={column.value} className="px-3 py-2 text-right">
-                  <TokenValue
+                <td key={column.value} className="px-3 py-1.5 text-right">
+                  <TokenCell
                     aggregate={{
                       value: row[column.value],
                       counted: row[column.counted],
                       units: row.unit_count,
                     }}
+                    mode={mode}
                   />
                 </td>
               ))}
-              <td className="px-3 py-2">
-                <CoverageBadge coverage={summarizeCoverage([row])} />
-              </td>
             </tr>
           ))}
         </tbody>
@@ -563,31 +602,42 @@ function MonthlyDetailTable({ group }: { group: SummaryGroup }) {
   );
 }
 
-function MonthlyBreakdown({ groups }: { groups: Array<SummaryGroup> }) {
+function MonthlyBreakdown({ groups, mode }: { groups: Array<SummaryGroup>; mode: NumberMode }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-sm font-medium">
-        Monthly breakdown by machine, identity, model and effort
-      </h3>
+      <h3 className="text-sm font-medium">Breakdown</h3>
       {groups.length === 0 ? (
         <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-          No monthly dimension rows for this selection.
+          No breakdown rows for this month.
         </div>
       ) : (
-        groups.map((group) => (
-          <details key={group.key} className="min-w-0 rounded-lg border bg-card px-3 py-2">
-            <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2">
-              <GroupHeading group={group} />
-              <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                {formatNumber(group.requests)} requests
-                <CoverageBadge coverage={group.coverage} />
-              </span>
-            </summary>
-            <div className="mt-2">
-              <MonthlyDetailTable group={group} />
-            </div>
-          </details>
-        ))
+        groups.map((group) => {
+          const metered = meteredCaption(group);
+          return (
+            <details key={group.key} className="min-w-0 rounded-lg border bg-card px-3 py-2">
+              <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-sm font-medium">{sourceLabel(group.source)}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {group.monthlyRows.length} rows
+                  </span>
+                </div>
+                <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span
+                    className="font-medium text-foreground tabular-nums"
+                    title={formatNumber(group.requests)}
+                  >
+                    {formatMetric(group.requests, mode)} req
+                  </span>
+                  {metered ? <span title={metered.title}>{metered.text}</span> : null}
+                </span>
+              </summary>
+              <div className="mt-2">
+                <MonthlyDetailTable group={group} mode={mode} />
+              </div>
+            </details>
+          );
+        })
       )}
     </section>
   );
@@ -614,6 +664,7 @@ export function UsageSection({
   onTimezoneChange: (timezone: string) => void;
   onMonthChange: (month: string) => void;
 }) {
+  const [numberMode, setNumberMode] = useState<NumberMode>("compact");
   const period = usagePeriod(month, timezone, generatedAt);
   const timezoneOptions = TIMEZONES.some((option) => option.value === timezone)
     ? TIMEZONES
@@ -635,14 +686,50 @@ export function UsageSection({
   const dailyUnavailable = selectedDaily === null;
 
   return (
-    <Card>
-      <CardHeader className="gap-3 pb-3">
+    <Card className="min-w-0">
+      <CardHeader className="gap-2.5 pb-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="flex items-center gap-2 text-base">
             <BarChart3 className="size-4 text-muted-foreground" />
             Token usage
           </CardTitle>
           <div className="flex flex-wrap items-center gap-2">
+            <div
+              role="group"
+              aria-label="Number format"
+              className="inline-flex h-8 items-center rounded-md border bg-muted/30 p-0.5 text-xs"
+            >
+              <button
+                type="button"
+                aria-pressed={numberMode === "compact"}
+                className={cn(
+                  "rounded px-2 py-1 transition-colors",
+                  numberMode === "compact"
+                    ? "bg-card font-medium text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => {
+                  setNumberMode("compact");
+                }}
+              >
+                Compact
+              </button>
+              <button
+                type="button"
+                aria-pressed={numberMode === "exact"}
+                className={cn(
+                  "rounded px-2 py-1 transition-colors",
+                  numberMode === "exact"
+                    ? "bg-card font-medium text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => {
+                  setNumberMode("exact");
+                }}
+              >
+                Exact
+              </button>
+            </div>
             <label className="sr-only" htmlFor="usage-timezone">
               Timezone
             </label>
@@ -678,40 +765,26 @@ export function UsageSection({
             />
           </div>
         </div>
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            {periodName} · {monthLabel(month)}
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>
-            {period.isCurrentMonth ? `Today ${period.today}` : "Today outside this range"}
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>{timezone}</span>
-        </p>
-        <details className="rounded-md border bg-card px-2.5 py-2 text-xs">
-          <summary className="cursor-pointer font-medium text-muted-foreground">
-            Period &amp; data details
-          </summary>
-          <div className="mt-2 space-y-2 text-muted-foreground">
-            <p>
-              {periodName} · {monthLabel(month)} · {monthRangeLabel(month, timezone)} · {timezone}
-            </p>
-            <p>
-              {usage?.latest_bucket_start
-                ? `Latest bucket across sources: ${formatDateTime(
-                    usage.latest_bucket_start,
-                  )} · ${formatAge(usage.data_age_seconds)}`
-                : "No usage buckets for this selection."}
-            </p>
-            {usage ? <SourceFreshness usage={usage} /> : null}
-            <p>
-              Each source, accounting basis and unit kind stays separate. Cached, reasoning and
-              other token components are listed individually and never added into the input/output
-              totals.
-            </p>
-          </div>
-        </details>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>
+              {periodName} · {monthLabel(month)}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {period.isCurrentMonth ? `Today ${period.today}` : "Today outside this range"}
+            </span>
+            {usage?.latest_bucket_start ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span title={formatDateTime(usage.latest_bucket_start)}>
+                  Updated {formatAge(usage.data_age_seconds)}
+                </span>
+              </>
+            ) : null}
+          </p>
+          {usage ? <SourceFreshness usage={usage} /> : null}
+        </div>
       </CardHeader>
       <CardContent className="space-y-5">
         {attributionApproximate ? (
@@ -730,9 +803,6 @@ export function UsageSection({
         {usage === null ? (
           <div className="rounded-lg border border-dashed px-4 py-8 text-center">
             <p className="font-medium">Usage could not be loaded</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Old rows from another month or timezone are intentionally hidden.
-            </p>
           </div>
         ) : (
           <>
@@ -753,7 +823,7 @@ export function UsageSection({
                         "Today's usage is unavailable because the daily series could not be loaded.")}
                   </p>
                 ) : todayGroups.length > 0 ? (
-                  <Summary groups={todayGroups} label="Today's usage summary" />
+                  <Summary groups={todayGroups} label="Today's usage summary" mode={numberMode} />
                 ) : (
                   <p className="rounded-lg border border-dashed px-4 py-4 text-sm text-muted-foreground">
                     No usage rows for today in {timezone}.
@@ -773,27 +843,20 @@ export function UsageSection({
                 </span>
               </div>
               {monthGroups.length > 0 ? (
-                <Summary groups={monthGroups} label={`${periodName} usage summary`} />
+                <Summary
+                  groups={monthGroups}
+                  label={`${periodName} usage summary`}
+                  mode={numberMode}
+                />
               ) : (
                 <div className="rounded-lg border border-dashed px-4 py-8 text-center">
                   <p className="font-medium">No token usage for this month</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    A row appears after debitmetre or orihsus pushes a complete UTC-hour bucket that
-                    falls inside the selected timezone month. AGY has no token usage rows, so it is
-                    never shown as zero.
-                  </p>
                 </div>
               )}
             </section>
 
             <section className="space-y-2">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h3 className="text-sm font-medium">Daily trend</h3>
-                <span className="text-xs text-muted-foreground">
-                  {periodName} · {monthLabel(month)} · {monthRangeLabel(month, timezone)} ·{" "}
-                  {timezone}
-                </span>
-              </div>
+              <h3 className="text-sm font-medium">Daily requests</h3>
               {dailyUnavailable ? (
                 <p className="rounded-lg border border-dashed px-4 py-4 text-sm text-muted-foreground">
                   {dailyLoading
@@ -803,7 +866,7 @@ export function UsageSection({
               ) : allDailyGroups.length > 0 ? (
                 <div className="grid gap-3 lg:grid-cols-2">
                   {allDailyGroups.map((group) => (
-                    <DailyTrendCard key={group.key} group={group} month={month} />
+                    <DailyTrendCard key={group.key} group={group} month={month} mode={numberMode} />
                   ))}
                 </div>
               ) : (
@@ -813,7 +876,7 @@ export function UsageSection({
               )}
             </section>
 
-            {monthGroups.length > 0 ? <MonthlyBreakdown groups={monthGroups} /> : null}
+            <MonthlyBreakdown groups={monthGroups} mode={numberMode} />
           </>
         )}
       </CardContent>

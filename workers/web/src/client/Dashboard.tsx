@@ -8,9 +8,7 @@ import {
   Activity,
   AlertTriangle,
   CircleDollarSign,
-  Gauge,
   History,
-  LockKeyhole,
   RefreshCw,
   Wallet,
 } from "lucide-react";
@@ -28,25 +26,12 @@ import { cn } from "@/lib/utils";
 import type { DashboardSearch } from "../search";
 import { dashboardHref } from "../search";
 
-function SectionHeading({
-  icon: Icon,
-  title,
-  description,
-}: {
-  icon: typeof Activity;
-  title: string;
-  description: string;
-}) {
+function SectionLabel({ icon: Icon, title }: { icon: typeof Activity; title: string }) {
   return (
-    <div className="mb-2 flex items-start gap-2">
-      <div className="mt-0.5 flex size-6 items-center justify-center rounded-md border bg-card text-muted-foreground">
-        <Icon className="size-3.5" aria-hidden="true" />
-      </div>
-      <div>
-        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-        <p className="text-[11px] leading-snug text-muted-foreground">{description}</p>
-      </div>
-    </div>
+    <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <Icon className="size-3.5" aria-hidden="true" />
+      {title}
+    </h2>
   );
 }
 
@@ -69,7 +54,7 @@ function ViewLink({
       href={dashboardHref(next)}
       aria-current={current === target ? "page" : undefined}
       className={cn(
-        "rounded-md px-2.5 py-1.5 text-sm transition-colors",
+        "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
         current === target
           ? "bg-primary text-primary-foreground"
           : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -102,12 +87,8 @@ function HistorySection({
     (histories[provider]?.series ?? []).map((item) => ({ provider, series: item })),
   );
   return (
-    <section>
-      <SectionHeading
-        icon={History}
-        title="Balance history"
-        description="Last 30 days. Each currency gets its own series and axis; values are never combined across currencies."
-      />
+    <section className="min-w-0">
+      <SectionLabel icon={History} title="Balance history (30d)" />
       {error && series.length > 0 ? (
         <p
           role="alert"
@@ -117,7 +98,7 @@ function HistorySection({
         </p>
       ) : null}
       {series.length > 0 ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2">
           {series.map(({ provider, series: item }) => (
             <BalanceHistoryChart
               key={`${provider}-${item.account}-${item.currency}`}
@@ -127,17 +108,18 @@ function HistorySection({
           ))}
         </div>
       ) : loading ? (
-        <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
           Loading 30-day balance history…
         </p>
       ) : (
-        <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
           {error ?? "No balance history yet."}
         </p>
       )}
     </section>
   );
 }
+
 export function DashboardLoading() {
   return (
     <div className="flex min-h-screen items-center justify-center p-6 text-sm text-muted-foreground">
@@ -178,55 +160,46 @@ export function Dashboard({
     daily && daily.timezone === search.tz && daily.month === search.month ? daily : null;
 
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-start gap-2.5">
-            <div className="flex size-10 items-center justify-center rounded-xl border bg-card shadow-sm">
-              <Wallet className="size-5" aria-hidden="true" />
+    <div className="min-h-screen overflow-x-clip">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-3 py-4 sm:px-6 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <div className="flex size-8 items-center justify-center rounded-lg border bg-card shadow-xs">
+                <Wallet className="size-4" aria-hidden="true" />
+              </div>
+              <h1 className="text-lg font-semibold tracking-tight">bilan</h1>
             </div>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">bilan</h1>
-              <p className="text-xs text-muted-foreground">
-                Quotas, balances, and collected usage across Codex, AGY, and OpenCode Go.
-              </p>
-            </div>
+            <nav
+              aria-label="Dashboard views"
+              className="flex w-fit items-center gap-1 rounded-lg border bg-card p-0.5"
+            >
+              <ViewLink
+                current={search.view}
+                target="overview"
+                label="Overview"
+                search={search}
+                onNavigate={onNavigate}
+              />
+              <ViewLink
+                current={search.view}
+                target="usage"
+                label="Usage"
+                search={search}
+                onNavigate={onNavigate}
+              />
+            </nav>
           </div>
-          <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
-            <RefreshCw className={cn(refreshing && "animate-spin")} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-xs text-muted-foreground sm:inline">
+              {formatDateTime(overview.generated_at)}
+            </span>
+            <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
+              <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
+              Refresh
+            </Button>
+          </div>
         </header>
-
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <nav
-            aria-label="Dashboard views"
-            className="flex w-fit items-center gap-1 rounded-lg border bg-card p-0.5"
-          >
-            <ViewLink
-              current={search.view}
-              target="overview"
-              label="Overview"
-              search={search}
-              onNavigate={onNavigate}
-            />
-            <ViewLink
-              current={search.view}
-              target="usage"
-              label="Usage"
-              search={search}
-              onNavigate={onNavigate}
-            />
-          </nav>
-          <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2 py-0.5">
-            <LockKeyhole className="size-3.5" />
-            Read-only · protected by Cloudflare Access
-          </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2 py-0.5">
-            <History className="size-3.5" />
-            Generated {formatDateTime(overview.generated_at)}
-          </span>
-        </div>
 
         {refreshError ? (
           <div
@@ -239,25 +212,16 @@ export function Dashboard({
 
         {search.view === "overview" ? (
           <>
-            <section>
-              <SectionHeading
-                icon={Gauge}
-                title="Quota overview"
-                description="Latest valid reading per account and window. Missing windows disappear instead of carrying forward; every reading keeps its own status."
-              />
+            <section className="min-w-0">
               <QuotaOverview quota={overview.quotas} />
             </section>
 
             <UsageEntry overview={overview} navigation={search} onNavigate={onNavigate} />
 
-            <section>
-              <SectionHeading
-                icon={CircleDollarSign}
-                title="Balances"
-                description="Current remaining balance per provider and currency. Changes compare balance snapshots, including top-ups and usage."
-              />
-              {overview.balances.length > 0 ? (
-                <div className="grid gap-4 lg:grid-cols-2">
+            {overview.balances.length > 0 ? (
+              <section className="min-w-0">
+                <SectionLabel icon={CircleDollarSign} title="Balances" />
+                <div className="grid gap-3 lg:grid-cols-2">
                   {overview.balances.map((balance) => (
                     <BalanceCard
                       key={`${balance.provider}-${balance.account}-${balance.currency}`}
@@ -265,21 +229,16 @@ export function Dashboard({
                     />
                   ))}
                 </div>
-              ) : (
-                <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
-                  No balance snapshots yet. Nothing is shown as zero until a provider reports it.
-                </p>
-              )}
-            </section>
-
-            <section>
-              <SectionHeading
-                icon={Activity}
-                title="Collection health"
-                description="Healthy collectors collapse to one line; heartbeat, last attempt, and data freshness stay distinct."
-              />
-              <HealthSummary overview={overview} />
-            </section>
+              </section>
+            ) : (
+              <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <CircleDollarSign className="size-3.5" aria-hidden="true" />
+                  Balances
+                </span>
+                <span>Not configured</span>
+              </div>
+            )}
 
             <HistorySection
               providers={historyProviders}
@@ -287,6 +246,11 @@ export function Dashboard({
               loading={historyLoading}
               error={historyError}
             />
+
+            <section className="min-w-0">
+              <SectionLabel icon={Activity} title="Collectors" />
+              <HealthSummary overview={overview} />
+            </section>
           </>
         ) : (
           <UsageSection
@@ -318,12 +282,6 @@ export function Dashboard({
             </CardContent>
           </Card>
         ) : null}
-
-        <footer className="border-t pt-4 text-xs text-muted-foreground">
-          Read-only surface. Balance collection runs on the write Worker schedule; Codex usage is
-          pushed by debitmetre; OpenCode Go usage and quotas are pushed by orihsus. Overview data
-          refreshes every 60 seconds.
-        </footer>
       </div>
     </div>
   );

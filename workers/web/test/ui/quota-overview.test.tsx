@@ -33,6 +33,17 @@ function subject(overrides: Partial<QuotaSubject> = {}): QuotaSubject {
           reset_in_seconds: 0,
           window_duration_mins: 300,
         },
+        {
+          bucket_id: "Gemini",
+          slot: "weekly",
+          label: "weekly",
+          used_percent: 20,
+          remaining_percent: 80,
+          status: null,
+          resets_at: "2026-12-03T10:32:00Z",
+          reset_in_seconds: 548_400,
+          window_duration_mins: 10_080,
+        },
       ],
     },
     latest_attempt: {
@@ -56,22 +67,21 @@ function quota(subjects: Array<QuotaSubject>) {
 describe("QuotaOverview display", () => {
   it("treats the epoch reset sentinel as missing instead of Jan 1 1970", () => {
     render(<QuotaOverview quota={quota([subject()])} />);
-    expect(screen.getAllByText(/Reset not reported/u).length).toBeGreaterThan(0);
     expect(screen.queryByText(/1970/u)).toBeNull();
   });
 
-  it("rounds the primary percentage while keeping the exact reading in details", () => {
+  it("shows 5h and weekly windows directly with progress bars and omits null status badges", () => {
     render(<QuotaOverview quota={quota([subject()])} />);
+    expect(screen.getByText("Gemini")).toBeTruthy();
+    expect(screen.getByText("5h")).toBeTruthy();
+    expect(screen.getByText("weekly")).toBeTruthy();
     expect(screen.getByText("58%")).toBeTruthy();
-    expect(screen.getAllByText("57.5%").length).toBeGreaterThan(0);
+    expect(screen.getByText("80%")).toBeTruthy();
+    expect(screen.getAllByRole("progressbar")).toHaveLength(2);
+    expect(screen.queryByText("Not reported")).toBeNull();
   });
 
-  it("identifies the AGY bucket/model group in the limiting summary", () => {
-    render(<QuotaOverview quota={quota([subject()])} />);
-    expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
-  });
-
-  it("keeps a reported limited status as the limiting summary when its percentage is null", () => {
+  it("shows limited status and missing percentage without inventing zero", () => {
     const base = subject();
     if (!base.latest_valid) {
       throw new Error("fixture must have a valid observation");
@@ -86,6 +96,7 @@ describe("QuotaOverview display", () => {
             ...base.latest_valid.windows[0]!,
             bucket_id: "key-limited",
             slot: "rolling",
+            label: null,
             used_percent: null,
             remaining_percent: null,
             status: "limited",
@@ -94,6 +105,7 @@ describe("QuotaOverview display", () => {
             ...base.latest_valid.windows[0]!,
             bucket_id: "key-limited",
             slot: "weekly",
+            label: null,
             used_percent: 20,
             remaining_percent: 80,
             status: "ok",
@@ -102,62 +114,13 @@ describe("QuotaOverview display", () => {
       },
     });
     render(<QuotaOverview quota={quota([limited])} />);
-    const summary = screen.getByText("key-limited").closest("summary");
-    if (!summary) {
-      throw new Error("OpenCode summary was not rendered");
-    }
-    expect(summary.textContent).toContain("Limited");
-    expect(summary.textContent).toContain("—");
+    expect(screen.getByText("key-limited")).toBeTruthy();
+    expect(screen.getByText("Limited")).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
+    expect(screen.getByText("80%")).toBeTruthy();
   });
 
-  it("compares the lowest known percentage across ok, unknown and null-status windows", () => {
-    const base = subject();
-    if (!base.latest_valid) {
-      throw new Error("fixture must have a valid observation");
-    }
-    const mixed = subject({
-      source: "opencode",
-      account: "key-mixed",
-      latest_valid: {
-        ...base.latest_valid,
-        windows: [
-          {
-            ...base.latest_valid.windows[0]!,
-            bucket_id: "key-mixed",
-            slot: "rolling",
-            used_percent: 20,
-            remaining_percent: 80,
-            status: "ok",
-          },
-          {
-            ...base.latest_valid.windows[0]!,
-            bucket_id: "key-mixed",
-            slot: "weekly",
-            used_percent: 87.8,
-            remaining_percent: 12.2,
-            status: "unknown",
-          },
-          {
-            ...base.latest_valid.windows[0]!,
-            bucket_id: "key-mixed",
-            slot: "monthly",
-            used_percent: 65.6,
-            remaining_percent: 34.4,
-            status: null,
-          },
-        ],
-      },
-    });
-    render(<QuotaOverview quota={quota([mixed])} />);
-    const summary = screen.getByText("key-mixed").closest("summary");
-    if (!summary) {
-      throw new Error("OpenCode summary was not rendered");
-    }
-    expect(summary.textContent).toContain("12%");
-    expect(summary.textContent).toContain("Unknown");
-  });
-
-  it("keeps the seven-day visibility boundary and shows collapsed key warnings", () => {
+  it("keeps the seven-day visibility boundary and surfaces stale and failure warnings", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     render(<QuotaOverview quota={overview.quotas} />);
 
@@ -167,12 +130,7 @@ describe("QuotaOverview display", () => {
     expect(screen.queryByText("key-fp-5")).toBeNull();
     expect(screen.queryByText("key-fp-7")).toBeNull();
 
-    const summary = screen.getByText("key-fp-3").closest("summary");
-    if (!summary) {
-      throw new Error("OpenCode summary was not rendered");
-    }
-    expect(summary.textContent).toContain("Valid sample");
-    expect(summary.textContent).toContain("stale");
-    expect(summary.textContent).toContain("Latest attempt failed");
+    expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Latest attempt failed/u)).toBeTruthy();
   });
 });

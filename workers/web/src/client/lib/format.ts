@@ -43,6 +43,35 @@ export function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
+function trimDecimal(value: number, digits: number): string {
+  return value
+    .toFixed(digits)
+    .replace(/\.0+$/u, "")
+    .replace(/(\.\d*[1-9])0+$/u, "$1");
+}
+
+export function formatCompactNumber(value: number): string {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "−" : "";
+  if (abs >= 1_000_000_000_000) {
+    const scaled = abs / 1_000_000_000_000;
+    return `${sign}${trimDecimal(scaled, scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2)}T`;
+  }
+  if (abs >= 1_000_000_000) {
+    const scaled = abs / 1_000_000_000;
+    return `${sign}${trimDecimal(scaled, scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2)}B`;
+  }
+  if (abs >= 1_000_000) {
+    const scaled = abs / 1_000_000;
+    return `${sign}${trimDecimal(scaled, scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2)}M`;
+  }
+  if (abs >= 1000) {
+    const scaled = abs / 1000;
+    return `${sign}${trimDecimal(scaled, scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2)}K`;
+  }
+  return formatNumber(value);
+}
+
 export function formatAge(seconds: number | null): string {
   if (seconds === null) {
     return "Never";
