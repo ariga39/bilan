@@ -14,6 +14,8 @@ import {
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+import { JSDOM } from "jsdom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { unstable_startWorker } from "wrangler";
@@ -340,6 +342,31 @@ async function readOverview(webUrl: string): Promise<OverviewResponse> {
     throw new Error("overview response did not match the shared schema");
   }
   return parsed.data;
+}
+
+function visibleMain(html: string): HTMLElement {
+  const { document } = new JSDOM(html).window;
+  // Hydration payloads repeat the same values inside <script> elements. Remove
+  // them so assertions can only match server-rendered, user-visible markup.
+  for (const script of document.querySelectorAll("script")) {
+    script.remove();
+  }
+  const main = document.querySelector("main");
+  if (main === null) {
+    throw new Error("SSR overview page has no main element");
+  }
+  return main;
+}
+
+function quotaCard(main: HTMLElement, title: string): HTMLElement {
+  const heading = [...main.querySelectorAll<HTMLElement>('[data-slot="card-title"]')].find(
+    (element) => element.textContent?.trim() === title,
+  );
+  const card = heading?.closest<HTMLElement>('[data-slot="card"]');
+  if (card === undefined || card === null) {
+    throw new Error(`SSR overview page has no ${title} card`);
+  }
+  return card;
 }
 
 async function selectUpstreamFixture(
@@ -804,18 +831,33 @@ describe("B5 multi-host acceptance", () => {
     expect(usageHtml).not.toContain("Antigravity");
 
     // Quota cards are verified through the normal shipped SSR overview path,
-    // not a standalone render of a legacy component.
+    // not a standalone render of a legacy component. Parse only visible markup
+    // inside the matching card so hydration scripts cannot satisfy assertions.
     const overviewPage = await httpCall(
       `${webUrl}/?view=overview&tz=${encodeURIComponent(TIMEZONE)}&month=${MONTH}`,
     );
     expect(overviewPage.status, overviewPage.body).toBe(200);
-    expect(overviewPage.body).toContain("Google AI Subs");
-    expect(overviewPage.body).toContain("ChatGPT Subs");
-    expect(overviewPage.body).toContain("OpenCode Go");
-    expect(overviewPage.body).toContain("Gemini");
-    expect(overviewPage.body).toContain("fp_a");
-    expect(overviewPage.body).toContain("fp_b");
-    expect(overviewPage.body).not.toContain("Something went wrong");
+    const main = visibleMain(overviewPage.body);
+    expect(main.textContent).not.toContain("Something went wrong");
+
+    const codexCardText = quotaCard(main, "ChatGPT Subs").textContent ?? "";
+    expect(codexCardText).toContain("primary");
+    expect(codexCardText).toContain("90%");
+    expect(codexCardText).toContain("secondary");
+    expect(codexCardText).toContain("100%");
+
+    const agyCardText = quotaCard(main, "Google AI Subs").textContent ?? "";
+    expect(agyCardText).toContain("Gemini");
+    expect(agyCardText).toContain("5h");
+    expect(agyCardText).toContain("42%");
+    expect(agyCardText).toContain("7d");
+    expect(agyCardText).toContain("90%");
+
+    const openCodeCardText = quotaCard(main, "OpenCode Go").textContent ?? "";
+    expect(openCodeCardText).toContain("fp_a");
+    expect(openCodeCardText).toContain("fp_b");
+    expect(openCodeCardText).toContain("58%");
+    expect(openCodeCardText).toContain("10%");
 
     const balanceHtml = renderToStaticMarkup(
       <div>
