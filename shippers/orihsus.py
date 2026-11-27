@@ -427,10 +427,10 @@ def _audit_archive_fingerprint(
     fingerprint: list[list[Any]] = []
     for _number, path, name, _compressed in entries:
         try:
-            size = os.path.getsize(path)
+            info = os.stat(path)
         except OSError:
             continue
-        fingerprint.append([name, size])
+        fingerprint.append([name, info.st_size, info.st_dev, info.st_ino])
     return fingerprint
 
 
@@ -1157,15 +1157,33 @@ def _normalize_archives(value: Any) -> list[list[Any]]:
     for item in value:
         if (
             not isinstance(item, (list, tuple))
-            or len(item) != 2
+            or len(item) not in (2, 4)
             or not isinstance(item[0], str)
-            or isinstance(item[1], bool)
-            or not isinstance(item[1], int)
-            or item[1] < 0
+            or any(
+                isinstance(part, bool) or not isinstance(part, int) or part < 0
+                for part in item[1:]
+            )
         ):
             raise ShipperError("invalid audit archive fingerprints in shipper state")
-        normalized.append([item[0], item[1]])
+        normalized.append(list(item))
     return normalized
+
+
+def _normalize_staged(value: Any, label: str) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ShipperError("invalid %s in shipper state" % label)
+    rows = value.get("rows")
+    audit_after = value.get("audit_after")
+    if not isinstance(rows, list) or not isinstance(audit_after, dict):
+        raise ShipperError("invalid %s in shipper state" % label)
+    checked: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("bucket_start"), str):
+            raise ShipperError("invalid %s in shipper state" % label)
+        checked.append(dict(row))
+    return {"rows": checked, "audit_after": dict(audit_after)}
 
 
 def _normalize_row_map(value: Any, label: str) -> Dict[str, list[dict[str, Any]]]:
@@ -1217,6 +1235,7 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "audit_active_generation": {},
             "audit_active_generation_checked": False,
             "audit_retired": {},
+            "audit_staged": None,
             "usage_cursors": {},
             "usage_files": {},
             "pending": None,
@@ -1260,6 +1279,9 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         raw.get("audit_active_generation_checked", False)
     )
     raw["audit_retired"] = _normalize_row_map(raw.get("audit_retired"), "audit retired rows")
+    raw["audit_staged"] = _normalize_staged(
+        raw.get("audit_staged"), "audit staged snapshot"
+    )
     for obsolete in (
         "audit_oldest_marker",
         "audit_frozen_hour",
@@ -1327,6 +1349,9 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         pending["audit_retired_after"] = _normalize_row_map(
             pending.get("audit_retired_after"), "pending audit retired rows"
         )
+        pending["audit_staged_after"] = _normalize_staged(
+            pending.get("audit_staged_after"), "pending audit staged snapshot"
+        )
         for obsolete in (
             "audit_oldest_marker_after",
             "audit_frozen_hour_after",
@@ -1391,6 +1416,15 @@ def _apply_pending(state: Dict[str, Any]) -> None:
         hour: [dict(row) for row in rows]
         for hour, rows in (pending.get("audit_retired_after") or {}).items()
     }
+    staged = pending.get("audit_staged_after")
+    state["audit_staged"] = (
+        {
+            "rows": [dict(row) for row in staged["rows"]],
+            "audit_after": dict(staged["audit_after"]),
+        }
+        if staged is not None
+        else None
+    )
     state["usage_cursors"] = dict(pending["usage_cursors_after"])
     state["usage_files"] = dict(pending.get("usage_files_after") or {})
     state["pending"] = None
@@ -1440,6 +1474,7 @@ def _send_batch(
     usage_rows: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     audit_after: Optional[Dict[str, Any]],
+    audit_staged_after: Optional[Dict[str, Any]],
     usage_cursors_after: Dict[str, int],
     usage_files_after: Dict[str, list[int]],
     timeout: float,
@@ -1504,6 +1539,14 @@ def _send_batch(
                 else state["audit_retired"]
             ).items()
         },
+        "audit_staged_after": (
+            {
+                "rows": [dict(row) for row in audit_staged_after["rows"]],
+                "audit_after": dict(audit_staged_after["audit_after"]),
+            }
+            if audit_staged_after is not None
+            else None
+        ),
         "usage_cursors_after": dict(usage_cursors_after),
         "usage_files_after": dict(usage_files_after),
         "created_at": utc_now_iso(),
@@ -1569,6 +1612,17 @@ def _ship_work(
             if audit_after is not None and not audit_committed and audit_index >= len(audit_rows)
             else None
         )
+        staged_after = None
+        if (
+            state["audit_staged"] is not None
+            and audit_after is not None
+            and not audit_committed
+            and audit_index < len(audit_rows)
+        ):
+            staged_after = {
+                "rows": [dict(row) for row in audit_rows[audit_index:]],
+                "audit_after": audit_after,
+            }
         merged_cursors = dict(cursors)
         merged_cursors.update(cursor_updates)
         rows = list(usage_chunk)
@@ -1589,6 +1643,8 @@ def _ship_work(
                 if target is not None:
                     _apply_audit_after(state, target)
                     audit_committed = True
+                if state["audit_staged"] is not None and audit_after is not None:
+                    state["audit_staged"] = staged_after
                 _save_state(state_path, state)
             usage_chunk = []
             observation_chunk = []
@@ -1605,6 +1661,7 @@ def _ship_work(
             rows,
             observations,
             target,
+            staged_after,
             merged_cursors,
             files,
             timeout,
@@ -1686,6 +1743,28 @@ def run_once(
             return False
         pending_acked = True
 
+    # A cold multi-batch reconstruction stages its remaining absolute rows and
+    # final checkpoint before the first POST. Resume them before touching the
+    # input, so an archive expiry between batches cannot lose the snapshot.
+    staged_sent = False
+    if state["audit_staged"] is not None:
+        staged = state["audit_staged"]
+        ok, staged_sent = _ship_work(
+            endpoint,
+            token,
+            state_path,
+            state,
+            [dict(row) for row in staged["rows"]],
+            staged["audit_after"],
+            iter(()),
+            dict(state["usage_cursors"]),
+            dict(state["usage_files"]),
+            timeout,
+            quiet,
+        )
+        if not ok:
+            return False
+
     # The immutable outbox is replayed before the audit source is touched, so
     # a missing or rotated input cannot block an already-built batch.
     _require_audit_log(audit_path)
@@ -1731,7 +1810,8 @@ def run_once(
     # the bounded active-tail path below.
     first_baseline = not state["audit_archives_baselined"]
     archive_changed = archive_fingerprint != state["audit_archives"]
-    if (first_baseline and archives) or archive_changed or restarted:
+    cold_reconstruct = (first_baseline and bool(archives)) or archive_changed or restarted
+    if cold_reconstruct:
         (
             usage_rows,
             generations,
@@ -1801,6 +1881,21 @@ def run_once(
                 audit_after["archives"] = []
                 audit_after["archives_baselined"] = True
 
+    # Only a cold reconstruction can contain rows that no longer exist in the
+    # input after a later archive expiry. Stage the absolute snapshot and final
+    # checkpoint durably before the first POST; warm and single-batch paths keep
+    # their existing replay behavior.
+    if (
+        cold_reconstruct
+        and audit_after is not None
+        and len(usage_rows) > MAX_PAYLOAD_ROWS
+    ):
+        state["audit_staged"] = {
+            "rows": [dict(row) for row in usage_rows],
+            "audit_after": audit_after,
+        }
+        _save_state(state_path, state)
+
     cursors = dict(state["usage_cursors"])
     files = dict(state["usage_files"])
     prepared = _prepare_usage_files(usage_dir, cursors, files)
@@ -1819,6 +1914,7 @@ def run_once(
     )
     if not ok:
         return False
+    sent_any = sent_any or staged_sent
     # An ACKed pending batch already refreshed producer liveness for this run.
     if sent_any or pending_acked or not heartbeat:
         return True
@@ -1831,6 +1927,7 @@ def run_once(
         state,
         [],
         [],
+        None,
         None,
         dict(state["usage_cursors"]),
         dict(state["usage_files"]),

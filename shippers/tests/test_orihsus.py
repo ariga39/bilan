@@ -1231,6 +1231,38 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(state["audit_cursor"], full_size)
         self.assertIsNone(state["pending"])
 
+    def test_cold_multibatch_snapshot_resumes_after_archive_expiry(self) -> None:
+        records = [
+            audit_record(
+                "2026-11-26T08:05:00.000Z",
+                gateway_key="staged-%03d" % index,
+                **self._tokens(1),
+            )
+            for index in range(501)
+        ]
+        archive = self.write_audit_archive(1, records)
+        self.ingest.drop_next_response = True
+
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 500)
+        state = self.read_state()
+        self.assertIsNotNone(state["audit_staged"])
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+
+        # The source archive expires before the remaining staged row is sent.
+        os.remove(archive)
+        self.assert_ok(self.run_cli())
+
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 501)
+        state = self.read_state()
+        self.assertIsNone(state["pending"])
+        self.assertIsNone(state["audit_staged"])
+
+        before = self.received_buckets()
+        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
+        self.assertEqual(self.received_buckets(), before)
+
     def test_incremental_aggregation_is_bounded_to_captured_extent(self) -> None:
         first = audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")
         self.write_audit([first])
@@ -2193,6 +2225,83 @@ class OrihsusShipperTests(unittest.TestCase):
             ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
         ]
         self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
+
+    def test_same_size_archive_replacement_after_two_rotations_keeps_active(self) -> None:
+        archive = self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T07:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        original_size = os.path.getsize(archive)
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ]
+        )
+        self.assert_ok(self.run_cli())
+
+        # retention=1: the acknowledged active generation expires, and the new
+        # .1 has the same name and byte size as the replaced one. Its changed
+        # device/inode must still trigger the cold reconstruction.
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ],
+        )
+        self.assertEqual(
+            os.path.getsize(os.path.join(self.tempdir, "audit.jsonl.1")),
+            original_size,
+        )
+
+        self.assert_ok(self.run_cli())
+
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
+        self.assertEqual(len(self.read_state()["audit_archives"][0]), 4)
+
+    def test_legacy_name_size_archive_fingerprint_is_accepted(self) -> None:
+        archive = self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        acknowledged = self.received_buckets()
+
+        state = self.read_state()
+        state["audit_archives"] = [
+            [os.path.basename(archive), os.path.getsize(archive)]
+        ]
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.received_buckets(), acknowledged)
+        self.assertEqual(len(self.read_state()["audit_archives"][0]), 4)
 
     def test_legacy_eof_without_archives_recovers_active_generation_once(self) -> None:
         self.write_audit(
