@@ -1,8 +1,17 @@
 /* oxlint-disable typescript/no-unsafe-return -- TanStack Router loader/route-context generated types */
 import type { BalanceHistoryResponse, BalanceProvider } from "@bilan/shared";
-import { useIsFetching, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import {
+  useIsFetching,
+  useQueries,
+  useQuery,
+  useQueryClient,
+  useQueryErrorResetBoundary,
+} from "@tanstack/react-query";
+import { Link, createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
+import { RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Dashboard, DashboardLoading } from "@/Dashboard";
 import {
   historyQueryOptions,
@@ -39,10 +48,83 @@ function PendingDashboard() {
 
 function DashboardError({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : "The read API is unavailable.";
+  const search = Route.useSearch();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const queryErrorResetBoundary = useQueryErrorResetBoundary();
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => {
+    queryErrorResetBoundary.reset();
+  }, [queryErrorResetBoundary]);
+
+  async function retry(): Promise<void> {
+    setRetrying(true);
+    queryErrorResetBoundary.reset();
+    try {
+      queryClient.removeQueries({ queryKey: ["overview"] });
+      queryClient.removeQueries({ queryKey: ["usage-daily"] });
+      queryClient.removeQueries({ queryKey: ["balance-history"] });
+      await router.invalidate();
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   return (
-    <div className="m-6 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
-      <p className="font-medium text-destructive">Dashboard data could not be loaded.</p>
-      <p className="mt-1 text-xs text-muted-foreground">{message}</p>
+    <div className="min-h-screen">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">bilan</h1>
+            <p className="text-xs text-muted-foreground">
+              {search.month} · {search.tz}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void retry();
+            }}
+            disabled={retrying}
+          >
+            <RefreshCw className={retrying ? "animate-spin" : undefined} />
+            Retry
+          </Button>
+        </header>
+
+        <nav
+          aria-label="Dashboard views"
+          className="flex w-fit items-center gap-1 rounded-lg border bg-card p-0.5 text-sm"
+        >
+          <Link
+            to="/"
+            search={{ ...search, view: "overview" }}
+            className="rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            Overview
+          </Link>
+          <Link
+            to="/"
+            search={{ ...search, view: "usage" }}
+            className="rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            Usage
+          </Link>
+        </nav>
+
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"
+        >
+          <p className="font-medium text-destructive">Dashboard data could not be loaded.</p>
+          <p className="mt-1 text-xs text-muted-foreground">{message}</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Navigation remains available. Retry to reload the current selection.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

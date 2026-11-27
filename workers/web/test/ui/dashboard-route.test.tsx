@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -47,6 +47,37 @@ afterEach(() => {
 });
 
 describe("shipped dashboard route", () => {
+  it("keeps navigation available and recovers after an initial overview failure", async () => {
+    let overviewCalls = 0;
+    const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
+    const dataSource: DashboardDataSource = {
+      overview: async () => {
+        overviewCalls += 1;
+        if (overviewCalls === 1) {
+          throw new Error("first load failed");
+        }
+        return overview;
+      },
+      daily: async (input: UsageInput) => buildPopulatedDaily(input.timezone, input.month),
+      history: async (provider) => buildPopulatedHistory(provider),
+    };
+    const { router, queryClient } = createRouterFor(dataSource, "overview");
+    rendered(router, queryClient);
+
+    expect(await screen.findByText("Dashboard data could not be loaded.")).toBeTruthy();
+    expect(screen.getByText("first load failed")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Usage" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(overviewCalls).toBeGreaterThan(1);
+    });
+    expect(await screen.findByText("Quota overview", {}, { timeout: 3000 })).toBeTruthy();
+    expect(overviewCalls).toBeGreaterThan(1);
+    expect(screen.queryByText("Dashboard data could not be loaded.")).toBeNull();
+  });
+
   it("keeps monthly usage and navigation when daily usage fails", async () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     const dataSource: DashboardDataSource = {
@@ -90,7 +121,7 @@ describe("shipped dashboard route", () => {
     const { router, queryClient } = createRouterFor(dataSource, "overview");
     rendered(router, queryClient);
 
-    expect(await screen.findByText("Quota overview")).toBeTruthy();
+    expect(await screen.findByText("Quota overview", {}, { timeout: 3000 })).toBeTruthy();
     expect((await screen.findAllByText("OpenRouter")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Balance history")).toBeTruthy();
 
