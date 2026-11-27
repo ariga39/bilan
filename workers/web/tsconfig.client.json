@@ -13,6 +13,8 @@
     }
   },
   "include": [
+    ".storybook/**/*.ts",
+    ".storybook/**/*.tsx",
     "src/client/**/*.ts",
     "src/client/**/*.tsx",
     "vite.config.ts",

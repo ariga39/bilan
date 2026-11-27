@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm --filter bilan-web build",
+    "build-storybook": "pnpm --filter bilan-web build-storybook",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm typecheck:acceptance && pnpm test",
     "dev:ingest": "pnpm --filter bilan-ingest exec wrangler dev --port 8787 --test-scheduled --persist-to ../../.wrangler/state",
     "dev:web": "pnpm --filter bilan-web build && pnpm --filter bilan-web exec wrangler dev --port 8788 --persist-to ../../.wrangler/state",
@@ -11,6 +12,7 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
+    "storybook": "pnpm --filter bilan-web storybook",
     "test": "pnpm -r --if-present test",
     "test:e2e": "pnpm --filter bilan-web test:e2e",
     "test:e2e:b5": "pnpm --filter bilan-web test:e2e:b5",
