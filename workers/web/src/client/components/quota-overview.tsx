@@ -1,5 +1,4 @@
 import type { QuotaAttempt, QuotaResponse, QuotaSubject, QuotaWindow } from "@bilan/shared";
-import { filterVisibleQuotaSubjects } from "@bilan/shared";
 import { AlertTriangle, Clock3, Sparkles, TriangleAlert } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -818,7 +817,7 @@ function OpenCodeOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
 }
 
 export function QuotaOverview({ quota }: { quota: QuotaResponse }) {
-  const subjects = filterVisibleQuotaSubjects(quota.subjects, new Date(quota.generated_at));
+  const subjects = quota.subjects;
   const codex = subjects.filter((subject) => subject.source === "codex");
   const agy = subjects.filter((subject) => subject.source === "agy");
   const opencode = subjects.filter((subject) => subject.source === "opencode");
