@@ -187,20 +187,41 @@ function windowGroups(
   return [...groups.entries()].map(([bucketId, windows]) => ({ bucketId, windows }));
 }
 
+function statusPriority(status: QuotaWindow["status"]): number {
+  if (status === "limited") {
+    return 0;
+  }
+  if (status === "cooldown") {
+    return 1;
+  }
+  if (status === "ok") {
+    return 2;
+  }
+  if (status === "unknown") {
+    return 3;
+  }
+  return 4;
+}
+
 function limitingWindow(subject: QuotaSubject): QuotaWindow | null {
-  return (
-    (subject.latest_valid?.windows ?? []).reduce<QuotaWindow | null>((current, window) => {
-      if (window.remaining_percent === null) {
-        return current;
-      }
-      if (current === null || current.remaining_percent === null) {
-        return window;
-      }
-      return window.remaining_percent < current.remaining_percent ? window : current;
-    }, null) ??
-    subject.latest_valid?.windows[0] ??
-    null
-  );
+  const windows = subject.latest_valid?.windows ?? [];
+  return windows.reduce<QuotaWindow | null>((current, window) => {
+    if (current === null) {
+      return window;
+    }
+    const priority = statusPriority(window.status);
+    const currentPriority = statusPriority(current.status);
+    if (priority !== currentPriority) {
+      return priority < currentPriority ? window : current;
+    }
+    if (window.remaining_percent === null) {
+      return current;
+    }
+    if (current.remaining_percent === null) {
+      return window;
+    }
+    return window.remaining_percent < current.remaining_percent ? window : current;
+  }, null);
 }
 
 function WindowReading({

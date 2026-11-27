@@ -1,5 +1,6 @@
 import { overviewResponseSchema } from "@bilan/shared/schemas";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -9,15 +10,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { unstable_dev } from "wrangler";
 
-import { QuotaSection } from "@/components/quota-section";
 import { UsageSection } from "@/components/usage-section";
 
 type DevWorker = Awaited<ReturnType<typeof unstable_dev>>;
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const ORIHSUS_TOKEN = "test-orihsus-token";
+const ORIHSUS_BOUNDARY_TOKEN = "test-orihsus-boundary-token";
 const DEBITMETRE_TOKEN = "test-debitmetre-token";
 const TELEMETRE_TOKEN = "test-telemetre-token";
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 const PRODUCERS_JSON = JSON.stringify({
   "debitmetre-main": {
     token_sha256: "c6c726663d39185c46966f2075416a8b8348523b809c7e09f1ea984631e98a9b",
@@ -33,6 +39,12 @@ const PRODUCERS_JSON = JSON.stringify({
       { source: "opencode", kind: "usage_buckets" },
       { source: "opencode", kind: "quota_observations" },
     ],
+  },
+  "orihsus-boundary": {
+    token_sha256: sha256Hex(ORIHSUS_BOUNDARY_TOKEN),
+    display_name: "orihsus (boundary fixture)",
+    expected_interval_seconds: 300,
+    scopes: [{ source: "opencode", kind: "quota_observations" }],
   },
   "telemetre-quota": {
     token_sha256: "da822ee843c11c977d04fa8914d6ddd33161258e734b46853aac031d2e63e403",
@@ -551,6 +563,11 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(pageResponse.body).toContain("Quota overview");
     expect(pageResponse.body).toContain("/assets/");
     expect(pageResponse.body).not.toContain("Something went wrong");
+    expect(pageResponse.body).toContain("fp_a");
+    expect(pageResponse.body).toContain("fp_b");
+    expect(pageResponse.body).toContain("go-key-1");
+    expect(pageResponse.body).toContain("43.5%");
+    expect(pageResponse.body).toContain("monthly");
 
     expect(overview.usage.rows).toEqual(
       expect.arrayContaining([
@@ -594,23 +611,125 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(usageHtml).toContain("laptop-key");
     expect(usageHtml).toContain(">Identity<");
     expect(usageHtml).toContain(">Machine<");
+  });
 
-    if (!fpA) {
-      throw new Error("fp_a quota subject missing");
+  it("renders visible and >=7d hidden OpenCode keys from the shipped SSR overview", async () => {
+    if (ingest === null || web === null) {
+      throw new Error("local Workers did not start");
     }
-    const fpAHtml = renderToStaticMarkup(
-      <QuotaSection quota={{ generated_at: overview.quotas.generated_at, subjects: [fpA] }} />,
-    );
-    expect(fpAHtml).toContain("Quota windows for OpenCode Go fp_a");
-    expect(fpAHtml).toContain("rolling");
-    expect(fpAHtml).toContain("43.5%");
-    expect(fpAHtml).toContain("go-key-1");
-    expect(fpAHtml).not.toContain("monthly");
+    const now = Date.now();
+    const day = 86_400_000;
+    const at = (offsetMs: number) => utcSecond(new Date(now - offsetMs));
+    const futureReset = utcSecond(new Date(now + 15 * 60_000));
+    const payload = {
+      schema_version: 1,
+      batch_seq: 1,
+      usage_buckets: [],
+      balance_snapshots: [],
+      quota_observations: [
+        {
+          sample_id: "e2e-visible-1",
+          source: "opencode",
+          account: "key-e2e-visible",
+          observer_machine: "gateway-a",
+          sampled_at: at(6 * day),
+          interval_seconds: 300,
+          status: "ok",
+          time_anomaly: null,
+          error_summary: null,
+          windows: [
+            {
+              bucket_id: "key-e2e-visible",
+              slot: "rolling",
+              label: "visible-key",
+              used_percent: 88.5,
+              remaining_percent: 11.5,
+              status: "ok",
+              resets_at: futureReset,
+              window_duration_mins: 300,
+            },
+          ],
+        },
+        {
+          sample_id: "e2e-past-1",
+          source: "opencode",
+          account: "key-e2e-past",
+          observer_machine: "gateway-a",
+          sampled_at: at(8 * day),
+          interval_seconds: 300,
+          status: "ok",
+          time_anomaly: null,
+          error_summary: null,
+          windows: [
+            {
+              bucket_id: "key-e2e-past",
+              slot: "rolling",
+              label: "past-key",
+              used_percent: 77.75,
+              remaining_percent: 22.25,
+              status: "ok",
+              resets_at: futureReset,
+              window_duration_mins: 300,
+            },
+          ],
+        },
+        {
+          sample_id: "e2e-reappeared-valid",
+          source: "opencode",
+          account: "key-e2e-reappeared",
+          observer_machine: "gateway-a",
+          sampled_at: at(9 * day),
+          interval_seconds: 300,
+          status: "ok",
+          time_anomaly: null,
+          error_summary: null,
+          windows: [
+            {
+              bucket_id: "key-e2e-reappeared",
+              slot: "rolling",
+              label: "reappeared-key",
+              used_percent: 66.5,
+              remaining_percent: 33.5,
+              status: "ok",
+              resets_at: futureReset,
+              window_duration_mins: 300,
+            },
+          ],
+        },
+        {
+          sample_id: "e2e-reappeared-error",
+          source: "opencode",
+          account: "key-e2e-reappeared",
+          observer_machine: "gateway-a",
+          sampled_at: at(60_000),
+          interval_seconds: 300,
+          status: "error",
+          time_anomaly: null,
+          error_summary: "upstream_error",
+          windows: [],
+        },
+      ],
+    };
 
-    const quotaHtml = renderToStaticMarkup(<QuotaSection quota={overview.quotas} />);
-    expect(quotaHtml).toContain("fp_b");
-    expect(quotaHtml).toContain("monthly");
-    expect(quotaHtml).not.toContain("No quota observations yet");
+    const push = await httpCall(`${baseUrl(ingest)}/api/v1/ingest`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ORIHSUS_BOUNDARY_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    expect(push.status, push.body).toBe(200);
+
+    const month = new Date(now).toISOString().slice(0, 7);
+    const page = await httpCall(`${baseUrl(web)}/?view=overview&tz=UTC&month=${month}`);
+    expect(page.status, page.body).toBe(200);
+    expect(page.body).toContain("key-e2e-visible");
+    expect(page.body).toContain("11.5%");
+    expect(page.body).toContain("key-e2e-reappeared");
+    expect(page.body).toContain("Latest attempt failed");
+    expect(page.body).not.toContain("key-e2e-past");
+    expect(page.body).not.toContain("22.25%");
   });
 
   it("pushes AGY and Codex quota through local Workers, including late and same-second samples", async () => {
@@ -925,18 +1044,17 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     // usage rows or a fake zero total.
     expect(overview.usage.rows.some((row) => row.source === "agy")).toBe(false);
 
-    const quotaHtml = renderToStaticMarkup(<QuotaSection quota={overview.quotas} />);
-    expect(quotaHtml).toContain("Quota windows for AGY agy-main");
-    expect(quotaHtml).toContain("Quota windows for Codex codex-main");
-    expect(quotaHtml).toContain("Gemini");
-    expect(quotaHtml).toContain("five-hour");
-    expect(quotaHtml).toContain("5h");
-    expect(quotaHtml).toContain("30%");
-    expect(quotaHtml).toContain("80%");
-    expect(quotaHtml).toContain("Clock anomaly detected");
-    expect(quotaHtml).toContain("future_sampled_at");
-    expect(quotaHtml).toContain("Latest attempt failed");
-    expect(quotaHtml).toContain("Latest attempt was empty");
-    expect(quotaHtml).toContain("AGY tokens are not collected");
+    const pageResponse = await httpCall(`${webUrl}/?view=overview&tz=UTC&month=${overviewMonth}`);
+    expect(pageResponse.status, pageResponse.body).toBe(200);
+    expect(pageResponse.body).toContain("agy-main");
+    expect(pageResponse.body).toContain("codex-main");
+    expect(pageResponse.body).toContain("Gemini");
+    expect(pageResponse.body).toContain("five-hour");
+    expect(pageResponse.body).toContain("30%");
+    expect(pageResponse.body).toContain("80%");
+    expect(pageResponse.body).toContain("Clock anomaly");
+    expect(pageResponse.body).toContain("future_sampled_at");
+    expect(pageResponse.body).toContain("Latest attempt failed");
+    expect(pageResponse.body).toContain("Latest attempt was empty");
   });
 });

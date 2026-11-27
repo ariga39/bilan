@@ -59,12 +59,16 @@ function DashboardRoute() {
   const daily = useQuery({
     ...usageDailyQueryOptions(dataSource, search),
     enabled: search.view === "usage",
+    refetchInterval: search.view === "usage" ? 60_000 : false,
   });
   const historyProviders: Array<BalanceProvider> = overview.data
     ? [...new Set(overview.data.balances.map((balance) => balance.provider))]
     : [];
   const historyQueries = useQueries({
-    queries: historyProviders.map((provider) => historyQueryOptions(dataSource, provider)),
+    queries: historyProviders.map((provider) => ({
+      ...historyQueryOptions(dataSource, provider),
+      refetchInterval: 60_000,
+    })),
   });
   const histories: Partial<Record<BalanceProvider, BalanceHistoryResponse>> = {};
   historyProviders.forEach((provider, index) => {

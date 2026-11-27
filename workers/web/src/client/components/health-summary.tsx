@@ -53,13 +53,9 @@ function latestDataAge(overview: OverviewResponse): string {
     }
   }
   for (const subject of overview.quotas.subjects) {
-    for (const observation of [subject.latest_valid, subject.latest_attempt]) {
-      if (
-        observation?.sample_age_seconds !== null &&
-        observation?.sample_age_seconds !== undefined
-      ) {
-        ages.push(observation.sample_age_seconds);
-      }
+    const observation = subject.latest_valid;
+    if (observation?.sample_age_seconds !== null && observation?.sample_age_seconds !== undefined) {
+      ages.push(observation.sample_age_seconds);
     }
   }
   if (overview.usage.data_age_seconds !== null) {

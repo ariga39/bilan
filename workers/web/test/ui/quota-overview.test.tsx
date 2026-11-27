@@ -71,6 +71,45 @@ describe("QuotaOverview display", () => {
     expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
   });
 
+  it("keeps a reported limited status as the limiting summary when its percentage is null", () => {
+    const base = subject();
+    if (!base.latest_valid) {
+      throw new Error("fixture must have a valid observation");
+    }
+    const limited = subject({
+      source: "opencode",
+      account: "key-limited",
+      latest_valid: {
+        ...base.latest_valid,
+        windows: [
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-limited",
+            slot: "rolling",
+            used_percent: null,
+            remaining_percent: null,
+            status: "limited",
+          },
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-limited",
+            slot: "weekly",
+            used_percent: 20,
+            remaining_percent: 80,
+            status: "ok",
+          },
+        ],
+      },
+    });
+    render(<QuotaOverview quota={quota([limited])} />);
+    const summary = screen.getByText("key-limited").closest("summary");
+    if (!summary) {
+      throw new Error("OpenCode summary was not rendered");
+    }
+    expect(summary.textContent).toContain("Limited");
+    expect(summary.textContent).toContain("—");
+  });
+
   it("keeps the seven-day visibility boundary and shows collapsed key warnings", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     render(<QuotaOverview quota={overview.quotas} />);
