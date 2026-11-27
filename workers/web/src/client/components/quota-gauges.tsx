@@ -54,7 +54,7 @@ function WindowWarningBadge({ status }: { status: QuotaWindow["status"] }) {
   return null;
 }
 
-/** Frameless pop-out anime character cutout standing directly above/inside the card edge. */
+/** Frameless pop-out anime character cutout grounded cleanly on its card edge. */
 export function CharacterCutout({
   src,
   glowFilter,
@@ -70,11 +70,7 @@ export function CharacterCutout({
       alt=""
       aria-hidden="true"
       className={cn("pointer-events-none select-none object-contain object-bottom", className)}
-      style={{
-        filter: glowFilter,
-        maskImage: "linear-gradient(to bottom, black 82%, transparent 100%)",
-        WebkitMaskImage: "linear-gradient(to bottom, black 82%, transparent 100%)",
-      }}
+      style={{ filter: glowFilter }}
     />
   );
 }

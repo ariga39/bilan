@@ -88,20 +88,17 @@ function SubjectMetaRow({ subject, showAccount }: { subject: QuotaSubject; showA
 
 function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
   const showAccount = subjects.length > 1;
-  const singleFreshAge =
-    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
-      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
-      : null;
+  const singleValid = subjects.length === 1 ? (subjects[0]?.latest_valid ?? null) : null;
 
   return (
-    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
-      <CharacterCutout
-        src="/mascot-chatgpt.png"
-        glowFilter="drop-shadow(0 0 14px rgba(226, 232, 240, 0.5))"
-        className="absolute -top-8 left-1.5 z-20 h-40 w-30 sm:h-44 sm:w-34"
-      />
-      <CardHeader className="pl-30 pr-4 pb-0 sm:pl-36">
-        <div className="flex items-center justify-between gap-2">
+    <Card className="relative min-w-0 gap-0 overflow-visible py-4">
+      <CardHeader className="relative pt-3 pl-4 pr-34 pb-3 sm:pt-4 sm:pr-42">
+        <CharacterCutout
+          src="/mascot-chatgpt.png"
+          glowFilter="drop-shadow(0 0 14px rgba(226, 232, 240, 0.5))"
+          className="absolute right-2 bottom-0 z-20 h-32 w-32 sm:right-3 sm:h-36 sm:w-36"
+        />
+        <div>
           <CardTitle
             style={{ fontFamily: "var(--font-display)" }}
             className="flex items-center gap-2 text-sm tracking-wide text-starlight-codex"
@@ -109,12 +106,24 @@ function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             <Sparkles className="size-4 text-starlight-codex-soft" />
             {sourceMeta("codex").label}
           </CardTitle>
-          {singleFreshAge !== null ? (
-            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
+          {singleValid ? (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              {singleValid.is_stale ? (
+                <Badge
+                  variant="outline"
+                  className="rounded-full border-amber-400/40 bg-amber-500/15 px-2 py-0 text-[10px] text-amber-200"
+                >
+                  Stale
+                </Badge>
+              ) : null}
+              <span title={formatDateTime(singleValid.sampled_at)}>
+                ✦ {formatAge(singleValid.sample_age_seconds)}
+              </span>
+            </div>
           ) : null}
         </div>
       </CardHeader>
-      <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
+      <CardContent className="space-y-3 px-4 pt-0">
         {subjects.length === 0 ? (
           <p className="rounded-xl border border-dashed border-starlight-gold/25 px-3 py-4 text-center text-xs text-muted-foreground">
             No ChatGPT Subs quota observations yet.
@@ -124,9 +133,7 @@ function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             const windows = subject.latest_valid?.windows ?? [];
             return (
               <div key={`${subject.source}-${subject.account}`} className="space-y-2">
-                {showAccount || subject.latest_valid?.is_stale ? (
-                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
-                ) : null}
+                {showAccount ? <SubjectMetaRow subject={subject} showAccount /> : null}
                 <AttemptWarning attempt={subject.latest_attempt} />
                 <AnomalyWarning subject={subject} />
                 {windows.length === 0 ? (
@@ -189,20 +196,17 @@ function renderBucketWindows(
 
 function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
   const showAccount = subjects.length > 1;
-  const singleFreshAge =
-    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
-      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
-      : null;
+  const singleValid = subjects.length === 1 ? (subjects[0]?.latest_valid ?? null) : null;
 
   return (
-    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
-      <CharacterCutout
-        src="/mascot-gemini.png"
-        glowFilter="drop-shadow(0 0 14px rgba(192, 132, 252, 0.55))"
-        className="absolute -top-8 left-1.5 z-20 h-40 w-30 sm:h-44 sm:w-34"
-      />
-      <CardHeader className="pl-30 pr-4 pb-0 sm:pl-36">
-        <div className="flex items-center justify-between gap-2">
+    <Card className="relative min-w-0 gap-0 overflow-visible py-4">
+      <CardHeader className="relative pt-3 pl-4 pr-34 pb-3 sm:pt-4 sm:pr-42">
+        <CharacterCutout
+          src="/mascot-gemini.png"
+          glowFilter="drop-shadow(0 0 14px rgba(192, 132, 252, 0.55))"
+          className="absolute right-2 bottom-0 z-20 h-32 w-32 sm:right-3 sm:h-36 sm:w-36"
+        />
+        <div>
           <CardTitle
             style={{ fontFamily: "var(--font-display)" }}
             className="flex items-center gap-2 text-sm tracking-wide text-starlight-agy"
@@ -210,12 +214,24 @@ function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             <Sparkles className="size-4 text-starlight-arcane" />
             {sourceMeta("agy").label}
           </CardTitle>
-          {singleFreshAge !== null ? (
-            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
+          {singleValid ? (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              {singleValid.is_stale ? (
+                <Badge
+                  variant="outline"
+                  className="rounded-full border-amber-400/40 bg-amber-500/15 px-2 py-0 text-[10px] text-amber-200"
+                >
+                  Stale
+                </Badge>
+              ) : null}
+              <span title={formatDateTime(singleValid.sampled_at)}>
+                ✦ {formatAge(singleValid.sample_age_seconds)}
+              </span>
+            </div>
           ) : null}
         </div>
       </CardHeader>
-      <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
+      <CardContent className="space-y-3 px-4 pt-0">
         {subjects.length === 0 ? (
           <p className="rounded-xl border border-dashed border-starlight-gold/25 px-3 py-4 text-center text-xs text-muted-foreground">
             No Google AI Subs quota observations yet.
@@ -232,9 +248,7 @@ function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             );
             return (
               <div key={`${subject.source}-${subject.account}`} className="space-y-2">
-                {showAccount || subject.latest_valid?.is_stale ? (
-                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
-                ) : null}
+                {showAccount ? <SubjectMetaRow subject={subject} showAccount /> : null}
                 <AttemptWarning attempt={subject.latest_attempt} />
                 <AnomalyWarning subject={subject} />
                 {groups.length === 0 ? (
@@ -336,19 +350,20 @@ function OpenCodeOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
   }
   const hasMultiple = subjects.length > 1;
   return (
-    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
-      <CharacterCutout
-        src="/mascot-deepseek.png"
-        glowFilter="drop-shadow(0 0 14px rgba(56, 189, 248, 0.5))"
-        className="absolute -top-9 left-3 z-20 h-24 w-24 sm:-top-10 sm:h-28 sm:w-28"
-      />
-      <CardHeader className="pl-28 pr-4 pb-0 sm:pl-32">
+    <Card className="relative mt-14 min-w-0 gap-0 overflow-visible py-4 sm:mt-16">
+      <CardHeader className="relative pt-3 pl-4 pr-34 pb-3 sm:pt-4 sm:pr-42">
+        <CharacterCutout
+          src="/mascot-deepseek.png"
+          glowFilter="drop-shadow(0 0 14px rgba(56, 189, 248, 0.5))"
+          className="absolute right-2 bottom-0 z-20 h-32 w-32 sm:right-3 sm:h-36 sm:w-36"
+        />
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <CardTitle
               style={{ fontFamily: "var(--font-display)" }}
               className="flex items-center gap-2 text-sm tracking-wide text-starlight-opencode"
             >
+              <Sparkles className="size-4 text-[#38bdf8]" />
               {sourceMeta("opencode").label}
             </CardTitle>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -357,7 +372,7 @@ function OpenCodeOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2.5 px-4 pt-1">
+      <CardContent className="space-y-2.5 px-4 pt-0">
         {subjects.length === 0 ? (
           <p className="rounded-xl border border-dashed border-starlight-gold/25 px-3 py-3 text-xs text-muted-foreground">
             No active OpenCode Go keys in the last 7 days.
@@ -384,7 +399,7 @@ export function QuotaOverview({ quota }: { quota: QuotaResponse }) {
 
   return (
     <div className="space-y-3.5">
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="mt-14 grid gap-x-4 gap-y-16 sm:mt-16 lg:grid-cols-2 lg:gap-y-4">
         <ChatGPTSubsCard subjects={codex} />
         <GoogleAISubsCard subjects={agy} />
       </div>
