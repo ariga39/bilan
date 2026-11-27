@@ -83,7 +83,7 @@ describe("QuotaOverview display", () => {
     expect(screen.queryByText("Not reported")).toBeNull();
   });
 
-  it("omits Claude and GPT models buckets from Google AI Subs while keeping Gemini", () => {
+  it("collapses Claude and GPT models buckets into a secondary disclosure while preserving all windows and statuses", () => {
     const base = subject();
     if (!base.latest_valid) {
       throw new Error("fixture must have a valid observation");
@@ -93,6 +93,17 @@ describe("QuotaOverview display", () => {
         ...base.latest_valid,
         windows: [
           ...base.latest_valid.windows,
+          {
+            bucket_id: "Gemini",
+            slot: "monthly",
+            label: "monthly",
+            used_percent: 10,
+            remaining_percent: 90,
+            status: "unknown",
+            resets_at: null,
+            reset_in_seconds: null,
+            window_duration_mins: 43_200,
+          },
           {
             bucket_id: "Claude and GPT models",
             slot: "five-hour",
@@ -108,9 +119,30 @@ describe("QuotaOverview display", () => {
       },
     });
     render(<QuotaOverview quota={quota([mixed])} />);
-    expect(screen.queryByText("Claude and GPT models")).toBeNull();
+    expect(screen.getByText("Other models (1)")).toBeTruthy();
+    expect(screen.getByText("Unknown")).toBeTruthy();
     expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("progressbar")).toHaveLength(2);
+    expect(screen.getAllByRole("progressbar")).toHaveLength(4);
+  });
+
+  it("groups multiple ChatGPT Subs accounts with individual stale indicators", () => {
+    const base = subject({ source: "codex", account: "codex-a" });
+    if (!base.latest_valid) {
+      throw new Error("fixture must have a valid observation");
+    }
+    const staleSecond = subject({
+      source: "codex",
+      account: "codex-b",
+      latest_valid: {
+        ...base.latest_valid,
+        is_stale: true,
+        sample_age_seconds: 3600,
+      },
+    });
+    render(<QuotaOverview quota={quota([base, staleSecond])} />);
+    expect(screen.getByText("codex-a")).toBeTruthy();
+    expect(screen.getByText("codex-b")).toBeTruthy();
+    expect(screen.getByText("Stale")).toBeTruthy();
   });
 
   it("shows limited status and missing percentage without inventing zero", () => {

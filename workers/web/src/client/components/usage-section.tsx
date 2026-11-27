@@ -198,21 +198,42 @@ function dailyGroups(rows: Array<DailyUsageRow>): Array<SummaryGroup> {
   return sortGroups([...groups.values()]);
 }
 
-function meteredCaption(group: Pick<SummaryGroup, "requests" | "gaps" | "input">): {
+function formatCoverageTag(counted: number, total: number): string {
+  if (total <= 0) {
+    return "";
+  }
+  if (total < 1000) {
+    return `${formatNumber(counted)}/${formatNumber(total)}`;
+  }
+  return `${Math.round((counted / total) * 1000) / 10}%`;
+}
+
+function meteredCaption(
+  group: Pick<SummaryGroup, "requests" | "gaps" | "input" | "cached" | "output" | "reasoning">,
+): {
   text: string;
   title: string;
 } | null {
   if (group.requests === 0) {
     return null;
   }
-  const counted = group.input.counted;
-  if (counted >= group.requests && group.gaps === 0) {
+  const reportedCounteds = [group.input, group.cached, group.output, group.reasoning].flatMap(
+    (agg) => (agg.value !== null ? [agg.counted] : []),
+  );
+  const minCounted = reportedCounteds.length > 0 ? Math.min(...reportedCounteds) : group.requests;
+  if (minCounted >= group.requests && group.gaps === 0) {
     return null;
   }
-  const pct = Math.round((counted / group.requests) * 1000) / 10;
+  const pct = Math.round((minCounted / group.requests) * 1000) / 10;
+  const text =
+    group.gaps > 0 && minCounted >= group.requests
+      ? `${formatNumber(group.gaps)} gap${group.gaps === 1 ? "" : "s"}`
+      : group.gaps > 0
+        ? `${pct}% metered · ${formatNumber(group.gaps)} gap${group.gaps === 1 ? "" : "s"}`
+        : `${pct}% metered`;
   return {
-    text: `${pct}% metered`,
-    title: `${formatNumber(counted)} of ${formatNumber(group.requests)} requests reported tokens (${formatNumber(group.gaps)} uncounted)`,
+    text,
+    title: `${formatNumber(minCounted)} of ${formatNumber(group.requests)} requests reported tokens (${formatNumber(group.gaps)} uncounted)`,
   };
 }
 
@@ -224,13 +245,22 @@ function TokenCell({ aggregate, mode }: { aggregate: TokenAggregate; mode: Numbe
       </span>
     );
   }
+  const isPartial = aggregate.counted < aggregate.units;
   const titleParts = [formatNumber(aggregate.value)];
-  if (aggregate.counted < aggregate.units) {
+  if (isPartial) {
     titleParts.push(`${formatNumber(aggregate.counted)}/${formatNumber(aggregate.units)} requests`);
   }
   return (
-    <span className="tabular-nums" title={titleParts.join(" · ")}>
-      {formatMetric(aggregate.value, mode)}
+    <span className="inline-flex items-baseline gap-1 tabular-nums" title={titleParts.join(" · ")}>
+      <span>{formatMetric(aggregate.value, mode)}</span>
+      {isPartial ? (
+        <span
+          className="text-[10px] font-normal text-muted-foreground"
+          aria-label={`${formatNumber(aggregate.counted)} of ${formatNumber(aggregate.units)} requests metered`}
+        >
+          {formatCoverageTag(aggregate.counted, aggregate.units)}
+        </span>
+      ) : null}
     </span>
   );
 }

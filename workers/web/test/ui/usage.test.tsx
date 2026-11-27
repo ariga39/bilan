@@ -238,6 +238,7 @@ describe("Token usage dashboard section", () => {
     expect(screen.getByText("Today · 2026-11-02")).toBeTruthy();
     const todaySummary = screen.getByLabelText("Today's usage summary");
     expect(within(todaySummary).getByText("5")).toBeTruthy();
+    expect(within(todaySummary).getByText("4/5")).toBeTruthy();
     expect(screen.getAllByText("This month · November 2026").length).toBeGreaterThan(0);
 
     expect(screen.getByText("Daily requests")).toBeTruthy();

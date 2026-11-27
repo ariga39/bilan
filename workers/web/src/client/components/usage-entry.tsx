@@ -12,9 +12,11 @@ interface SourceRowSummary {
   key: string;
   source: string;
   requests: number;
+  gaps: number;
   input: number | null;
+  inputCounted: number;
   output: number | null;
-  counted: number;
+  outputCounted: number;
 }
 
 function summarizeBySource(overview: OverviewResponse): Array<SourceRowSummary> {
@@ -25,12 +27,16 @@ function summarizeBySource(overview: OverviewResponse): Array<SourceRowSummary> 
       key,
       source: row.source,
       requests: 0,
+      gaps: 0,
       input: null,
+      inputCounted: 0,
       output: null,
-      counted: 0,
+      outputCounted: 0,
     };
     existing.requests += row.unit_count;
-    existing.counted += row.input_counted;
+    existing.gaps += row.coverage_gaps;
+    existing.inputCounted += row.input_counted;
+    existing.outputCounted += row.output_counted;
     if (row.input_tokens !== null) {
       existing.input = (existing.input ?? 0) + row.input_tokens;
     }
@@ -40,6 +46,16 @@ function summarizeBySource(overview: OverviewResponse): Array<SourceRowSummary> 
     map.set(key, existing);
   }
   return [...map.values()].sort((left, right) => left.source.localeCompare(right.source));
+}
+
+function formatCoverageTag(counted: number, total: number): string {
+  if (total <= 0) {
+    return "";
+  }
+  if (total < 1000) {
+    return `${formatNumber(counted)}/${formatNumber(total)}`;
+  }
+  return `${Math.round((counted / total) * 1000) / 10}%`;
 }
 
 export function UsageEntry({
@@ -103,8 +119,18 @@ export function UsageEntry({
         ) : (
           <div className="grid gap-2.5 sm:grid-cols-2">
             {summaries.map((item) => {
+              const reportedCounteds = [
+                ...(item.input !== null ? [item.inputCounted] : []),
+                ...(item.output !== null ? [item.outputCounted] : []),
+              ];
+              const minCounted =
+                reportedCounteds.length > 0 ? Math.min(...reportedCounteds) : item.requests;
+              const isPartial =
+                (reportedCounteds.length > 0 && minCounted < item.requests) || item.gaps > 0;
               const meteredPct =
-                item.requests > 0 ? Math.round((item.counted / item.requests) * 1000) / 10 : null;
+                item.requests > 0 ? Math.round((minCounted / item.requests) * 1000) / 10 : null;
+              const inputPartial = item.input !== null && item.inputCounted < item.requests;
+              const outputPartial = item.output !== null && item.outputCounted < item.requests;
               return (
                 <div
                   key={item.key}
@@ -112,12 +138,14 @@ export function UsageEntry({
                 >
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="text-sm font-medium">{sourceLabel(item.source)}</span>
-                    {meteredPct !== null && item.counted < item.requests ? (
+                    {isPartial && meteredPct !== null ? (
                       <span
                         className="text-[11px] text-muted-foreground"
-                        title={`${formatNumber(item.counted)} of ${formatNumber(item.requests)} requests reported tokens`}
+                        title={`${formatNumber(minCounted)} of ${formatNumber(item.requests)} requests reported tokens${item.gaps > 0 ? ` (${formatNumber(item.gaps)} uncounted)` : ""}`}
                       >
-                        {meteredPct}% metered
+                        {item.gaps > 0 && minCounted >= item.requests
+                          ? `${formatNumber(item.gaps)} gap${item.gaps === 1 ? "" : "s"}`
+                          : `${meteredPct}% metered`}
                       </span>
                     ) : null}
                   </div>
@@ -135,18 +163,40 @@ export function UsageEntry({
                       <dt className="text-[11px] text-muted-foreground">Input</dt>
                       <dd
                         className="truncate text-base font-semibold tabular-nums"
-                        title={item.input === null ? "Not reported" : formatNumber(item.input)}
+                        title={
+                          item.input === null
+                            ? "Not reported"
+                            : inputPartial
+                              ? `${formatNumber(item.input)} (${formatNumber(item.inputCounted)}/${formatNumber(item.requests)} requests)`
+                              : formatNumber(item.input)
+                        }
                       >
                         {item.input === null ? "—" : formatCompactNumber(item.input)}
+                        {inputPartial ? (
+                          <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+                            {formatCoverageTag(item.inputCounted, item.requests)}
+                          </span>
+                        ) : null}
                       </dd>
                     </div>
                     <div className="min-w-0">
                       <dt className="text-[11px] text-muted-foreground">Output</dt>
                       <dd
                         className="truncate text-base font-semibold tabular-nums"
-                        title={item.output === null ? "Not reported" : formatNumber(item.output)}
+                        title={
+                          item.output === null
+                            ? "Not reported"
+                            : outputPartial
+                              ? `${formatNumber(item.output)} (${formatNumber(item.outputCounted)}/${formatNumber(item.requests)} requests)`
+                              : formatNumber(item.output)
+                        }
                       >
                         {item.output === null ? "—" : formatCompactNumber(item.output)}
+                        {outputPartial ? (
+                          <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+                            {formatCoverageTag(item.outputCounted, item.requests)}
+                          </span>
+                        ) : null}
                       </dd>
                     </div>
                   </dl>

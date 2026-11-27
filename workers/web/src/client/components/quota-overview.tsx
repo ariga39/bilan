@@ -139,6 +139,16 @@ function WindowWarningBadge({ status }: { status: QuotaWindow["status"] }) {
       </Badge>
     );
   }
+  if (status === "unknown") {
+    return (
+      <Badge
+        variant="outline"
+        className="rounded-full border-violet-300/40 bg-violet-500/20 px-1.5 py-0 text-[10px] text-violet-200"
+      >
+        Unknown
+      </Badge>
+    );
+  }
   return null;
 }
 
@@ -155,7 +165,7 @@ function AttemptWarning({ attempt }: { attempt: QuotaAttempt | null }) {
           : "border-amber-400/40 bg-amber-500/15 text-amber-200",
       )}
     >
-      {attempt.status === "error" ? "Latest attempt failed" : "Latest attempt empty"} ·{" "}
+      {attempt.status === "error" ? "Latest attempt failed" : "Latest attempt was empty"} ·{" "}
       {formatDateTime(attempt.sampled_at)}
       {attempt.error_summary ? ` · ${attempt.error_summary}` : null}
     </p>
@@ -474,11 +484,41 @@ function DiamondManaRow({ window }: { window: QuotaWindow }) {
   );
 }
 
-function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
-  const sampleAge = subjects[0]?.latest_valid?.sample_age_seconds ?? null;
-  const windows = subjects.flatMap((subject) =>
-    (subject.latest_valid?.windows ?? []).map((window) => ({ subject, window })),
+function SubjectMetaRow({ subject, showAccount }: { subject: QuotaSubject; showAccount: boolean }) {
+  const valid = subject.latest_valid;
+  if (!showAccount && !valid?.is_stale && valid === null) {
+    return null;
+  }
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+      <div className="flex min-w-0 items-center gap-1.5">
+        {showAccount ? (
+          <span className="truncate font-mono text-xs text-[#e9d5ff]">{subject.account}</span>
+        ) : null}
+        {valid?.is_stale ? (
+          <Badge
+            variant="outline"
+            className="rounded-full border-amber-400/40 bg-amber-500/15 px-2 py-0 text-[10px] text-amber-200"
+          >
+            Stale
+          </Badge>
+        ) : null}
+      </div>
+      {valid ? (
+        <span className="text-muted-foreground" title={formatDateTime(valid.sampled_at)}>
+          ✦ {formatAge(valid.sample_age_seconds)}
+        </span>
+      ) : null}
+    </div>
   );
+}
+
+function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
+  const showAccount = subjects.length > 1;
+  const singleFreshAge =
+    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
+      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
+      : null;
 
   return (
     <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
@@ -496,45 +536,90 @@ function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             <Sparkles className="size-4 text-[#e2e8f0]" />
             {sourceMeta("codex").label}
           </CardTitle>
-          {sampleAge !== null ? (
-            <span className="text-[11px] text-muted-foreground">✦ {formatAge(sampleAge)}</span>
+          {singleFreshAge !== null ? (
+            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
           ) : null}
         </div>
       </CardHeader>
       <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
-        {subjects.map((subject) => (
-          <div key={`${subject.source}-${subject.account}`} className="space-y-1.5">
-            <AttemptWarning attempt={subject.latest_attempt} />
-            <AnomalyWarning subject={subject} />
-          </div>
-        ))}
-        {windows.length === 0 ? (
+        {subjects.length === 0 ? (
           <p className="rounded-xl border border-dashed border-[#f5d08a]/25 px-3 py-4 text-center text-xs text-muted-foreground">
             No ChatGPT Subs quota observations yet.
           </p>
         ) : (
-          <div className="flex min-w-0 flex-col gap-2">
-            {windows.map(({ subject, window }) => (
-              <SoulGemRing
-                key={`codex-${subject.account}-${window.bucket_id}-${window.slot}`}
-                window={window}
-              />
-            ))}
-          </div>
+          subjects.map((subject) => {
+            const windows = subject.latest_valid?.windows ?? [];
+            return (
+              <div key={`${subject.source}-${subject.account}`} className="space-y-2">
+                {showAccount || subject.latest_valid?.is_stale ? (
+                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
+                ) : null}
+                <AttemptWarning attempt={subject.latest_attempt} />
+                <AnomalyWarning subject={subject} />
+                {windows.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No valid quota windows.</p>
+                ) : (
+                  <div className="flex min-w-0 flex-col gap-2">
+                    {windows.map((window) => (
+                      <SoulGemRing
+                        key={`codex-${subject.account}-${window.bucket_id}-${window.slot}`}
+                        window={window}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </CardContent>
     </Card>
   );
 }
 
-function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
-  const sampleAge = subjects[0]?.latest_valid?.sample_age_seconds ?? null;
+function renderBucketWindows(
+  subject: QuotaSubject,
+  group: { bucketId: string; windows: Array<QuotaWindow> },
+) {
+  const weekly = group.windows.find(isWeeklyWindow);
+  const fiveHour = group.windows.find(isFiveHourWindow);
+  if (weekly && fiveHour) {
+    const extraWindows = group.windows.filter((w) => w !== weekly && w !== fiveHour);
+    return (
+      <div key={`agy-${subject.account}-${group.bucketId}`} className="flex min-w-0 flex-col gap-2">
+        <SoulGemRing
+          window={weekly}
+          accent="violet"
+          titleOverride={group.bucketId}
+          secondary={fiveHour}
+        />
+        {extraWindows.map((window) => (
+          <SoulGemRing
+            key={`agy-${subject.account}-${window.bucket_id}-${window.slot}`}
+            window={window}
+            accent="violet"
+            titleOverride={group.bucketId}
+          />
+        ))}
+      </div>
+    );
+  }
+  return group.windows.map((window) => (
+    <SoulGemRing
+      key={`agy-${subject.account}-${window.bucket_id}-${window.slot}`}
+      window={window}
+      accent="violet"
+      titleOverride={group.bucketId}
+    />
+  ));
+}
 
-  const visibleBuckets = subjects.flatMap((subject) =>
-    windowGroups(subject)
-      .filter((group) => !/claude/i.test(group.bucketId))
-      .map((group) => ({ subject, group })),
-  );
+function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
+  const showAccount = subjects.length > 1;
+  const singleFreshAge =
+    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
+      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
+      : null;
 
   return (
     <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
@@ -552,48 +637,56 @@ function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
             <Sparkles className="size-4 text-[#c084fc]" />
             {sourceMeta("agy").label}
           </CardTitle>
-          {sampleAge !== null ? (
-            <span className="text-[11px] text-muted-foreground">✦ {formatAge(sampleAge)}</span>
+          {singleFreshAge !== null ? (
+            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
           ) : null}
         </div>
       </CardHeader>
       <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
-        {subjects.map((subject) => (
-          <div key={`${subject.source}-${subject.account}`} className="space-y-1.5">
-            <AttemptWarning attempt={subject.latest_attempt} />
-            <AnomalyWarning subject={subject} />
-          </div>
-        ))}
-        {visibleBuckets.length === 0 ? (
+        {subjects.length === 0 ? (
           <p className="rounded-xl border border-dashed border-[#f5d08a]/25 px-3 py-4 text-center text-xs text-muted-foreground">
             No Google AI Subs quota observations yet.
           </p>
         ) : (
-          <div className="flex min-w-0 flex-col gap-2">
-            {visibleBuckets.map(({ subject, group }) => {
-              const weekly = group.windows.find(isWeeklyWindow);
-              const fiveHour = group.windows.find(isFiveHourWindow);
-              if (weekly && fiveHour) {
-                return (
-                  <SoulGemRing
-                    key={`agy-${subject.account}-${group.bucketId}`}
-                    window={weekly}
-                    accent="violet"
-                    titleOverride={group.bucketId}
-                    secondary={fiveHour}
-                  />
-                );
-              }
-              return group.windows.map((window) => (
-                <SoulGemRing
-                  key={`agy-${subject.account}-${window.bucket_id}-${window.slot}`}
-                  window={window}
-                  accent="violet"
-                  titleOverride={group.bucketId}
-                />
-              ));
-            })}
-          </div>
+          subjects.map((subject) => {
+            const groups = windowGroups(subject);
+            const primaryGroups = groups.filter((group) => !/claude/i.test(group.bucketId));
+            const secondaryGroups = groups.filter((group) => /claude/i.test(group.bucketId));
+            const secondaryHasAlert = secondaryGroups.some((group) =>
+              group.windows.some(
+                (window) => window.status === "limited" || window.status === "unknown",
+              ),
+            );
+            return (
+              <div key={`${subject.source}-${subject.account}`} className="space-y-2">
+                {showAccount || subject.latest_valid?.is_stale ? (
+                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
+                ) : null}
+                <AttemptWarning attempt={subject.latest_attempt} />
+                <AnomalyWarning subject={subject} />
+                {groups.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No valid quota windows.</p>
+                ) : (
+                  <div className="flex min-w-0 flex-col gap-2">
+                    {primaryGroups.map((group) => renderBucketWindows(subject, group))}
+                    {secondaryGroups.length > 0 ? (
+                      <details
+                        open={secondaryHasAlert || undefined}
+                        className="rounded-lg border border-[#f5d08a]/15 bg-[#0e0a20]/65 px-2.5 py-1.5 text-xs"
+                      >
+                        <summary className="cursor-pointer text-[11px] text-muted-foreground">
+                          Other models ({secondaryGroups.length})
+                        </summary>
+                        <div className="mt-2 flex flex-col gap-2">
+                          {secondaryGroups.map((group) => renderBucketWindows(subject, group))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </CardContent>
     </Card>
