@@ -332,6 +332,11 @@ Audit log recovery:
 - The first archive-aware run (new install or upgraded pre-rotation state)
   combines `audit.jsonl`, `audit.jsonl.1`, and every retained
   `audit.jsonl.N.gz` into one absolute snapshot per UTC hour.
+- Upgrade boundary: a state written before generation tracking cannot restore
+  contributions that had already expired from the rotations. The first
+  archive-aware run accounts only for records still retained on disk, so later
+  arrivals for those older hours are published without the expired
+  contribution.
 - Ordinary ticks still read only the active tail. A rotation or compressor
   change reconstructs the retained history once, so an hour split across
   generations stays combined and a late record from the previous active

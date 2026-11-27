@@ -2111,6 +2111,43 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(len(self.ingest.snapshot_requests()), requests)
         self.assertEqual(self.received_buckets(), acknowledged)
 
+    def test_rotation_losing_a_whole_acknowledged_line_fails_without_posting(self) -> None:
+        archive = self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        acknowledged = self.received_buckets()
+        requests = len(self.ingest.snapshot_requests())
+
+        # Keep only the first complete line. The start record and generation
+        # identity survive, but the acknowledged second request is gone.
+        with open(archive, "r+b") as handle:
+            handle.truncate(self.offset_after_lines(archive, 1))
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("2026-11-26T08:00:00Z/laptop-key/deepseek-chat", result.stderr)
+        self.assertIn("unit_count 2 -> 1", result.stderr)
+        self.assertIn("refusing to publish a smaller snapshot", result.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
+        self.assertEqual(self.received_buckets(), acknowledged)
+
     def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
         payload = self._encode(
             [

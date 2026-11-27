@@ -603,6 +603,60 @@ def _state_rows_for_hours(
     ]
 
 
+def _verify_generations_retain_acknowledged(
+    previous: Dict[str, list[dict[str, Any]]],
+    current: Dict[str, list[dict[str, Any]]],
+) -> None:
+    """Reject a cold reconstruction that shrinks an acknowledged generation.
+
+    Retained rotations are immutable apart from append, so a recognized starting
+    record must still carry every acknowledged group and none of its counts may
+    move backwards. This catches a plain archive truncated exactly at a newline,
+    which keeps its identity and first records but would otherwise publish a
+    smaller absolute snapshot. ``None`` token sums mean "not observed" and must
+    never be treated as zero.
+    """
+
+    for start_key, old_rows in previous.items():
+        new_rows = current.get(start_key)
+        if new_rows is None:
+            # The generation left retention; its exact contribution is retired.
+            continue
+        new_by_group = {
+            (row["bucket_start"], row["actor_id"], row["model"]): row
+            for row in new_rows
+        }
+        for old_row in old_rows:
+            group = (old_row["bucket_start"], old_row["actor_id"], old_row["model"])
+            new_row = new_by_group.get(group)
+            label = "%s/%s/%s" % group
+            if new_row is None:
+                raise ShipperError(
+                    "retained audit generation %s no longer contains acknowledged "
+                    "group %s; refusing to publish a smaller snapshot"
+                    % (start_key[:16], label)
+                )
+            columns = ["unit_count", "coverage_gaps"]
+            for payload_column, _record_field, counted_column, _required in TOKEN_COLUMNS:
+                columns.append(payload_column)
+                columns.append(counted_column)
+            for column in columns:
+                expected = old_row.get(column)
+                if expected is None:
+                    continue
+                actual = new_row.get(column)
+                if (
+                    isinstance(actual, bool)
+                    or not isinstance(actual, int)
+                    or actual < expected
+                ):
+                    raise ShipperError(
+                        "retained audit generation %s shrank group %s: %s %s -> %s; "
+                        "refusing to publish a smaller snapshot"
+                        % (start_key[:16], label, column, expected, actual)
+                    )
+
+
 def _update_retired(
     previous: Dict[str, list[dict[str, Any]]],
     expired_rows: Iterable[dict[str, Any]],
@@ -1530,6 +1584,7 @@ def run_once(
         usage_rows, generations, current_hours, active_hour, active_offset = (
             _scan_retained_audit(audit_path, archives, extent)
         )
+        _verify_generations_retain_acknowledged(state["audit_generations"], generations)
         expired_rows: list[dict[str, Any]] = []
         for key, rows in state["audit_generations"].items():
             if key not in generations:
