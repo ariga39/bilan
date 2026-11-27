@@ -14,6 +14,7 @@ import {
   formatMetric,
   isAggregatePartial,
   meteredCaption,
+  overallCoverageBasis,
 } from "@/lib/usage-summary";
 
 function actorLabel(actorKind: string): string {
@@ -27,12 +28,12 @@ function actorLabel(actorKind: string): string {
 }
 
 function groupMeteredCaption(group: UsageGroupFields) {
-  return meteredCaption(group.requests, group.gaps, [
-    group.input,
-    group.cached,
-    group.output,
-    group.reasoning,
-  ]);
+  return meteredCaption(
+    group.requests,
+    group.gaps,
+    [group.input, group.cached, group.output, group.reasoning],
+    { basis: overallCoverageBasis(group.source) },
+  );
 }
 
 export function TokenCell({ aggregate, mode }: { aggregate: TokenAggregate; mode: NumberMode }) {

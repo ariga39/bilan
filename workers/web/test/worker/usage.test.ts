@@ -168,6 +168,65 @@ describe("GET /api/v1/overview usage", () => {
     expect(producer).toMatchObject({ mode: "push", last_status: "ok" });
   });
 
+  it("ignores zero-unit tombstones on the usage and freshness read surfaces", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
+    await seedProducer({
+      producerId: "orihsus-main",
+      displayName: "orihsus (OpenCode Go)",
+      heartbeatAt: "2026-11-27T12:00:00Z",
+      mode: "push",
+    });
+    await seedUsageBucket({
+      producerId: "orihsus-main",
+      source: "opencode",
+      actorKind: "identity",
+      actorId: "laptop-key",
+      model: "deepseek-chat",
+      effort: "",
+      unitCount: 2,
+      inputTokens: 120,
+      inputCounted: 2,
+      accountingBasis: "orihsus-audit-v1",
+      bucketStart: "2026-11-26T10:00:00Z",
+    });
+    await seedUsageBucket({
+      producerId: "orihsus-main",
+      source: "opencode",
+      actorKind: "identity",
+      actorId: "unknown",
+      model: "unknown",
+      effort: "",
+      unitCount: 0,
+      coverageGaps: 0,
+      accountingBasis: "orihsus-audit-v1",
+      bucketStart: "2026-11-27T10:00:00Z",
+      batchSeq: 2,
+    });
+
+    const body = await overview("?tz=UTC&month=2026-11");
+
+    expect(body.usage.rows).toHaveLength(1);
+    expect(body.usage.rows[0]).toMatchObject({
+      source: "opencode",
+      actor_id: "laptop-key",
+      unit_count: 2,
+    });
+    expect(body.usage.latest_bucket_start).toBe("2026-11-26T10:00:00Z");
+    const openCodeFreshness = body.usage.source_freshness.find(
+      (source) => source.source === "opencode",
+    );
+    expect(openCodeFreshness?.latest_bucket_start).toBe("2026-11-26T10:00:00Z");
+
+    const dailyBody = await daily("?tz=UTC&month=2026-11");
+    expect(dailyBody.rows).toHaveLength(1);
+    expect(dailyBody.rows[0]).toMatchObject({
+      source: "opencode",
+      date: "2026-11-26",
+      unit_count: 2,
+    });
+  });
+
   it("discloses approximate bucket-start attribution for non-whole-hour offsets", async () => {
     // Asia/Kolkata is UTC+05:30, so local November starts at 18:30Z.
     await seedUsageBucket({

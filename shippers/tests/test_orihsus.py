@@ -616,6 +616,129 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(second_buckets[(hour, "laptop-key", "deepseek-chat")]["input_counted"], 3)
         self.assertEqual(len(self.ingest.snapshot_usage_rows()), 4)
 
+    def test_successful_gateway_metadata_reads_are_not_usage_requests(self) -> None:
+        hour = "2026-11-26T14:00:00Z"
+        metadata = audit_record(
+            "2026-11-26T14:05:00.000Z",
+            gateway_key=None,
+            model=None,
+            status=200,
+            outcome=None,
+            input_tokens=None,
+            cached_tokens=None,
+            uncached_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+        )
+        metadata["key_fingerprint"] = None
+        metadata_without_attempts = dict(metadata)
+        metadata_without_attempts["timestamp"] = "2026-11-26T14:06:00.000Z"
+        metadata_without_attempts["request_id"] = "req-metadata-without-attempts"
+        metadata_without_attempts.pop("attempts")
+        self.write_audit(
+            [
+                metadata,
+                metadata_without_attempts,
+                audit_record(
+                    "2026-11-26T14:10:00.000Z",
+                    gateway_key="laptop-key",
+                    model="deepseek-chat",
+                ),
+            ]
+        )
+
+        self.assert_ok(self.run_cli())
+        buckets = self.bucket_map(self.ingest.snapshot_requests()[-1]["payload"])
+
+        inference = buckets[(hour, "laptop-key", "deepseek-chat")]
+        self.assertEqual(inference["unit_count"], 1)
+        self.assertEqual(inference["coverage_gaps"], 0)
+
+        tombstone = buckets[(hour, "unknown", "unknown")]
+        self.assertEqual(tombstone["unit_count"], 0)
+        self.assertEqual(tombstone["coverage_gaps"], 0)
+        for column in (
+            "input_tokens",
+            "cached_tokens",
+            "uncached_tokens",
+            "cache_write_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+        ):
+            self.assertIsNone(tombstone[column])
+            self.assertEqual(tombstone[column.replace("_tokens", "_counted")], 0)
+
+    def test_canceled_and_unclassified_requests_still_count_toward_coverage(self) -> None:
+        hour = "2026-11-26T14:00:00Z"
+        canceled = audit_record(
+            "2026-11-26T14:05:00.000Z",
+            gateway_key="laptop-key",
+            model="kimi",
+            status=200,
+            outcome="client_cancel",
+            input_tokens=None,
+            cached_tokens=None,
+            uncached_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+        )
+        rejected = audit_record(
+            "2026-11-26T14:10:00.000Z",
+            gateway_key=None,
+            model=None,
+            status=500,
+            outcome=None,
+            input_tokens=None,
+            cached_tokens=None,
+            uncached_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+        )
+        rejected["key_fingerprint"] = None
+        token_only = audit_record(
+            "2026-11-26T14:15:00.000Z",
+            gateway_key=None,
+            model=None,
+            status=200,
+            outcome=None,
+            input_tokens=5,
+            cached_tokens=0,
+            uncached_tokens=5,
+            output_tokens=0,
+        )
+        token_only["key_fingerprint"] = None
+        attempt_only = audit_record(
+            "2026-11-26T14:20:00.000Z",
+            gateway_key=None,
+            model=None,
+            status=200,
+            outcome=None,
+            input_tokens=None,
+            cached_tokens=None,
+            uncached_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+        )
+        attempt_only["key_fingerprint"] = None
+        attempt_only["attempts"] = [{"attempt_number": 1, "terminal_reason": "completed"}]
+
+        self.write_audit([canceled, rejected, token_only, attempt_only])
+        self.assert_ok(self.run_cli())
+        buckets = self.bucket_map(self.ingest.snapshot_requests()[-1]["payload"])
+
+        canceled_row = buckets[(hour, "laptop-key", "kimi")]
+        self.assertEqual(canceled_row["unit_count"], 1)
+        self.assertEqual(canceled_row["coverage_gaps"], 1)
+        self.assertIsNone(canceled_row["input_tokens"])
+
+        unclassified = buckets[(hour, "unknown", "unknown")]
+        self.assertEqual(unclassified["unit_count"], 3)
+        self.assertEqual(unclassified["coverage_gaps"], 2)
+        self.assertEqual(unclassified["input_tokens"], 5)
+        self.assertEqual(unclassified["input_counted"], 1)
+        self.assertEqual(unclassified["output_tokens"], 0)
+        self.assertEqual(unclassified["output_counted"], 1)
+
     def test_ignores_noncanonical_audit_lines(self) -> None:
         with open(self.audit_path, "wb") as handle:
             handle.write(b"{not json}\n")
@@ -1867,6 +1990,77 @@ class OrihsusShipperTests(unittest.TestCase):
         rows = self.ingest.snapshot_usage_rows()
         hour8 = self._usage_row(rows, "2026-11-26T08:00:00Z")
         self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 5))
+
+    def test_archive_rescan_tombstones_legacy_metadata_buckets(self) -> None:
+        hour = "2026-11-26T08:00:00Z"
+        metadata = audit_record(
+            "2026-11-26T08:05:00.000Z",
+            gateway_key=None,
+            model=None,
+            status=200,
+            outcome=None,
+            input_tokens=None,
+            cached_tokens=None,
+            uncached_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+        )
+        metadata["key_fingerprint"] = None
+        self.write_audit_archive(1, [metadata])
+        self.write_audit([])
+        archive_fingerprint = shipper_module._audit_archive_fingerprint(
+            shipper_module._audit_archive_entries(self.audit_path)
+        )
+        legacy_state = {
+            "version": 4,
+            "producer_id": "orihsus-main",
+            "batch_seq": 0,
+            "audit_cursor": 0,
+            "audit_active_hour": None,
+            "audit_active_hour_offset": 0,
+            "audit_file_id": [
+                os.stat(self.audit_path).st_dev,
+                os.stat(self.audit_path).st_ino,
+            ],
+            "audit_archives": archive_fingerprint,
+            "audit_archive_hour": hour,
+            "usage_cursors": {},
+            "usage_files": {},
+            "pending": None,
+        }
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy_state, handle)
+
+        legacy_key = ("opencode", "default", "identity", "unknown", "unknown", "", hour)
+        self.ingest.usage_rows[legacy_key] = {
+            "source": "opencode",
+            "account": "default",
+            "actor_kind": "identity",
+            "actor_id": "unknown",
+            "model": "unknown",
+            "effort": "",
+            "bucket_start": hour,
+            "unit_kind": "request",
+            "unit_count": 7,
+            "coverage_gaps": 7,
+        }
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.ingest.snapshot_usage_rows()[legacy_key]["unit_count"], 7)
+
+        # Production retriggers the existing archive scan once by removing only
+        # the archive fingerprint under the shipper's own lock.
+        with open(self.state_path, "r", encoding="utf-8") as handle:
+            retrigger_state = json.load(handle)
+        retrigger_state.pop("audit_archives")
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(retrigger_state, handle)
+
+        self.assert_ok(self.run_cli())
+        tombstone = self.ingest.snapshot_usage_rows()[legacy_key]
+        self.assertEqual(tombstone["unit_count"], 0)
+        self.assertEqual(tombstone["coverage_gaps"], 0)
+        self.assertIsNone(tombstone["input_tokens"])
+        self.assertEqual(tombstone["input_counted"], 0)
 
     def test_corrupt_retained_archive_fails_before_publishing(self) -> None:
         corrupt = gzip.compress(self._encode([self._record("2026-11-26T08:05:00.000Z", 1)]))[:-8]
