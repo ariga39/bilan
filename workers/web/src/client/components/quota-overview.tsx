@@ -1,4 +1,11 @@
-import type { QuotaAttempt, QuotaObservation, QuotaSubject, QuotaWindow } from "@bilan/shared";
+import type {
+  QuotaAttempt,
+  QuotaObservation,
+  QuotaResponse,
+  QuotaSubject,
+  QuotaWindow,
+} from "@bilan/shared";
+import { filterVisibleQuotaSubjects } from "@bilan/shared";
 import { AlertTriangle, CheckCircle2, Clock3, Gauge, KeyRound, TriangleAlert } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -313,7 +320,10 @@ function PlatformCard({ source, subjects }: { source: string; subjects: Array<Qu
                 <AttemptWarning attempt={subject.latest_attempt} />
                 <AnomalyWarning subject={subject} />
                 {limiting ? (
-                  <WindowReading window={limiting} />
+                  <WindowReading
+                    window={limiting}
+                    showBucket={limiting.bucket_id !== subject.account ? limiting.bucket_id : null}
+                  />
                 ) : (
                   <p className="rounded-md border border-dashed px-2.5 py-2 text-xs text-muted-foreground">
                     No valid quota windows yet.
@@ -358,6 +368,9 @@ function OpenCodeRow({
     : null;
   const isTightest = key !== null && key === tightestKey;
   const reset = limiting ? resetDetails(limiting) : null;
+  const valid = subject.latest_valid;
+  const attempt = subject.latest_attempt;
+  const hasAnomaly = subject.anomalies.length > 0 || Boolean(valid?.time_anomaly);
   return (
     <details className={cn("rounded-lg border", isTightest && "border-amber-400 bg-amber-50/40")}>
       <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
@@ -369,6 +382,11 @@ function OpenCodeRow({
               : "No valid window"}
             {reset ? ` · ${reset.label}` : ""}
             {reset?.at ? ` · ${formatDateTime(reset.at)}` : ""}
+          </span>
+          <span className="block text-[11px] text-muted-foreground">
+            {valid
+              ? `Valid sample ${formatAge(valid.sample_age_seconds)}${valid.is_stale ? " · stale" : ""}`
+              : "No valid sample"}
           </span>
         </span>
         <span className="flex items-center gap-2">
@@ -382,6 +400,21 @@ function OpenCodeRow({
           </span>
           {limiting ? <WindowStatus window={limiting} /> : null}
         </span>
+        {valid?.is_stale ||
+        attempt?.status === "error" ||
+        attempt?.status === "empty" ||
+        hasAnomaly ? (
+          <span className="flex w-full flex-wrap gap-x-2 gap-y-1 text-[11px]">
+            {valid?.is_stale ? <span className="text-amber-800">Stale sample</span> : null}
+            {attempt?.status === "error" ? (
+              <span className="text-destructive">Latest attempt failed</span>
+            ) : null}
+            {attempt?.status === "empty" ? (
+              <span className="text-amber-800">Latest attempt empty</span>
+            ) : null}
+            {hasAnomaly ? <span className="text-amber-800">Clock anomaly</span> : null}
+          </span>
+        ) : null}
       </summary>
       <div className="space-y-2 border-t px-3 py-2">
         <AttemptWarning attempt={subject.latest_attempt} />
@@ -430,7 +463,8 @@ function OpenCodeOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
   );
 }
 
-export function QuotaOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
+export function QuotaOverview({ quota }: { quota: QuotaResponse }) {
+  const subjects = filterVisibleQuotaSubjects(quota.subjects, new Date(quota.generated_at));
   const codex = subjects.filter((subject) => subject.source === "codex");
   const agy = subjects.filter((subject) => subject.source === "agy");
   const opencode = subjects.filter((subject) => subject.source === "opencode");

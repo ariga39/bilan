@@ -23,7 +23,8 @@ export const Route = createFileRoute("/")({
     const search = { view: deps.view, tz: deps.tz, month: deps.month };
     await context.queryClient.query(overviewQueryOptions(context.dataSource, search));
     if (deps.view === "usage") {
-      await context.queryClient.query(usageDailyQueryOptions(context.dataSource, search));
+      // A daily-usage failure must not replace the monthly dashboard or navigation.
+      await context.queryClient.prefetchQuery(usageDailyQueryOptions(context.dataSource, search));
     }
   },
   headers: () => ({ "Cache-Control": "private, no-store" }),
@@ -74,6 +75,12 @@ function DashboardRoute() {
   });
   const refreshing =
     useIsFetching({ queryKey: ["overview"] }) + useIsFetching({ queryKey: ["usage-daily"] }) > 0;
+  const refreshError =
+    overview.isError && overview.data
+      ? "Overview refresh failed. Showing cached data."
+      : daily.isError && daily.data
+        ? "Daily usage refresh failed. Showing cached data."
+        : null;
 
   if (overview.data === undefined) {
     return <PendingDashboard />;
@@ -87,10 +94,9 @@ function DashboardRoute() {
       histories={histories}
       historyLoading={historyQueries.some((query) => query.isPending)}
       historyError={
-        historyQueries.some((query) => query.isError)
-          ? "Balance history could not be loaded."
-          : null
+        historyQueries.some((query) => query.isError) ? "Balance history refresh failed." : null
       }
+      refreshError={refreshError}
       refreshing={refreshing}
       onNavigate={(next) => {
         void navigate({

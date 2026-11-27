@@ -108,6 +108,14 @@ function HistorySection({
         title="Balance history"
         description="Last 30 days. Each currency gets its own series and axis; values are never combined across currencies."
       />
+      {error && series.length > 0 ? (
+        <p
+          role="alert"
+          className="mb-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+        >
+          {error} Showing cached history.
+        </p>
+      ) : null}
       {series.length > 0 ? (
         <div className="grid gap-4 lg:grid-cols-2">
           {series.map(({ provider, series: item }) => (
@@ -145,6 +153,7 @@ export function Dashboard({
   histories,
   historyLoading = false,
   historyError = null,
+  refreshError = null,
   onNavigate,
   onRefresh,
   refreshing = false,
@@ -155,11 +164,11 @@ export function Dashboard({
   histories: Partial<Record<BalanceProvider, BalanceHistoryResponse>>;
   historyLoading?: boolean;
   historyError?: string | null;
+  refreshError?: string | null;
   onNavigate: (search: DashboardSearch) => void;
   onRefresh: () => void;
   refreshing?: boolean;
 }) {
-  const visibleQuotaSubjects = overview.quotas.subjects;
   const historyProviders = [...new Set(overview.balances.map((balance) => balance.provider))];
   const selectedDaily =
     daily && daily.timezone === search.tz && daily.month === search.month ? daily : null;
@@ -215,6 +224,15 @@ export function Dashboard({
           </span>
         </div>
 
+        {refreshError ? (
+          <div
+            role="alert"
+            className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          >
+            {refreshError}
+          </div>
+        ) : null}
+
         {search.view === "overview" ? (
           <>
             <section>
@@ -223,7 +241,7 @@ export function Dashboard({
                 title="Quota overview"
                 description="Latest valid reading per account and window. Missing windows disappear instead of carrying forward; every reading keeps its own status."
               />
-              <QuotaOverview subjects={visibleQuotaSubjects} />
+              <QuotaOverview quota={overview.quotas} />
             </section>
 
             <UsageEntry overview={overview} navigation={search} onNavigate={onNavigate} />
