@@ -239,6 +239,8 @@ describe("Token usage dashboard section", () => {
     const todaySummary = screen.getByLabelText("Today's usage summary");
     expect(within(todaySummary).getByText("5")).toBeTruthy();
     expect(within(todaySummary).getByText("4/5")).toBeTruthy();
+    // Codex keeps its per-column coverage basis; only Go's overall caption uses gaps.
+    expect(within(todaySummary).getByText("80% metered")).toBeTruthy();
     expect(screen.getAllByText("This month · November 2026").length).toBeGreaterThan(0);
 
     expect(screen.getByText("Daily requests")).toBeTruthy();
@@ -252,6 +254,82 @@ describe("Token usage dashboard section", () => {
     ).toBeTruthy();
     expect(screen.getByText("2026-11-01")).toBeTruthy();
     expect(screen.getAllByText("2026-11-02").length).toBeGreaterThan(0);
+  });
+
+  it("uses coverage gaps for Go's overall caption while optional columns keep their coverage", () => {
+    const optionalUsage: MonthlyUsage = {
+      timezone: "Asia/Shanghai",
+      month: "2026-11",
+      bucket_attribution: "exact",
+      bucket_attribution_note: null,
+      latest_bucket_start: "2026-11-02T00:00:00Z",
+      data_age_seconds: 120,
+      is_stale: false,
+      source_freshness: [
+        {
+          source: "opencode",
+          latest_bucket_start: "2026-11-02T00:00:00Z",
+          data_age_seconds: 120,
+          is_stale: false,
+        },
+      ],
+      rows: [
+        {
+          source: "opencode",
+          accounting_basis: "orihsus-audit-v1",
+          unit_kind: "request",
+          actor_kind: "identity",
+          actor_id: "laptop-key",
+          model: "deepseek-chat",
+          effort: "",
+          unit_count: 3,
+          coverage_gaps: 1,
+          input_tokens: 300,
+          input_counted: 3,
+          cached_tokens: 100,
+          cached_counted: 3,
+          uncached_tokens: 200,
+          uncached_counted: 3,
+          cache_write_tokens: null,
+          cache_write_counted: 0,
+          output_tokens: 30,
+          output_counted: 3,
+          reasoning_tokens: 10,
+          reasoning_counted: 1,
+          is_partial: true,
+          partial_columns: ["reasoning_tokens"],
+        },
+      ],
+    };
+    const optionalDaily: UsageDailyResponse = {
+      timezone: "Asia/Shanghai",
+      month: "2026-11",
+      bucket_attribution: "exact",
+      bucket_attribution_note: null,
+      rows: [
+        {
+          ...optionalUsage.rows[0]!,
+          date: "2026-11-02",
+        },
+      ],
+    };
+
+    render(
+      <UsageSection
+        usage={optionalUsage}
+        daily={optionalDaily}
+        timezone="Asia/Shanghai"
+        month="2026-11"
+        generatedAt={GENERATED_AT}
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+      />,
+    );
+
+    // Gaps cover the required counters: 2 of 3 inference requests are metered.
+    expect(screen.getAllByText("66.7% metered · 1 gap").length).toBeGreaterThan(0);
+    // The optional reasoning column still reports its own 1-of-3 coverage.
+    expect(screen.getAllByText("1/3").length).toBeGreaterThan(0);
   });
 
   it("formats large token totals compactly by default and switches to exact numbers on toggle", () => {

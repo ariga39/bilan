@@ -8,7 +8,9 @@ Upstream sources (read-only, never modified by this shipper)
 * ``audit.jsonl`` — one ``AuditRecord`` per gateway request. The caller identity
   is ``gateway_key`` (not a physical machine); token columns may be JSON
   ``null`` when the request never produced usage or the upstream omitted an
-  optional counter. Every canonical line is one HTTP request.
+  optional counter. Successful gateway metadata reads (status 200 with no
+  model, selected key, caller key, upstream attempts, outcome, or token
+  counter) are not inference and are excluded from usage and coverage.
 
 * ``usage/YYYY-MM-DD.jsonl`` — one ``UsageKeySnapshot`` per successful
   five-minute usage poll, keyed by the upstream key's 12-hex
@@ -77,8 +79,10 @@ Retained rotations
 ------------------
 A changed ``audit.jsonl.N[.gz]`` set, or the first run that sees retained
 archives, rebuilds absolute hourly snapshots from every generation plus the
-active log. Ordinary ticks read archives only for touched archived hours. Exact
-recovery is limited to records still inside the configured retention.
+active log. Ordinary ticks read archives only for touched archived hours.
+Metadata-only groups are written as zero-unit tombstones so a bucket shipped
+before this classification is overwritten; the read surface ignores zero-unit
+rows. Exact recovery is limited to records still inside the configured retention.
 """
 
 from __future__ import annotations
@@ -196,6 +200,45 @@ def _model(value: Any) -> str:
     return "unknown"
 
 
+def _text_is_absent(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _attempts_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) > 0
+    return True
+
+
+def _is_gateway_metadata_read(record: dict[str, Any]) -> bool:
+    """Return true only for a successful models/status metadata read.
+
+    orihsus records ``/v1/models`` and ``/v1/status`` through the rejected-
+    request path: status 200 with no model, selected key, caller key, upstream
+    attempt, outcome, or token counter. Errors, canceled streams, and any other
+    shape remain inference requests.
+    """
+
+    return (
+        record.get("status") == 200
+        and _text_is_absent(record.get("model"))
+        and _text_is_absent(record.get("key_fingerprint"))
+        and _text_is_absent(record.get("gateway_key"))
+        and not _attempts_present(record.get("attempts"))
+        and _text_is_absent(record.get("outcome"))
+        and all(
+            record.get(field) is None
+            for _column, field, _counted, _required in TOKEN_COLUMNS
+        )
+    )
+
+
 def _percent(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -275,6 +318,10 @@ def _accumulate_audit_record(
         accumulator = _new_audit_accumulator()
         groups[key] = accumulator
 
+    # Keep an empty accumulator so a replay can overwrite a metadata-only bucket.
+    if _is_gateway_metadata_read(record):
+        return
+
     accumulator["unit_count"] += 1
     missing_required = False
     for payload_column, record_field, counted_column, required in TOKEN_COLUMNS:
@@ -324,7 +371,8 @@ def aggregate_audit_records(
 
     ``touched_hours`` restricts output to the hours newly observed, while every
     record in those hours (including earlier lines already consumed) is included
-    so each pushed bucket is complete rather than a delta.
+    so each pushed bucket is complete rather than a delta. Successful gateway
+    metadata reads are excluded; a metadata-only hour yields a zero tombstone.
     """
 
     groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}

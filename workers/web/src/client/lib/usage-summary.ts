@@ -210,18 +210,45 @@ export interface CoverageSummary {
   isPartial: boolean;
 }
 
+export type CoverageBasis = "columns" | "gaps";
+
 /**
- * Computes the shared coverage boundary: only reported token columns constrain
- * metered units, and coverage gaps count towards incompleteness even when every
- * reported column is fully metered.
+ * OpenCode Go measures completeness using `coverage_gaps` because optional
+ * upstream counters are not expected on every inference. Other sources keep
+ * their per-column basis.
+ */
+export function overallCoverageBasis(source: string): CoverageBasis {
+  return source === "opencode" ? "gaps" : "columns";
+}
+
+/**
+ * Computes the shared coverage boundary. On the default column basis, only
+ * reported token columns constrain metered units, and coverage gaps count
+ * towards incompleteness even when every reported column is fully metered.
+ * The gaps basis uses only `coverage_gaps`, so an optional counter can stay
+ * individually partial without lowering overall inference coverage.
  */
 export function coverageSummary(
   requests: number,
   gaps: number,
   aggregates: ReadonlyArray<TokenAggregate>,
+  basis: CoverageBasis = "columns",
 ): CoverageSummary | null {
   if (requests === 0) {
     return null;
+  }
+  if (basis === "gaps") {
+    if (gaps === 0) {
+      return null;
+    }
+    const metered = Math.max(requests - gaps, 0);
+    return {
+      requests,
+      gaps,
+      minCounted: metered,
+      percent: Math.round((metered / requests) * 1000) / 10,
+      isPartial: true,
+    };
   }
   const reportedCounteds = aggregates.flatMap((aggregate) =>
     aggregate.value !== null ? [aggregate.counted] : [],
@@ -246,12 +273,14 @@ export function meteredCaption(
   {
     includeGapsWhenPartial = true,
     mentionZeroGaps = true,
+    basis = "columns",
   }: {
     includeGapsWhenPartial?: boolean;
     mentionZeroGaps?: boolean;
+    basis?: CoverageBasis;
   } = {},
 ): { text: string; title: string } | null {
-  const coverage = coverageSummary(requests, gaps, aggregates);
+  const coverage = coverageSummary(requests, gaps, aggregates, basis);
   if (coverage === null) {
     return null;
   }

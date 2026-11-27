@@ -3,7 +3,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 import { buildDailyTrendPoints, sourceLabel } from "@/lib/usage";
 import type { DailyUsageGroup, NumberMode } from "@/lib/usage-summary";
-import { formatMetric, meteredCaption } from "@/lib/usage-summary";
+import { formatMetric, meteredCaption, overallCoverageBasis } from "@/lib/usage-summary";
 
 import { DailyDetailTable, TokenCell } from "./usage-tables";
 
@@ -17,12 +17,12 @@ export function DailyTrendCard({
   mode: NumberMode;
 }) {
   const points = buildDailyTrendPoints(group.rows, month);
-  const metered = meteredCaption(group.requests, group.gaps, [
-    group.input,
-    group.cached,
-    group.output,
-    group.reasoning,
-  ]);
+  const metered = meteredCaption(
+    group.requests,
+    group.gaps,
+    [group.input, group.cached, group.output, group.reasoning],
+    { basis: overallCoverageBasis(group.source) },
+  );
   return (
     <div className="min-w-0 rounded-xl border border-starlight-gold/20 bg-starlight-void/75 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">

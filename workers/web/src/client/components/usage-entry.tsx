@@ -9,6 +9,7 @@ import {
   formatCoverageTag,
   isAggregatePartial,
   meteredCaption,
+  overallCoverageBasis,
   summarizeUsageRows,
 } from "@/lib/usage-summary";
 import type { DashboardSearch } from "../../search";
@@ -77,6 +78,7 @@ export function UsageEntry({
               const metered = meteredCaption(item.requests, item.gaps, [item.input, item.output], {
                 includeGapsWhenPartial: false,
                 mentionZeroGaps: false,
+                basis: overallCoverageBasis(item.source),
               });
               const inputPartial = item.input.value !== null && isAggregatePartial(item.input);
               const outputPartial = item.output.value !== null && isAggregatePartial(item.output);

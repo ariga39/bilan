@@ -352,6 +352,7 @@ async function loadMonthlyUsage(
                 SUM(reasoning_counted) AS reasoning_counted
          FROM usage_buckets
          WHERE bucket_start >= ? AND bucket_start < ?
+           AND unit_count > 0
          GROUP BY source, accounting_basis, unit_kind, actor_kind, actor_id, model, effort
          ORDER BY source, actor_kind, actor_id, model, effort, accounting_basis, unit_kind`,
       )
@@ -362,6 +363,7 @@ async function loadMonthlyUsage(
         `SELECT source, MAX(bucket_start) AS latest
          FROM usage_buckets
          WHERE bucket_start <= ?
+           AND unit_count > 0
          GROUP BY source
          ORDER BY source`,
       )
@@ -417,6 +419,7 @@ async function loadDailyUsage(
               output_tokens, output_counted, reasoning_tokens, reasoning_counted
        FROM usage_buckets
        WHERE bucket_start >= ? AND bucket_start < ?
+         AND unit_count > 0
        ORDER BY bucket_start, source, accounting_basis, unit_kind`,
     )
     .bind(range.start, range.end)

@@ -267,7 +267,10 @@ B3 adds the `orihsus` shipper and two read surfaces:
 
 - OpenCode Go token usage from `audit.jsonl`, attributed to the caller
   `gateway_key` as `actor_kind = 'identity'` with
-  `accounting_basis = 'orihsus-audit-v1'`.
+  `accounting_basis = 'orihsus-audit-v1'`. Successful gateway metadata reads (status `200` with no model, selected key,
+  caller key, upstream attempt, outcome, or token counter) are excluded, while
+  errors, canceled streams, and unclassified records remain visible in
+  `unit_count` / `coverage_gaps`.
 - Per-key quota history from `usage/YYYY-MM-DD.jsonl`. Each key fingerprint is
   its own `(source, account)` subject, and only the single latest valid
   observation (`status = 'ok'` and `time_anomaly IS NULL`) supplies current
@@ -334,6 +337,9 @@ Audit log recovery:
   shortened at a record boundary can still parse as a complete file.
   If part of a UTC hour has expired, rebuilding that hour can replace its previous
   total with the smaller total still on disk, including after downtime or retry.
+- A metadata-only group is emitted as a zero-unit tombstone, which overwrites a
+  bucket written before metadata reads were classified. Usage and freshness
+  queries ignore zero-unit rows. See the operations guide for a retained-log rebuild.
 - If the audit file shrinks or is replaced, the shipper logs a warning and
   restarts its audit cursor/anchor from byte `0`. A shortened replacement can
   overwrite an already-published part of the active hour; unread tails or late
@@ -540,6 +546,10 @@ quota tests.
 - Token columns are never collapsed into one cross-basis total. Each column has
   its own `*_counted` value; a column is partial when its counted units are fewer
   than `unit_count`, or when `coverage_gaps > 0`.
+- OpenCode Go's overall metered caption uses `coverage_gaps`, while optional
+  counters keep their own per-column coverage. Other sources keep the per-column
+  overall basis. Zero-unit tombstone buckets are ignored by usage and freshness
+  queries.
 - Usage is stored in UTC hourly buckets and sliced by the selected timezone and
   calendar month on the read surface. Defaults are `Asia/Shanghai` and the
   current month in that timezone.
