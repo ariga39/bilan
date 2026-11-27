@@ -14,16 +14,16 @@ function SectionLabel({ icon: Icon, title }: { icon: typeof Activity; title: str
     <div className="mb-2 flex items-center gap-2">
       <h2
         style={{ fontFamily: "var(--font-display)" }}
-        className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#f5d08a]"
+        className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-starlight-gold"
       >
         <Icon className="size-3.5" aria-hidden="true" />
         {title}
       </h2>
       <span
         aria-hidden="true"
-        className="h-px flex-1 bg-gradient-to-r from-[#f5d08a]/35 via-[#f472b6]/25 to-transparent"
+        className="h-px flex-1 bg-gradient-to-r from-starlight-gold/35 via-starlight-rose/25 to-transparent"
       />
-      <span aria-hidden="true" className="text-[10px] text-[#f5d08a]/65">
+      <span aria-hidden="true" className="text-[10px] text-starlight-gold/65">
         ☽ ✦
       </span>
     </div>
@@ -130,9 +130,9 @@ export function OverviewDashboard({
           </div>
         </section>
       ) : (
-        <div className="flex items-center justify-between rounded-xl border border-dashed border-[#f5d08a]/25 bg-[#161130]/60 px-3.5 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center justify-between rounded-xl border border-dashed border-starlight-gold/25 bg-starlight-dusk/60 px-3.5 py-2 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
-            <CircleDollarSign className="size-3.5 text-[#f5d08a]/70" aria-hidden="true" />
+            <CircleDollarSign className="size-3.5 text-starlight-gold/70" aria-hidden="true" />
             Balances
           </span>
           <span>Not configured</span>
