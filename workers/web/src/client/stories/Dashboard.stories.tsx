@@ -4,7 +4,7 @@ import type {
   OverviewResponse,
   UsageDailyResponse,
 } from "@bilan/shared";
-import { filterVisibleQuotaSubjects } from "@bilan/shared";
+import { dashboardQuotaSubjects } from "@bilan/shared";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
 import type { Meta, StoryObj } from "@storybook/react-vite";
@@ -35,16 +35,13 @@ function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewRe
   return buildScenarioOverview(base, scenario);
 }
 
-/** Storybook data sources stand in for the server functions, which own the visibility boundary. */
+/** Storybook data sources stand in for the server functions, which own the public projection (anonymous labels + visibility). */
 function visibleQuotas(overview: OverviewResponse): OverviewResponse {
   return {
     ...overview,
     quotas: {
       ...overview.quotas,
-      subjects: filterVisibleQuotaSubjects(
-        overview.quotas.subjects,
-        new Date(overview.generated_at),
-      ),
+      subjects: dashboardQuotaSubjects(overview.quotas.subjects, new Date(overview.generated_at)),
     },
   };
 }
