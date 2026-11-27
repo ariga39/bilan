@@ -1553,6 +1553,112 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(state["usage_cursors"], {"2026-11-26": size})
         self.assertEqual(len(self.ingest.snapshot_observations()), 300)
 
+    def test_rotation_during_pending_replays_then_ships_new_generation(self) -> None:
+        self.write_audit([audit_record("2026-11-26T14:05:00.000Z", gateway_key="laptop-key")])
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 1)
+        pending_body = self.ingest.snapshot_requests()[0]["body"]
+
+        rotated = os.path.join(self.tempdir, "audit.rotated.jsonl")
+        with open(rotated, "wb") as handle:
+            for record in (
+                audit_record("2026-11-26T15:05:00.000Z", gateway_key="desktop-key"),
+                audit_record("2026-11-26T15:15:00.000Z", gateway_key="desktop-key"),
+            ):
+                handle.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+        new_size = os.path.getsize(rotated)
+        os.replace(rotated, self.audit_path)
+
+        resumed = self.run_cli()
+
+        self.assert_ok(resumed)
+        self.assertIn("rotated or truncated", resumed.stderr)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(requests[1]["body"], pending_body)
+        self.assertEqual(requests[2]["payload"]["batch_seq"], 2)
+        self.assertEqual(
+            set(self.bucket_map(requests[2]["payload"])),
+            {("2026-11-26T15:00:00Z", "desktop-key", "deepseek-chat")},
+        )
+        state = self.read_state()
+        self.assertIsNone(state["pending"])
+        self.assertEqual(state["batch_seq"], 2)
+        self.assertEqual(state["audit_cursor"], new_size)
+        self.assertEqual(
+            state["audit_file_id"],
+            [os.stat(self.audit_path).st_dev, os.stat(self.audit_path).st_ino],
+        )
+
+    def test_pending_replays_before_missing_audit_error(self) -> None:
+        self.write_audit([audit_record("2026-11-26T12:05:00.000Z")])
+        path = self.write_usage(
+            "2026-11-26",
+            [
+                usage_record(
+                    "2026-11-26T12:10:00.000Z",
+                    key_fingerprint="fp_a",
+                    rolling=window(percent=10.0),
+                )
+            ],
+        )
+        audit_size = os.path.getsize(self.audit_path)
+        usage_size = os.path.getsize(path)
+        self.ingest.drop_next_response = True
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        first_body = self.ingest.snapshot_requests()[0]["body"]
+        os.remove(self.audit_path)
+
+        missing = self.run_cli()
+
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("audit log not found", missing.stderr)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]["body"], first_body)
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 1)
+        self.assertEqual(state["audit_cursor"], audit_size)
+        self.assertEqual(state["usage_cursors"], {"2026-11-26": usage_size})
+        self.assertIsNone(state["pending"])
+
+        # Restoring the audit source lets the next run proceed automatically.
+        self.write_audit([audit_record("2026-11-26T12:05:00.000Z")])
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertEqual(state["batch_seq"], 2)
+        self.assertEqual(state["audit_cursor"], os.path.getsize(self.audit_path))
+        self.assertEqual(len(self.ingest.snapshot_observations()), 1)
+
+    def test_rotation_reset_persists_without_new_data(self) -> None:
+        self.write_audit([audit_record("2026-11-26T12:05:00.000Z")])
+        self.assert_ok(self.run_cli())
+        before = self.read_state()
+
+        rotated = os.path.join(self.tempdir, "audit.empty.jsonl")
+        open(rotated, "wb").close()
+        os.replace(rotated, self.audit_path)
+
+        result = self.run_cli(extra=["--no-heartbeat"])
+        self.assert_ok(result)
+        self.assertIn("rotated or truncated", result.stderr)
+        state = self.read_state()
+        self.assertEqual(state["audit_cursor"], 0)
+        self.assertIsNone(state["audit_active_hour"])
+        self.assertEqual(state["batch_seq"], before["batch_seq"])
+        self.assertNotEqual(state["audit_file_id"], before["audit_file_id"])
+        self.assertEqual(
+            state["audit_file_id"],
+            [os.stat(self.audit_path).st_dev, os.stat(self.audit_path).st_ino],
+        )
+
+        # The reset was persisted, so the next idle run does not repeat it.
+        again = self.run_cli(extra=["--no-heartbeat"])
+        self.assert_ok(again)
+        self.assertNotIn("rotated or truncated", again.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

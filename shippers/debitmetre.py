@@ -631,7 +631,6 @@ def run_once(
     timeout: float,
     quiet: bool = False,
 ) -> bool:
-    _require_usage_log(usage_path)
     state = _load_state(state_path, producer_id)
     had_backfill = state.get("backfill") is not None
 
@@ -641,6 +640,11 @@ def run_once(
             return False
         pending_acked = True
 
+    # The immutable outbox is replayed before the source is touched, so a
+    # missing or rotated input cannot block an already-built batch.
+    _require_usage_log(usage_path)
+
+    source_reset = False
     extent, identity, restarted = inspect_source(
         usage_path, state["cursor"], state["file_id"]
     )
@@ -651,7 +655,13 @@ def run_once(
         state["active_hour_offset"] = 0
         state["backfill"] = None
         extent, identity, _ = inspect_source(usage_path, 0, identity)
-    state["file_id"] = identity
+        state["file_id"] = identity
+        # Persist the new generation and the discarded interrupted backfill
+        # before any later failure or early return can keep the old state.
+        _save_state(state_path, state)
+        source_reset = True
+    else:
+        state["file_id"] = identity
 
     if state.get("backfill") is not None:
         backfill_state = state["backfill"]
@@ -661,6 +671,7 @@ def run_once(
             _warn("backfill source was rotated or truncated; restarting")
             state["backfill"] = None
             _save_state(state_path, state)
+            source_reset = True
         else:
             backfill_state["file_id"] = identity
             return _run_backfill(
@@ -672,9 +683,11 @@ def run_once(
                 timeout,
                 quiet,
             )
-    if had_backfill and state.get("backfill") is None:
-        # The retried pending batch completed (or invalidated) the durable
-        # backfill operation; normal shipping resumes on the next tick.
+    if had_backfill and state.get("backfill") is None and not source_reset:
+        # A pending batch completed the durable backfill operation; normal
+        # shipping resumes on the next tick. A source reset falls through so
+        # the replacement generation is processed immediately instead of
+        # repeating the same reset on every run.
         return True
 
     if backfill:

@@ -1034,7 +1034,6 @@ def run_once(
     timeout: float,
     quiet: bool = False,
 ) -> bool:
-    _require_audit_log(audit_path)
     state = _load_state(state_path, producer_id)
 
     pending_acked = False
@@ -1042,6 +1041,10 @@ def run_once(
         if not _send_pending(endpoint, token, state_path, state, timeout, quiet):
             return False
         pending_acked = True
+
+    # The immutable outbox is replayed before the audit source is touched, so
+    # a missing or rotated input cannot block an already-built batch.
+    _require_audit_log(audit_path)
 
     extent, identity, restarted = inspect_source(
         audit_path, state["audit_cursor"], state["audit_file_id"]
@@ -1052,7 +1055,11 @@ def run_once(
         state["audit_active_hour"] = None
         state["audit_active_hour_offset"] = 0
         extent, identity, _ = inspect_source(audit_path, 0, identity)
-    state["audit_file_id"] = identity
+        state["audit_file_id"] = identity
+        # Persist the generation change before any later failure or idle run.
+        _save_state(state_path, state)
+    else:
+        state["audit_file_id"] = identity
 
     usage_rows, audit_after = _capture_audit_work(audit_path, state, extent)
 

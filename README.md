@@ -87,12 +87,12 @@ python -m unittest discover -s shippers/tests -v
 ```
 
 The Python suite covers synthetic CLI runs against a local replay-safe ingest
-mock, including missing/empty logs, full-extent continuity, truncation and
-same-size replacement, pending suffix continuity, bounded incremental capture
-with concurrent appends, interrupted multi-chunk backfill resume, backfill-first
-extents, lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety,
-per-key quota windows, AGY/Codex quota windows with late and same-second
-samples, clock anomalies, and migration.
+mock, including missing/empty logs, bounded streaming with active-hour anchors,
+rotation/truncation restarts, exact pending replay before a missing source,
+interrupted multi-chunk backfill resume across rotation, backfill-first extents,
+lost ACKs, login redirects, `202`, exact 200-only ACKs, cursor safety, per-key
+quota windows, AGY/Codex quota windows with late and same-second samples, clock
+anomalies, migration, and measured I/O/tracemalloc bounds.
 
 ## Local development against one D1 database
 
@@ -168,21 +168,28 @@ The shipper keeps its durable cursor/outbox next to `usage.jsonl` by default
 redirects and other 2xx responses leave the identical payload queued for retry.
 Run `--backfill` to replay the whole log without moving the incremental cursor.
 An idle run sends an empty heartbeat by default; `--no-heartbeat` disables it.
-A missing log path fails closed before any heartbeat, while a real existing empty
-log remains idle and may heartbeat normally. The shipper verifies a full
-streaming checkpoint over the source extent it has consumed or aggregated. If
-that extent is shorter or no longer matches, it fails closed before pending
-retry, heartbeat, or backfill and leaves the cursor/state unchanged. The same
-checkpoint is stored with every in-flight batch, so an unacknowledged suffix
-cannot be replaced or regrown before retry.
+A missing log path fails before any new data is read, while a real existing empty
+log remains idle and may heartbeat normally. An already-built pending batch is
+always replayed first, even when the source is currently missing. The shipper
+streams the consumed source and remembers the active UTC hour and its earliest
+byte offset, so normal ticks read only the active tail.
 
-A backfill-first run checkpoints the extent it aggregated even though the
-incremental cursor remains `0`, and records durable per-chunk progress. If a
+If the source is replaced or shrinks, the shipper logs a warning and restarts
+from byte `0`. A shortened replacement can overwrite an already-published part
+of the active hour, and unread rotated tails or late records can affect more than
+one hour. A same-inode `copytruncate` followed by rapid regrowth past the cursor
+may go undetected. Exact totals require quiescing source writers and preserving
+complete logs and state; the shipper no longer keeps full-prefix hashes or
+reconstructs buckets.
+
+A backfill-first run captures the complete-line extent it aggregates even though
+the incremental cursor remains `0`, and records durable per-chunk progress. If a
 backfill is interrupted, the next normal periodic run retries any in-flight
-chunk and continues the remaining chunks of that same stable extent; records
-appended later are left for normal incremental processing. Restore the complete
-source log before retrying a failed continuity check; never truncate or replace
-it with a partial file.
+chunk and continues the remaining chunks of that same extent; records appended
+later are left for normal incremental processing. If the source is rotated or
+truncated during the backfill, the next run replays the unchanged pending chunk,
+warns, discards the interrupted backfill, and ships the new generation
+automatically.
 
 ### Migrating a shipper to another host
 
@@ -218,11 +225,16 @@ only `usage.jsonl` is not enough:
    Do not run old and new writers concurrently. Exact paths, permissions, and
    token rotation are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-The shipper verifies a content checkpoint over the consumed or aggregated
-source extent, including any in-flight batch. If the log has been truncated or
-replaced, stop the shipper, restore the complete log from the backup/copy, and
-only then retry. It will not replay a shortened file, skip an unacknowledged
-suffix, or advance the cursor past an incomplete source.
+A copied JSONL input is a new file generation, so the first run on the new host
+warns and restarts from byte `0`; complete hourly buckets are replaced
+idempotently.
+
+If the log has been truncated or replaced, the shipper warns and restarts from
+byte `0` on the next run; it does not fail closed. This can overwrite part of the
+active hour, and a same-inode `copytruncate` that regrows past the cursor may not
+be noticed. For exact totals, quiesce writers and keep complete logs and state.
+Recover the recorded sequence or the state/outbox backup rather than resetting
+`batch_seq`.
 
 If the state file is lost, restarting from sequence `1` is unsafe: a producer
 whose last accepted sequence is higher will reject it with `409`, while a
@@ -288,21 +300,23 @@ python shippers/orihsus.py \
 ```
 
 `--state-file` defaults next to `audit.jsonl`; use an explicit durable path for
-a production host. The shipper re-reads the complete touched UTC hours from the
-audit log, sends every unsent daily quota file (offline backlog included), and
-retries the exact in-flight envelope and `batch_seq` after a lost ACK.
+a production host. The shipper streams the complete touched UTC hours from the
+audit log, streams every unsent daily quota file (offline backlog included) in
+bounded batches, and retries the exact in-flight envelope and `batch_seq` after
+a lost ACK.
 
-Audit log safety:
+Audit log recovery:
 
-- A missing audit log fails closed before any heartbeat.
-- If the audit file shrinks or its already-consumed prefix changes (truncation,
-  rotation, or replacement), the shipper exits non-zero **without sending** and
-  without advancing its cursor. This also applies when retrying an in-flight
-  multi-chunk batch: every durable batch persists and verifies the full audit
-  extent it consumed, not just its cursor at the last ACK.
-- This prevents an incomplete replay from overwriting an already-shipped
-  complete hourly total. Restore the original audit log/state pair, or recover
-  the recorded sequence and log deliberately, before running again.
+- A missing audit log fails before any new audit data is read, but an
+  already-built pending envelope is replayed first.
+- If the audit file shrinks or is replaced, the shipper logs a warning and
+  restarts its audit cursor/anchor from byte `0`. A shortened replacement can
+  overwrite an already-published part of the active hour; unread tails or late
+  records can affect more than one hour, and same-inode `copytruncate` fast
+  regrowth may escape detection.
+- Exact totals require a quiesced writer and complete logs/state. Restore the
+  original audit log/state pair, or recover the recorded sequence deliberately,
+  before running again.
 
 The dashboard and read API expose:
 
