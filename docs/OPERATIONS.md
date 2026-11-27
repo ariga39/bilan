@@ -205,7 +205,7 @@ stores its cursor/outbox beside its own state path, retries the identical
    | Collector | Copy with the state file | Keep |
    | :--- | :--- | :--- |
    | `debitmetre` | `usage.jsonl` | The explicit `--state-file` path, or the default `.bilan-debitmetre-state.json` beside the log. |
-   | `orihsus` | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl` file** | The explicit `--state-file` path, or the default `.bilan-orihsus-state.json` beside `audit.jsonl`. A missing usage file is treated as empty, so omitting it drops unsent quota observations. |
+   | `orihsus` | `audit.jsonl`, every retained `audit.jsonl.N[.gz]`, **and every `usage/YYYY-MM-DD.jsonl` file** | The explicit `--state-file` path, or the default `.bilan-orihsus-state.json` beside `audit.jsonl`. A missing usage file is treated as empty, so omitting it drops unsent quota observations. Recovery is limited to audit generations still inside retention. |
    | `telemetre` | A SQLite backup of the centre quota database made with the SQLite backup API/CLI, or a verified offline backup after stopping the database | The explicit `--state-file` path, or the default `.bilan-telemetre-state.json` beside the database. For example: `sqlite3 SOURCE.sqlite3 ".backup 'TARGET.sqlite3'"`; do not casually copy a live database or rely on ad-hoc `-wal`/`-shm` copies. |
 
    Copy the token file too (or perform the coordinated rotation above).

@@ -72,11 +72,19 @@ offset; append-only ticks rebuild only the touched hours from that anchor, while
 an older late record falls back to an exact stream from byte 0. Audit and quota
 cursors are bound to the file generation ``(st_dev, st_ino)``; a rotation or
 truncation is logged and restarted instead of locking the shipper up.
+
+Retained rotations
+------------------
+A changed ``audit.jsonl.N[.gz]`` set, or the first run that sees retained
+archives, rebuilds absolute hourly snapshots from every generation plus the
+active log. Ordinary ticks read archives only for touched archived hours. Exact
+recovery is limited to records still inside the configured retention.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -341,9 +349,10 @@ def _aggregate_audit_window(
     audit_path: str,
     start: int,
     extent: int,
-    touched_hours: set[str],
-) -> tuple[list[dict[str, Any]], Dict[str, int]]:
-    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    touched_hours: Optional[set[str]] = None,
+    groups: Optional[Dict[tuple[str, str, str], Dict[str, Any]]] = None,
+) -> tuple[Dict[tuple[str, str, str], Dict[str, Any]], Dict[str, int]]:
+    groups = groups if groups is not None else {}
     first_offsets: Dict[str, int] = {}
     for line_start, _line_end, raw in iter_log_lines(audit_path, start, extent):
         record = _canonical_audit_record(raw)
@@ -353,10 +362,138 @@ def _aggregate_audit_window(
         # Keep every hour's first offset so a late-only fallback scan can
         # preserve the prior latest hour and its true earliest contribution.
         first_offsets.setdefault(hour, line_start)
-        if hour not in touched_hours:
+        if touched_hours is not None and hour not in touched_hours:
             continue
         _accumulate_audit_record(groups, hour, record)
-    return _rows_from_audit_groups(groups), first_offsets
+    return groups, first_offsets
+
+
+def _audit_archive_entries(audit_path: str) -> list[tuple[int, str, str, bool]]:
+    """Return retained ``audit.jsonl.N[.gz]`` generations, newest first."""
+
+    directory = os.path.dirname(os.path.abspath(audit_path))
+    base = os.path.basename(audit_path)
+    pattern = re.compile(r"^" + re.escape(base) + r"\.(\d+)(\.gz)?$")
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    by_number: Dict[int, tuple[int, str, str, bool]] = {}
+    for name in names:
+        match = pattern.match(name)
+        if match is None:
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        number = int(match.group(1))
+        compressed = match.group(2) is not None
+        current = by_number.get(number)
+        if current is not None and current[3] and not compressed:
+            continue
+        by_number[number] = (number, path, name, compressed)
+    return [by_number[number] for number in sorted(by_number, reverse=True)]
+
+
+def _audit_archive_fingerprint(
+    entries: Iterable[tuple[int, str, str, bool]],
+) -> list[list[Any]]:
+    fingerprint: list[list[Any]] = []
+    for _number, path, name, _compressed in entries:
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        fingerprint.append([name, info.st_size, info.st_dev, info.st_ino])
+    return fingerprint
+
+
+def _iter_archive_lines(entry: tuple[int, str, str, bool]) -> Iterable[bytes]:
+    """Yield complete lines or fail the tick before publishing a partial scan."""
+
+    _number, path, name, compressed = entry
+    opener = gzip.open if compressed else open
+    try:
+        with opener(path, "rb") as handle:
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    raise ShipperError(
+                        "audit rotation %s could not be read completely; retrying next run"
+                        % name
+                    )
+                yield raw
+    except (OSError, EOFError) as exc:
+        raise ShipperError(
+            "audit rotation %s could not be read completely (%s); retrying next run"
+            % (name, exc.__class__.__name__)
+        ) from exc
+
+
+def _iter_archive_records(
+    entry: tuple[int, str, str, bool],
+) -> Iterable[dict[str, Any]]:
+    for raw in _iter_archive_lines(entry):
+        record = _canonical_audit_record(raw)
+        if record is not None:
+            yield record
+
+
+def _accumulate_archive_groups(
+    groups: Dict[tuple[str, str, str], Dict[str, Any]],
+    archives: Iterable[tuple[int, str, str, bool]],
+    hours: Optional[set[str]] = None,
+) -> Optional[str]:
+    archive_hour: Optional[str] = None
+    for entry in archives:
+        for record in _iter_archive_records(entry):
+            hour = _record_hour(record)
+            if archive_hour is None or hour > archive_hour:
+                archive_hour = hour
+            if hours is None or hour in hours:
+                _accumulate_audit_record(groups, hour, record)
+    return archive_hour
+
+
+def _scan_retained_audit(
+    audit_path: str,
+    archives: Iterable[tuple[int, str, str, bool]],
+    extent: int,
+) -> tuple[list[dict[str, Any]], Optional[str], Optional[str], int]:
+    """Combine every retained generation with the active log."""
+
+    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    archive_hour = _accumulate_archive_groups(groups, archives)
+    groups, first_offsets = _aggregate_audit_window(
+        audit_path, 0, extent, None, groups
+    )
+    active_hour = max(first_offsets) if first_offsets else None
+    active_offset = first_offsets[active_hour] if active_hour is not None else 0
+    return (
+        _rows_from_audit_groups(groups),
+        archive_hour,
+        active_hour,
+        active_offset,
+    )
+
+
+def _verify_scan_snapshot(
+    audit_path: str,
+    archive_fingerprint: list[list[Any]],
+    identity: Optional[list[int]],
+    extent: int,
+) -> None:
+    """Abort a cold scan if a rotation changed the inputs underneath it."""
+
+    current = _audit_archive_entries(audit_path)
+    if _audit_archive_fingerprint(current) != archive_fingerprint:
+        raise ShipperError(
+            "audit rotations changed while the snapshot was being built; retrying next run"
+        )
+    _extent, current_identity, restarted = inspect_source(audit_path, extent, identity)
+    if restarted or current_identity != identity:
+        raise ShipperError(
+            "audit log rotated while the snapshot was being built; retrying next run"
+        )
 
 
 def _require_audit_log(audit_path: str) -> None:
@@ -376,6 +513,7 @@ def _capture_audit_work(
     audit_path: str,
     state: Dict[str, Any],
     extent: int,
+    archives: Iterable[tuple[int, str, str, bool]],
 ) -> tuple[list[dict[str, Any]], Optional[Dict[str, Any]]]:
     """Aggregate the touched audit hours from the captured complete-line extent.
 
@@ -401,7 +539,15 @@ def _capture_audit_work(
         }
 
     start = anchor if active_hour is not None and min(touched_hours) >= active_hour else 0
-    rows, first_offsets = _aggregate_audit_window(audit_path, start, extent, touched_hours)
+    groups, first_offsets = _aggregate_audit_window(
+        audit_path, start, extent, touched_hours
+    )
+    archive_hour = state.get("audit_archive_hour")
+    if archive_hour is not None:
+        wanted = {hour for hour in touched_hours if hour <= archive_hour}
+        if wanted:
+            _accumulate_archive_groups(groups, archives, wanted)
+    rows = _rows_from_audit_groups(groups)
     # Anchor on the latest hour known so far at its earliest contribution. A
     # multi-hour bootstrap must not anchor warm ticks to the oldest hour.
     new_active_hour = max(first_offsets)
@@ -1039,6 +1185,9 @@ def run_once(
     # a missing or rotated input cannot block an already-built batch.
     _require_audit_log(audit_path)
 
+    archives = _audit_archive_entries(audit_path)
+    archive_fingerprint = _audit_archive_fingerprint(archives)
+
     extent, identity, restarted = inspect_source(
         audit_path, state["audit_cursor"], state["audit_file_id"]
     )
@@ -1054,7 +1203,23 @@ def run_once(
     else:
         state["audit_file_id"] = identity
 
-    usage_rows, audit_after = _capture_audit_work(audit_path, state, extent)
+    archive_hour = state.get("audit_archive_hour")
+    archives_changed = archive_fingerprint != state.get("audit_archives", [])
+    if archives_changed:
+        usage_rows, archive_hour, active_hour, active_offset = _scan_retained_audit(
+            audit_path, archives, extent
+        )
+        _verify_scan_snapshot(audit_path, archive_fingerprint, identity, extent)
+        audit_after: Optional[Dict[str, Any]] = {
+            "cursor": extent,
+            "active_hour": active_hour,
+            "active_hour_offset": active_offset,
+            "file_id": identity,
+        }
+    else:
+        usage_rows, audit_after = _capture_audit_work(
+            audit_path, state, extent, archives
+        )
 
     cursors = dict(state["usage_cursors"])
     files = dict(state["usage_files"])
@@ -1074,6 +1239,11 @@ def run_once(
     )
     if not ok:
         return False
+    # Persist the scan boundary only after the absolute rows are acknowledged.
+    if archives_changed:
+        state["audit_archives"] = archive_fingerprint
+        state["audit_archive_hour"] = archive_hour
+        _save_state(state_path, state)
     # An ACKed pending batch already refreshed producer liveness for this run.
     if sent_any or pending_acked or not heartbeat:
         return True

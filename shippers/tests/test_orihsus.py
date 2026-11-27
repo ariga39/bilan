@@ -10,6 +10,7 @@ can be compared byte-for-byte. Fixtures use only synthetic ``audit.jsonl`` and
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -274,6 +275,49 @@ class OrihsusShipperTests(unittest.TestCase):
         with open(self.audit_path, "ab" if append else "wb") as handle:
             handle.write(data)
         return os.path.getsize(self.audit_path)
+
+    @staticmethod
+    def _record(timestamp: str, tokens: int) -> dict[str, Any]:
+        return audit_record(
+            timestamp,
+            input_tokens=tokens,
+            cached_tokens=0,
+            uncached_tokens=tokens,
+            output_tokens=0,
+        )
+
+    @staticmethod
+    def _usage_row(rows: dict[tuple[Any, ...], dict[str, Any]], hour: str) -> dict[str, Any]:
+        return rows[
+            (
+                "opencode",
+                "default",
+                "identity",
+                "laptop-key",
+                "deepseek-chat",
+                "",
+                hour,
+            )
+        ]
+
+    def write_audit_archive(
+        self,
+        number: int,
+        records: list[dict[str, Any]],
+        *,
+        compressed: bool = False,
+    ) -> str:
+        path = os.path.join(
+            self.tempdir, "audit.jsonl.%d%s" % (number, ".gz" if compressed else "")
+        )
+        data = self._encode(records)
+        if compressed:
+            with gzip.open(path, "wb") as handle:
+                handle.write(data)
+        else:
+            with open(path, "wb") as handle:
+                handle.write(data)
+        return path
 
     def write_usage(
         self,
@@ -1774,6 +1818,86 @@ class OrihsusShipperTests(unittest.TestCase):
         state = self.read_state()
         self.assertNotIn(gone_day, state["usage_cursors"])
         self.assertIn(other_day, state["usage_cursors"])
+
+
+    def test_old_cursor_combines_plain_and_gzip_archives(self) -> None:
+        self.write_audit_archive(2, [self._record("2026-11-26T08:00:00.000Z", 1)], compressed=True)
+        self.write_audit_archive(
+            1,
+            [
+                self._record("2026-11-26T08:30:00.000Z", 2),
+                self._record("2026-11-26T09:05:00.000Z", 4),
+            ],
+        )
+        self.write_audit([self._record("2026-11-26T09:55:00.000Z", 8)])
+        size = os.path.getsize(self.audit_path)
+        legacy = {
+            "version": 4,
+            "producer_id": "orihsus-main",
+            "batch_seq": 0,
+            "audit_cursor": size,
+            "audit_active_hour": "2026-11-26T09:00:00Z",
+            "audit_active_hour_offset": 0,
+            "audit_file_id": [
+                os.stat(self.audit_path).st_dev,
+                os.stat(self.audit_path).st_ino,
+            ],
+            "usage_cursors": {},
+            "usage_files": {},
+            "pending": None,
+        }
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+
+        self.assert_ok(self.run_cli())
+        rows = self.ingest.snapshot_usage_rows()
+        hour8 = self._usage_row(rows, "2026-11-26T08:00:00Z")
+        hour9 = self._usage_row(rows, "2026-11-26T09:00:00Z")
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 12))
+
+    def test_append_to_archived_hour_includes_archive_contribution(self) -> None:
+        self.write_audit_archive(1, [self._record("2026-11-26T08:05:00.000Z", 1)])
+        self.write_audit([self._record("2026-11-26T09:05:00.000Z", 2)])
+        self.assert_ok(self.run_cli())
+
+        self.write_audit([self._record("2026-11-26T08:35:00.000Z", 4)], append=True)
+        self.assert_ok(self.run_cli())
+
+        rows = self.ingest.snapshot_usage_rows()
+        hour8 = self._usage_row(rows, "2026-11-26T08:00:00Z")
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 5))
+
+    def test_corrupt_retained_archive_fails_before_publishing(self) -> None:
+        corrupt = gzip.compress(self._encode([self._record("2026-11-26T08:05:00.000Z", 1)]))[:-8]
+        with open(os.path.join(self.tempdir, "audit.jsonl.2.gz"), "wb") as handle:
+            handle.write(corrupt)
+        self.write_audit_archive(1, [self._record("2026-11-26T09:05:00.000Z", 2)])
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not be read completely", result.stderr)
+        self.assertEqual(self.ingest.snapshot_requests(), [])
+
+    def test_lost_ack_replays_same_archive_snapshot_and_repeat_stays_cached(self) -> None:
+        archive = self.write_audit_archive(1, [self._record("2026-11-26T08:05:00.000Z", 1)])
+        self.write_audit([self._record("2026-11-26T09:05:00.000Z", 2)])
+        self.ingest.drop_next_response = True
+
+        first = self.run_cli()
+        self.assertNotEqual(first.returncode, 0)
+        first_body = self.ingest.snapshot_requests()[0]["body"]
+
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.ingest.snapshot_requests()[1]["body"], first_body)
+        self.assertEqual(len(self.ingest.snapshot_usage_rows()), 2)
+
+        before = self.ingest.snapshot_usage_rows()
+        with measure_read_bytes(archive) as meter:
+            self.assertTrue(self.run_in_process())
+        self.assertEqual(meter["bytes"], 0)
+        self.assertEqual(self.ingest.snapshot_usage_rows(), before)
 
 
 if __name__ == "__main__":
