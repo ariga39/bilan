@@ -36,16 +36,23 @@ directly.
 
 Stories live in
 [`workers/web/src/client/stories/Dashboard.stories.tsx`](../workers/web/src/client/stories/Dashboard.stories.tsx).
-They render the same `App` component, Tailwind styles, and UI components as the
-application. Only `fetch` is replaced at the read-API boundary, so the app's own
-validation, error handling, controls, and refresh timer still run.
+Each story uses the actual TanStack Router route tree with memory history and a
+request-scoped TanStack Query client. A synthetic `DashboardDataSource` supplies
+the fixture data, so route search, loaders, navigation, refresh invalidation,
+month and timezone controls behave like the application without D1 or a Worker.
+Storybook pins `Date` so relative ages and the default month do not drift.
 
 | Story       | What it covers                                                     |
 | ----------- | ------------------------------------------------------------------ |
 | `Populated` | Five producers, two balances, quota windows, usage, and history    |
-| `Loading`   | The initial loading placeholders                                   |
+| `Loading`   | The pending dashboard state                                       |
 | `Empty`     | Explicit empty states, never zero-filled metrics                   |
-| `Failure`   | Fetch failure banner and unavailable usage state                   |
+| `Failure`   | The route error state for a failed read                            |
+| `Stale`     | A stale OpenCode Go key and delayed sample                         |
+| `Failed`    | A visible key whose latest attempt failed                          |
+| `Anomalous` | A clock-anomaly warning on an otherwise current key                |
+| `Missing reset` | Windows whose reset time is not reported                       |
+| `Funded provider` | A balance with funded/credit values                          |
 
 The fixtures in
 [`workers/web/src/client/stories/fixtures.ts`](../workers/web/src/client/stories/fixtures.ts)
@@ -56,30 +63,31 @@ current samples, a delayed DeepSeek balance, a stale OpenCode Go key, a failed
 producer, and a future-clock anomaly. Usage rows only exist for November 2026:
 selecting another month returns empty usage rows (and empty freshness metadata)
 for both the overview and daily responses, while producers, balances, and live
-quota windows stay populated.
+quota windows stay populated. The nine OpenCode Go keys exercise the dashboard
+visibility rule: three recent keys are visible (one just under seven days, one
+restored by a recent failed attempt) and six older keys are omitted, including
+the exact seven-day boundary and a future-anomalous timestamp.
 
 ## Add a scenario
 
 1. Add a builder to `fixtures.ts` (or extend an existing one) that returns one
    of the schemas from `@bilan/shared/schemas`.
-2. If the scenario needs a new fetch behavior, add its name to
-   `STORYBOOK_SCENARIOS` and handle it in `installScenarioFetch` / the response
-   builders in `workers/web/src/client/stories/fetch-mock.ts`. Storybook and the
-   mock share that list; the preview throws a visible error for any value that
-   is not in it instead of silently showing the populated fixtures.
+2. Add the scenario to `STORYBOOK_SCENARIOS` and, when it needs transformed
+   data, `buildScenarioOverview` in
+   `workers/web/src/client/stories/scenarios.ts`. Loading, empty and failure
+   behavior lives in `createDataSource` in `Dashboard.stories.tsx`; extend that
+   switch instead of adding a duplicate option list.
 3. Export a story in `Dashboard.stories.tsx`:
 
    ```tsx
    export const PartialHistory: Story = {
-     parameters: { bilanScenario: "partial-history" },
+     args: { scenario: "partial-history" },
    };
    ```
 
-4. Read query parameters from the request URL when a fixture should respond to
-   the timezone or month controls, rather than hard-coding one selection.
-   Omitted scenario parameters default to `populated`; misspelled or unsupported
-   values fail visibly.
+4. Keep fixture responses keyed by the router search (`view`, `tz`, `month`) so
+   navigation, refresh and the controls keep working through the same route
+   loader and query keys.
 
-Storybook resolves the scenario through `.storybook/preview.tsx`, installs the
-mock before the story renders, and pins `Date` so relative ages and the default
-month do not drift.
+The Storybook Vite config intentionally excludes the Cloudflare/Start plugins
+because the memory router and synthetic data source never call the Worker.

@@ -76,11 +76,4 @@ app.route("/", quotaRoutes);
 
 app.get("/api/*", (context) => context.json({ error: "not_found" }, 404));
 
-app.get("*", async (context) => {
-  if (!context.env.ASSETS) {
-    return context.text("Not found", 404);
-  }
-  return context.env.ASSETS.fetch(context.req.raw);
-});
-
 app.notFound((context) => context.json({ error: "not_found" }, 404));

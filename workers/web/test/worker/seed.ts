@@ -112,6 +112,81 @@ export async function seedUsageBucket(input: {
     .run();
 }
 
+export interface SeedQuotaWindow {
+  bucketId?: string;
+  slot: string;
+  label?: string | null;
+  usedPercent?: number | null;
+  remainingPercent?: number | null;
+  status?: "ok" | "limited" | "cooldown" | "unknown" | null;
+  resetsAt?: string | null;
+  windowDurationMins?: number | null;
+}
+
+export async function seedQuotaObservation(input: {
+  sampleId: string;
+  source?: string;
+  account?: string;
+  observerMachine?: string;
+  sampledAt: string;
+  ingestedAt?: string;
+  intervalSeconds?: number | null;
+  status?: "ok" | "empty" | "error";
+  timeAnomaly?: string | null;
+  errorSummary?: string | null;
+  producerId?: string;
+  batchSeq?: number;
+  windows?: Array<SeedQuotaWindow>;
+}): Promise<void> {
+  const source = input.source ?? "opencode";
+  const account = input.account ?? "fp_a";
+  const producerId = input.producerId ?? "orihsus-main";
+  await env.DB.prepare(
+    `INSERT INTO quota_observations (
+      producer_id, sample_id, source, account, observer_machine, sampled_at,
+      interval_seconds, status, time_anomaly, error_summary, ingested_at, batch_seq
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      producerId,
+      input.sampleId,
+      source,
+      account,
+      input.observerMachine ?? "gateway-a",
+      input.sampledAt,
+      input.intervalSeconds === undefined ? 300 : input.intervalSeconds,
+      input.status ?? "ok",
+      input.timeAnomaly ?? null,
+      input.errorSummary ?? null,
+      input.ingestedAt ?? input.sampledAt,
+      input.batchSeq ?? 1,
+    )
+    .run();
+
+  for (const window of input.windows ?? []) {
+    await env.DB.prepare(
+      `INSERT INTO quota_windows (
+        producer_id, sample_id, bucket_id, slot, label, used_percent,
+        remaining_percent, status, resets_at, window_duration_mins, meta_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        producerId,
+        input.sampleId,
+        window.bucketId ?? account,
+        window.slot,
+        window.label ?? null,
+        window.usedPercent ?? null,
+        window.remainingPercent ?? null,
+        window.status ?? null,
+        window.resetsAt ?? null,
+        window.windowDurationMins ?? null,
+        null,
+      )
+      .run();
+  }
+}
+
 export async function seedBalance(input: {
   provider: "openrouter" | "deepseek";
   currency: string;

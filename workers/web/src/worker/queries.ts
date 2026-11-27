@@ -9,6 +9,7 @@ import {
   monthRangeUtc,
   utcSecondIso,
 } from "@bilan/shared";
+import type { D1Database } from "@cloudflare/workers-types";
 import type {
   BalanceHistoryResponse,
   BalanceHistorySeries,

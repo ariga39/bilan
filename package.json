@@ -7,7 +7,7 @@
     "build-storybook": "pnpm --filter bilan-web build-storybook",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm typecheck:acceptance && pnpm test",
     "dev:ingest": "pnpm --filter bilan-ingest exec wrangler dev --port 8787 --test-scheduled --persist-to ../../.wrangler/state",
-    "dev:web": "pnpm --filter bilan-web build && pnpm --filter bilan-web exec wrangler dev --port 8788 --persist-to ../../.wrangler/state",
+    "dev:web": "pnpm --filter bilan-web dev",
     "db:migrate:local": "pnpm --filter bilan-ingest exec wrangler d1 migrations apply bilan --local --persist-to ../../.wrangler/state",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",

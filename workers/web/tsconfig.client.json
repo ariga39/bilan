@@ -9,7 +9,8 @@
     "types": ["vite/client", "node"],
     "noEmit": true,
     "paths": {
-      "@/*": ["./src/client/*"]
+      "@/*": ["./src/client/*"],
+      "~/*": ["./src/*"]
     }
   },
   "include": [
@@ -17,6 +18,14 @@
     ".storybook/**/*.tsx",
     "src/client/**/*.ts",
     "src/client/**/*.tsx",
+    "src/routes/**/*.ts",
+    "src/routes/**/*.tsx",
+    "src/query/**/*.ts",
+    "src/router.tsx",
+    "src/server.ts",
+    "src/search.ts",
+    "src/routeTree.gen.ts",
+    "src/server-env.d.ts",
     "vite.config.ts",
     "vitest.ui.config.ts",
     "vitest.e2e.config.ts",
