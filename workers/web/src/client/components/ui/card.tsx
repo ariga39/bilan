@@ -2,16 +2,42 @@ import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/utils";
 
-function Card({ className, ...props }: ComponentProps<"div">) {
+function Card({ className, children, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="card"
       className={cn(
-        "bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm",
+        "grimoire-card text-card-foreground flex flex-col gap-6 rounded-2xl border border-[#f5d08a]/35 py-6 backdrop-blur-md",
         className,
       )}
       {...props}
-    />
+    >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute top-2 left-2.5 text-[9px] leading-none text-[#f5d08a]/55"
+      >
+        ✦
+      </span>
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute top-2 right-2.5 text-[9px] leading-none text-[#f5d08a]/55"
+      >
+        ✦
+      </span>
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute bottom-2 left-2.5 text-[9px] leading-none text-[#f5d08a]/40"
+      >
+        ✦
+      </span>
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute right-2.5 bottom-2 text-[9px] leading-none text-[#f5d08a]/40"
+      >
+        ✦
+      </span>
+      {children}
+    </div>
   );
 }
 

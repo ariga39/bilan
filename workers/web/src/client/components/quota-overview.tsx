@@ -1,43 +1,27 @@
-import type {
-  QuotaAttempt,
-  QuotaObservation,
-  QuotaResponse,
-  QuotaSubject,
-  QuotaWindow,
-} from "@bilan/shared";
+import type { QuotaAttempt, QuotaResponse, QuotaSubject, QuotaWindow } from "@bilan/shared";
 import { filterVisibleQuotaSubjects } from "@bilan/shared";
-import { AlertTriangle, CheckCircle2, Clock3, Gauge, KeyRound, TriangleAlert } from "lucide-react";
+import { AlertTriangle, Clock3, Sparkles, TriangleAlert } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAge, formatDateTime, formatNumber, formatSpan } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface SourceMeta {
   label: string;
-  accountLabel: string;
-  description: string;
 }
 
 const SOURCE_META = {
-  opencode: {
-    label: "OpenCode Go",
-    accountLabel: "Key",
-    description: "Active keys in the last seven days.",
-  },
-  codex: {
-    label: "Codex",
-    accountLabel: "Account",
-    description: "Per Codex quota account.",
-  },
-  agy: {
-    label: "AGY",
-    accountLabel: "Account",
-    description: "Model groups and windows stay distinct.",
-  },
+  opencode: { label: "OpenCode Go" },
+  codex: { label: "ChatGPT Subs" },
+  agy: { label: "Google AI Subs" },
 } satisfies Record<string, SourceMeta>;
 
 const EPOCH_RESET_MS = 0;
+const MANA_GEMS = 10;
+
+const SINGLE_RING_RADIUS = 38;
+const SINGLE_RING_CIRCUMFERENCE = 2 * Math.PI * SINGLE_RING_RADIUS;
 
 function sourceMeta(source: string): SourceMeta {
   switch (source) {
@@ -48,12 +32,18 @@ function sourceMeta(source: string): SourceMeta {
     case "agy":
       return SOURCE_META.agy;
     default:
-      return {
-        label: source,
-        accountLabel: "Account",
-        description: "Per source account.",
-      };
+      return { label: source };
   }
+}
+
+function effectiveRemaining(window: QuotaWindow): number | null {
+  if (window.remaining_percent !== null) {
+    return Math.max(0, Math.min(100, window.remaining_percent));
+  }
+  if (window.used_percent !== null) {
+    return Math.max(0, Math.min(100, 100 - window.used_percent));
+  }
+  return null;
 }
 
 function primaryPercent(value: number | null): string {
@@ -61,60 +51,105 @@ function primaryPercent(value: number | null): string {
 }
 
 function exactPercent(value: number | null): string {
-  return value === null ? "Not reported" : `${formatNumber(value)}%`;
+  return value === null ? "Not reported" : `${formatNumber(Number(value.toFixed(2)))}%`;
+}
+
+interface GemPalette {
+  fill: string;
+  stroke: string;
+  glow: string;
+  text: string;
+}
+
+function gemColor(
+  remaining: number | null,
+  status: QuotaWindow["status"],
+  accent: "teal" | "violet" = "teal",
+): GemPalette {
+  if (status === "limited" || (remaining !== null && remaining <= 10)) {
+    return {
+      fill: "#fb7185",
+      stroke: "#fda4af",
+      glow: "drop-shadow(0 0 7px rgba(251, 113, 133, 0.85))",
+      text: "text-rose-300",
+    };
+  }
+  if (status === "cooldown" || (remaining !== null && remaining <= 35)) {
+    return {
+      fill: "#fcd34d",
+      stroke: "#fef08a",
+      glow: "drop-shadow(0 0 7px rgba(252, 211, 77, 0.8))",
+      text: "text-amber-200",
+    };
+  }
+  if (accent === "violet") {
+    return {
+      fill: "#c084fc",
+      stroke: "#e9d5ff",
+      glow: "drop-shadow(0 0 7px rgba(192, 132, 252, 0.8))",
+      text: "text-[#f3e8ff]",
+    };
+  }
+  return {
+    fill: "#5eead4",
+    stroke: "#a7f3d0",
+    glow: "drop-shadow(0 0 7px rgba(94, 234, 212, 0.75))",
+    text: "text-[#f8f3ff]",
+  };
 }
 
 interface ResetDetails {
-  label: string;
+  short: string | null;
   at: string | null;
 }
 
 function resetDetails(window: QuotaWindow): ResetDetails {
-  if (window.resets_at === null) {
-    return { label: "Reset not reported", at: null };
-  }
-  if (Date.parse(window.resets_at) === EPOCH_RESET_MS) {
-    // Some upstream payloads use the Unix epoch as a missing-reset sentinel.
-    return { label: "Reset not reported", at: null };
+  if (window.resets_at === null || Date.parse(window.resets_at) === EPOCH_RESET_MS) {
+    return { short: null, at: null };
   }
   if (window.reset_in_seconds === null) {
-    return { label: "Reset time not reported", at: window.resets_at };
+    return { short: null, at: window.resets_at };
   }
   if (window.reset_in_seconds <= 0) {
-    return { label: "Reset time passed", at: window.resets_at };
+    return { short: "Reset passed", at: window.resets_at };
   }
-  return { label: `Resets in ${formatSpan(window.reset_in_seconds)}`, at: window.resets_at };
+  return { short: `in ${formatSpan(window.reset_in_seconds)}`, at: window.resets_at };
 }
 
-function WindowStatus({ window }: { window: QuotaWindow }) {
-  if (window.status === null) {
-    return <Badge variant="outline">Not reported</Badge>;
-  }
-  if (window.status === "ok") {
+function WindowWarningBadge({ status }: { status: QuotaWindow["status"] }) {
+  if (status === "limited") {
     return (
-      <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">
-        <CheckCircle2 />
-        OK
-      </Badge>
-    );
-  }
-  if (window.status === "limited") {
-    return (
-      <Badge variant="outline" className="border-destructive/30 bg-destructive/5 text-destructive">
-        <AlertTriangle />
+      <Badge
+        variant="outline"
+        className="rounded-full border-rose-400/50 bg-rose-500/20 px-1.5 py-0 text-[10px] text-rose-200"
+      >
+        <AlertTriangle className="size-3" />
         Limited
       </Badge>
     );
   }
-  if (window.status === "cooldown") {
+  if (status === "cooldown") {
     return (
-      <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-        <Clock3 />
+      <Badge
+        variant="outline"
+        className="rounded-full border-amber-400/50 bg-amber-500/20 px-1.5 py-0 text-[10px] text-amber-200"
+      >
+        <Clock3 className="size-3" />
         Cooldown
       </Badge>
     );
   }
-  return <Badge variant="outline">Unknown</Badge>;
+  if (status === "unknown") {
+    return (
+      <Badge
+        variant="outline"
+        className="rounded-full border-violet-300/40 bg-violet-500/20 px-1.5 py-0 text-[10px] text-violet-200"
+      >
+        Unknown
+      </Badge>
+    );
+  }
+  return null;
 }
 
 function AttemptWarning({ attempt }: { attempt: QuotaAttempt | null }) {
@@ -124,10 +159,10 @@ function AttemptWarning({ attempt }: { attempt: QuotaAttempt | null }) {
   return (
     <p
       className={cn(
-        "rounded-md border px-2.5 py-1.5 text-xs",
+        "rounded-lg border px-2.5 py-1.5 text-xs",
         attempt.status === "error"
-          ? "border-destructive/30 bg-destructive/5 text-destructive"
-          : "border-amber-300 bg-amber-50 text-amber-900",
+          ? "border-rose-400/40 bg-rose-500/15 text-rose-200"
+          : "border-amber-400/40 bg-amber-500/15 text-amber-200",
       )}
     >
       {attempt.status === "error" ? "Latest attempt failed" : "Latest attempt was empty"} ·{" "}
@@ -146,7 +181,7 @@ function AnomalyWarning({ subject }: { subject: QuotaSubject }) {
     return null;
   }
   return (
-    <p className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900">
+    <p className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-xs text-amber-200">
       <TriangleAlert className="mr-1 inline size-3.5" />
       Clock anomaly:{" "}
       {anomalies
@@ -155,22 +190,6 @@ function AnomalyWarning({ subject }: { subject: QuotaSubject }) {
             `${anomaly.time_anomaly ?? "unspecified"} at ${formatDateTime(anomaly.sampled_at)}`,
         )
         .join("; ")}
-    </p>
-  );
-}
-
-function SampleLine({ observation }: { observation: QuotaObservation }) {
-  return (
-    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-      <Clock3 className="size-3.5" />
-      <span>
-        {formatDateTime(observation.sampled_at)} · {formatAge(observation.sample_age_seconds)}
-      </span>
-      {observation.is_stale ? (
-        <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-          Stale
-        </Badge>
-      ) : null}
     </p>
   );
 }
@@ -187,157 +206,369 @@ function windowGroups(
   return [...groups.entries()].map(([bucketId, windows]) => ({ bucketId, windows }));
 }
 
-function isWarningStatus(status: QuotaWindow["status"]): boolean {
-  return status === "limited" || status === "cooldown";
+function windowTitle(window: QuotaWindow): string {
+  const parts = [
+    `${exactPercent(window.remaining_percent)} remaining`,
+    `${exactPercent(window.used_percent)} used`,
+  ];
+  const reset = resetDetails(window);
+  if (reset.at) {
+    parts.push(`Resets ${formatDateTime(reset.at)}`);
+  }
+  return parts.join(" · ");
 }
 
-function limitingWindow(subject: QuotaSubject): QuotaWindow | null {
-  const windows = subject.latest_valid?.windows ?? [];
-  if (windows.length === 0) {
-    return null;
+function windowLabel(window: QuotaWindow): string {
+  if (window.label && window.label !== window.slot) {
+    return window.label;
   }
-  const warnings = windows.filter((window) => isWarningStatus(window.status));
-  const candidates = warnings.length > 0 ? warnings : windows;
-  const known = candidates.filter(
-    (window): window is QuotaWindow & { remaining_percent: number } =>
-      window.remaining_percent !== null,
-  );
-  if (known.length === 0) {
-    return candidates[0] ?? null;
-  }
-  return known.reduce((lowest, window) =>
-    window.remaining_percent < lowest.remaining_percent ? window : lowest,
+  return window.slot;
+}
+
+function isWeeklyWindow(window: QuotaWindow): boolean {
+  const label = windowLabel(window).toLowerCase();
+  return window.slot === "weekly" || label.includes("week") || label === "1w";
+}
+
+function isFiveHourWindow(window: QuotaWindow): boolean {
+  const label = windowLabel(window).toLowerCase();
+  return window.slot === "five-hour" || label === "5h" || label.includes("5h");
+}
+
+/** Frameless pop-out anime character cutout standing directly above/inside the card edge. */
+function CharacterCutout({
+  src,
+  glowFilter,
+  className,
+}: {
+  src: string;
+  glowFilter: string;
+  className?: string;
+}) {
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden="true"
+      className={cn("pointer-events-none select-none object-contain object-bottom", className)}
+      style={{
+        filter: glowFilter,
+        maskImage: "linear-gradient(to bottom, black 82%, transparent 100%)",
+        WebkitMaskImage: "linear-gradient(to bottom, black 82%, transparent 100%)",
+      }}
+    />
   );
 }
 
-function WindowReading({
+/** Hero Celestial Astrolabe Ring for primary / weekly quota windows. */
+function SoulGemRing({
   window,
-  showBucket = null,
-  exact = false,
+  accent = "teal",
+  titleOverride,
+  secondary,
 }: {
   window: QuotaWindow;
-  showBucket?: string | null;
-  exact?: boolean;
+  accent?: "teal" | "violet";
+  titleOverride?: string;
+  secondary?: QuotaWindow | null;
 }) {
+  const remaining = effectiveRemaining(window);
   const reset = resetDetails(window);
+  const colors = gemColor(remaining, window.status, accent);
+  const offset =
+    remaining === null
+      ? SINGLE_RING_CIRCUMFERENCE
+      : SINGLE_RING_CIRCUMFERENCE * (1 - Math.max(0, Math.min(100, remaining)) / 100);
+
+  const secRemaining = secondary ? effectiveRemaining(secondary) : null;
+  const secReset = secondary ? resetDetails(secondary) : null;
+  const secColors = secondary ? gemColor(secRemaining, secondary.status, "teal") : null;
+
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5">
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium">
-          {showBucket ? <span className="font-mono text-[11px]">{showBucket} · </span> : null}
-          {window.slot}
-          {window.label ? (
-            <span className="ml-1 text-xs font-normal text-muted-foreground">{window.label}</span>
+    <div className="flex min-w-0 flex-1 items-center gap-3.5 rounded-xl border border-[#f5d08a]/20 bg-[#120d28]/85 px-3.5 py-2.5">
+      <div
+        className="relative flex size-24 shrink-0 items-center justify-center"
+        title={windowTitle(window)}
+        role="progressbar"
+        aria-label={`${windowLabel(window)} remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={remaining === null ? undefined : Math.round(remaining)}
+      >
+        <svg viewBox="0 0 96 96" className="size-full -rotate-90" aria-hidden="true">
+          <circle
+            cx="48"
+            cy="48"
+            r="44"
+            fill="none"
+            stroke="rgba(245, 208, 138, 0.2)"
+            strokeWidth="0.9"
+            strokeDasharray="2 4"
+          />
+          <circle
+            cx="48"
+            cy="48"
+            r={SINGLE_RING_RADIUS}
+            fill="none"
+            stroke="rgba(45, 34, 86, 0.92)"
+            strokeWidth="6.5"
+          />
+          {remaining !== null ? (
+            <circle
+              cx="48"
+              cy="48"
+              r={SINGLE_RING_RADIUS}
+              fill="none"
+              stroke={colors.fill}
+              strokeWidth="6.5"
+              strokeLinecap="round"
+              strokeDasharray={SINGLE_RING_CIRCUMFERENCE}
+              strokeDashoffset={offset}
+              style={{ filter: colors.glow }}
+            />
           ) : null}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {reset.label}
-          {reset.at ? ` · ${formatDateTime(reset.at)}` : ""}
-        </p>
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span
+            style={{ fontFamily: "var(--font-display)" }}
+            className={cn("text-xl font-bold tabular-nums leading-none", colors.text)}
+          >
+            {primaryPercent(remaining)}
+          </span>
+          <span className="mt-1 text-[9px] tracking-widest text-[#f5d08a]/85 uppercase">
+            {windowLabel(window)}
+          </span>
+        </div>
       </div>
-      <div className="flex items-center gap-2">
-        <span className="text-right">
-          <span className="block text-base font-semibold tabular-nums">
-            {exact
-              ? exactPercent(window.remaining_percent)
-              : primaryPercent(window.remaining_percent)}
-          </span>
-          <span className="block text-[10px] text-muted-foreground">
-            remaining · used {exactPercent(window.used_percent)}
-          </span>
-        </span>
-        <WindowStatus window={window} />
+
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="space-y-0.5" title={windowTitle(window)}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="truncate text-xs font-semibold text-[#e9d5ff]">
+              {titleOverride ??
+                `${windowLabel(window).charAt(0).toUpperCase()}${windowLabel(window).slice(1)} window`}
+            </span>
+            <WindowWarningBadge status={window.status} />
+          </div>
+          {reset.short ? (
+            <p
+              className="text-xs text-muted-foreground"
+              title={reset.at ? formatDateTime(reset.at) : undefined}
+            >
+              Resets {reset.short}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">Remaining quota</p>
+          )}
+        </div>
+
+        {secondary && secColors ? (
+          <div
+            className="space-y-1 border-t border-[#f5d08a]/15 pt-1.5"
+            title={windowTitle(secondary)}
+          >
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="font-medium text-[#d8c7f7]">{windowLabel(secondary)}</span>
+                <WindowWarningBadge status={secondary.status} />
+              </div>
+              <div className="flex shrink-0 items-baseline gap-1.5">
+                {secReset?.short ? (
+                  <span
+                    className="hidden text-[10px] text-muted-foreground sm:inline"
+                    title={secReset.at ? formatDateTime(secReset.at) : undefined}
+                  >
+                    {secReset.short}
+                  </span>
+                ) : null}
+                <span className={cn("font-bold tabular-nums", secColors.text)}>
+                  {primaryPercent(secRemaining)}
+                </span>
+              </div>
+            </div>
+            <div
+              className="h-1.5 w-full overflow-hidden rounded-full bg-[#241b45]"
+              role="progressbar"
+              aria-label={`${windowLabel(secondary)} remaining`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={secRemaining === null ? undefined : Math.round(secRemaining)}
+            >
+              {secRemaining !== null ? (
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, secRemaining))}%`,
+                    backgroundColor: secColors.fill,
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function AllWindows({ subject }: { subject: QuotaSubject }) {
-  if (!subject.latest_valid) {
-    return null;
-  }
+/** Faceted 10-diamond Mana Crystal Gauge for OpenCode Go key rows. */
+function DiamondManaRow({ window }: { window: QuotaWindow }) {
+  const remaining = effectiveRemaining(window);
+  const reset = resetDetails(window);
+  const colors = gemColor(remaining, window.status);
   return (
-    <details className="rounded-md border bg-card px-2.5 py-1.5 text-xs">
-      <summary className="cursor-pointer font-medium text-muted-foreground">
-        All readings · {subject.latest_valid.windows.length}
-      </summary>
-      <div className="mt-2 space-y-2">
-        <SampleLine observation={subject.latest_valid} />
-        {windowGroups(subject).map((group) => (
-          <div key={group.bucketId} className="space-y-1.5">
-            {group.bucketId !== subject.account ? (
-              <p className="font-mono text-[11px] text-muted-foreground">{group.bucketId}</p>
-            ) : null}
-            {group.windows.map((window) => (
-              <WindowReading
-                key={`${window.bucket_id}-${window.slot}`}
-                window={window}
-                showBucket={group.bucketId !== subject.account ? group.bucketId : null}
-                exact
-              />
-            ))}
-          </div>
-        ))}
-        <p className="text-muted-foreground">
-          Observed by {subject.latest_valid.observer_machine} · interval{" "}
-          {subject.latest_valid.interval_seconds === null
-            ? "not reported"
-            : formatSpan(subject.latest_valid.interval_seconds)}
-        </p>
+    <div className="min-w-0 space-y-1.5" title={windowTitle(window)}>
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[10px] text-[#f5d08a]" aria-hidden="true">
+            ✧
+          </span>
+          <span className="truncate font-medium text-foreground">{windowLabel(window)}</span>
+          <WindowWarningBadge status={window.status} />
+        </div>
+        <div className="flex shrink-0 items-baseline gap-2">
+          {reset.short ? (
+            <span
+              className="text-[11px] text-muted-foreground"
+              title={reset.at ? formatDateTime(reset.at) : undefined}
+            >
+              {reset.short}
+            </span>
+          ) : null}
+          <span className={cn("w-9 text-right text-sm font-bold tabular-nums", colors.text)}>
+            {primaryPercent(remaining)}
+          </span>
+        </div>
       </div>
-    </details>
+      <div
+        className="relative flex items-center justify-between rounded-full border border-[#f5d08a]/28 bg-[#0f0a22]/95 px-2.5 py-1.5"
+        role="progressbar"
+        aria-label={`${windowLabel(window)} remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={remaining === null ? undefined : Math.round(remaining)}
+      >
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-[#f5d08a]/30 to-transparent"
+        />
+        {Array.from({ length: MANA_GEMS }, (_, index) => {
+          const segStart = index * (100 / MANA_GEMS);
+          const segFill =
+            remaining === null
+              ? 0
+              : Math.max(0, Math.min(1, (remaining - segStart) / (100 / MANA_GEMS)));
+          const active = segFill > 0.05;
+          return (
+            <svg
+              key={index}
+              viewBox="0 0 16 16"
+              className="relative z-10 size-3.5 shrink-0"
+              style={active ? { filter: colors.glow, opacity: 0.45 + segFill * 0.55 } : undefined}
+              aria-hidden="true"
+            >
+              <polygon
+                points="8,1 14,8 8,15 2,8"
+                fill={active ? colors.fill : "rgba(38, 28, 74, 0.92)"}
+                stroke={active ? colors.stroke : "rgba(245, 208, 138, 0.3)"}
+                strokeWidth="1.2"
+              />
+              {active ? (
+                <polygon points="8,3.2 10.5,8 8,9.5 5.5,8" fill="rgba(255,255,255,0.45)" />
+              ) : null}
+            </svg>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
-function PlatformCard({ source, subjects }: { source: string; subjects: Array<QuotaSubject> }) {
-  const meta = sourceMeta(source);
+function SubjectMetaRow({ subject, showAccount }: { subject: QuotaSubject; showAccount: boolean }) {
+  const valid = subject.latest_valid;
+  if (!showAccount && !valid?.is_stale && valid === null) {
+    return null;
+  }
   return (
-    <Card className="h-fit gap-3 py-4">
-      <CardHeader className="gap-0.5 px-4 pb-0">
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Gauge className="size-4 text-muted-foreground" />
-          {meta.label}
-        </CardTitle>
-        <CardDescription className="text-xs">{meta.description}</CardDescription>
+    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+      <div className="flex min-w-0 items-center gap-1.5">
+        {showAccount ? (
+          <span className="truncate font-mono text-xs text-[#e9d5ff]">{subject.account}</span>
+        ) : null}
+        {valid?.is_stale ? (
+          <Badge
+            variant="outline"
+            className="rounded-full border-amber-400/40 bg-amber-500/15 px-2 py-0 text-[10px] text-amber-200"
+          >
+            Stale
+          </Badge>
+        ) : null}
+      </div>
+      {valid ? (
+        <span className="text-muted-foreground" title={formatDateTime(valid.sampled_at)}>
+          ✦ {formatAge(valid.sample_age_seconds)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function ChatGPTSubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
+  const showAccount = subjects.length > 1;
+  const singleFreshAge =
+    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
+      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
+      : null;
+
+  return (
+    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
+      <CharacterCutout
+        src="/mascot-chatgpt.png"
+        glowFilter="drop-shadow(0 0 14px rgba(226, 232, 240, 0.5))"
+        className="absolute -top-8 left-1.5 z-20 h-40 w-30 sm:h-44 sm:w-34"
+      />
+      <CardHeader className="pl-30 pr-4 pb-0 sm:pl-36">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle
+            style={{ fontFamily: "var(--font-display)" }}
+            className="flex items-center gap-2 text-sm tracking-wide text-[#f1f5f9]"
+          >
+            <Sparkles className="size-4 text-[#e2e8f0]" />
+            {sourceMeta("codex").label}
+          </CardTitle>
+          {singleFreshAge !== null ? (
+            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
+          ) : null}
+        </div>
       </CardHeader>
-      <CardContent className="space-y-3 px-4">
+      <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
         {subjects.length === 0 ? (
-          <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
-            No {meta.label} quota observations yet.
+          <p className="rounded-xl border border-dashed border-[#f5d08a]/25 px-3 py-4 text-center text-xs text-muted-foreground">
+            No ChatGPT Subs quota observations yet.
           </p>
         ) : (
           subjects.map((subject) => {
-            const valid = subject.latest_valid;
-            const limiting = limitingWindow(subject);
+            const windows = subject.latest_valid?.windows ?? [];
             return (
-              <section key={`${subject.source}-${subject.account}`} className="space-y-1.5">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <div>
-                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                      {meta.accountLabel}
-                    </p>
-                    <p className="font-mono text-xs font-medium">{subject.account}</p>
-                  </div>
-                  {valid ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      {formatAge(valid.sample_age_seconds)}
-                    </p>
-                  ) : null}
-                </div>
+              <div key={`${subject.source}-${subject.account}`} className="space-y-2">
+                {showAccount || subject.latest_valid?.is_stale ? (
+                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
+                ) : null}
                 <AttemptWarning attempt={subject.latest_attempt} />
                 <AnomalyWarning subject={subject} />
-                {limiting ? (
-                  <WindowReading
-                    window={limiting}
-                    showBucket={limiting.bucket_id !== subject.account ? limiting.bucket_id : null}
-                  />
+                {windows.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No valid quota windows.</p>
                 ) : (
-                  <p className="rounded-md border border-dashed px-2.5 py-2 text-xs text-muted-foreground">
-                    No valid quota windows yet.
-                  </p>
+                  <div className="flex min-w-0 flex-col gap-2">
+                    {windows.map((window) => (
+                      <SoulGemRing
+                        key={`codex-${subject.account}-${window.bucket_id}-${window.slot}`}
+                        window={window}
+                      />
+                    ))}
+                  </div>
                 )}
-                <AllWindows subject={subject} />
-              </section>
+              </div>
             );
           })
         )}
@@ -346,125 +577,241 @@ function PlatformCard({ source, subjects }: { source: string; subjects: Array<Qu
   );
 }
 
-function openCodeTightestKey(subjects: Array<QuotaSubject>): string | null {
-  let tightest: { key: string; remaining: number } | null = null;
-  for (const subject of subjects) {
-    for (const window of subject.latest_valid?.windows ?? []) {
-      if (window.remaining_percent === null) {
-        continue;
-      }
-      const key = `${subject.account}\u0000${window.bucket_id}\u0000${window.slot}`;
-      if (tightest === null || window.remaining_percent < tightest.remaining) {
-        tightest = { key, remaining: window.remaining_percent };
-      }
-    }
+function renderBucketWindows(
+  subject: QuotaSubject,
+  group: { bucketId: string; windows: Array<QuotaWindow> },
+) {
+  const weekly = group.windows.find(isWeeklyWindow);
+  const fiveHour = group.windows.find(isFiveHourWindow);
+  if (weekly && fiveHour) {
+    const extraWindows = group.windows.filter((w) => w !== weekly && w !== fiveHour);
+    return (
+      <div key={`agy-${subject.account}-${group.bucketId}`} className="flex min-w-0 flex-col gap-2">
+        <SoulGemRing
+          window={weekly}
+          accent="violet"
+          titleOverride={group.bucketId}
+          secondary={fiveHour}
+        />
+        {extraWindows.map((window) => (
+          <SoulGemRing
+            key={`agy-${subject.account}-${window.bucket_id}-${window.slot}`}
+            window={window}
+            accent="violet"
+            titleOverride={group.bucketId}
+          />
+        ))}
+      </div>
+    );
   }
-  return tightest?.key ?? null;
+  return group.windows.map((window) => (
+    <SoulGemRing
+      key={`agy-${subject.account}-${window.bucket_id}-${window.slot}`}
+      window={window}
+      accent="violet"
+      titleOverride={group.bucketId}
+    />
+  ));
 }
 
-function OpenCodeRow({
-  subject,
-  tightestKey,
-}: {
-  subject: QuotaSubject;
-  tightestKey: string | null;
-}) {
-  const limiting = limitingWindow(subject);
-  const key = limiting
-    ? `${subject.account}\u0000${limiting.bucket_id}\u0000${limiting.slot}`
-    : null;
-  const isTightest = key !== null && key === tightestKey;
-  const reset = limiting ? resetDetails(limiting) : null;
-  const valid = subject.latest_valid;
-  const attempt = subject.latest_attempt;
-  const hasAnomaly = subject.anomalies.length > 0 || Boolean(valid?.time_anomaly);
+function GoogleAISubsCard({ subjects }: { subjects: Array<QuotaSubject> }) {
+  const showAccount = subjects.length > 1;
+  const singleFreshAge =
+    subjects.length === 1 && !subjects[0]?.latest_valid?.is_stale
+      ? (subjects[0]?.latest_valid?.sample_age_seconds ?? null)
+      : null;
+
   return (
-    <details className={cn("rounded-lg border", isTightest && "border-amber-400 bg-amber-50/40")}>
-      <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-        <span className="min-w-0 flex-1">
-          <span className="block truncate font-mono text-xs font-medium">{subject.account}</span>
-          <span className="block text-[11px] text-muted-foreground">
-            {limiting
-              ? `${limiting.slot}${limiting.label ? ` · ${limiting.label}` : ""}`
-              : "No valid window"}
-            {reset ? ` · ${reset.label}` : ""}
-            {reset?.at ? ` · ${formatDateTime(reset.at)}` : ""}
+    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
+      <CharacterCutout
+        src="/mascot-gemini.png"
+        glowFilter="drop-shadow(0 0 14px rgba(192, 132, 252, 0.55))"
+        className="absolute -top-8 left-1.5 z-20 h-40 w-30 sm:h-44 sm:w-34"
+      />
+      <CardHeader className="pl-30 pr-4 pb-0 sm:pl-36">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle
+            style={{ fontFamily: "var(--font-display)" }}
+            className="flex items-center gap-2 text-sm tracking-wide text-[#ddd6fe]"
+          >
+            <Sparkles className="size-4 text-[#c084fc]" />
+            {sourceMeta("agy").label}
+          </CardTitle>
+          {singleFreshAge !== null ? (
+            <span className="text-[11px] text-muted-foreground">✦ {formatAge(singleFreshAge)}</span>
+          ) : null}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 pl-30 pr-4 sm:pl-36">
+        {subjects.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-[#f5d08a]/25 px-3 py-4 text-center text-xs text-muted-foreground">
+            No Google AI Subs quota observations yet.
+          </p>
+        ) : (
+          subjects.map((subject) => {
+            const groups = windowGroups(subject);
+            const primaryGroups = groups.filter((group) => !/claude/i.test(group.bucketId));
+            const secondaryGroups = groups.filter((group) => /claude/i.test(group.bucketId));
+            const secondaryHasAlert = secondaryGroups.some((group) =>
+              group.windows.some(
+                (window) => window.status === "limited" || window.status === "unknown",
+              ),
+            );
+            return (
+              <div key={`${subject.source}-${subject.account}`} className="space-y-2">
+                {showAccount || subject.latest_valid?.is_stale ? (
+                  <SubjectMetaRow subject={subject} showAccount={showAccount} />
+                ) : null}
+                <AttemptWarning attempt={subject.latest_attempt} />
+                <AnomalyWarning subject={subject} />
+                {groups.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No valid quota windows.</p>
+                ) : (
+                  <div className="flex min-w-0 flex-col gap-2">
+                    {primaryGroups.map((group) => renderBucketWindows(subject, group))}
+                    {secondaryGroups.length > 0 ? (
+                      <details
+                        open={secondaryHasAlert || undefined}
+                        className="rounded-lg border border-[#f5d08a]/15 bg-[#0e0a20]/65 px-2.5 py-1.5 text-xs"
+                      >
+                        <summary className="cursor-pointer text-[11px] text-muted-foreground">
+                          Other models ({secondaryGroups.length})
+                        </summary>
+                        <div className="mt-2 flex flex-col gap-2">
+                          {secondaryGroups.map((group) => renderBucketWindows(subject, group))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function subjectLowestRemaining(subject: QuotaSubject): number {
+  let lowest = Number.POSITIVE_INFINITY;
+  for (const window of subject.latest_valid?.windows ?? []) {
+    if (window.status === "limited") {
+      return -1;
+    }
+    const remaining = effectiveRemaining(window);
+    if (remaining !== null && remaining < lowest) {
+      lowest = remaining;
+    }
+  }
+  return lowest;
+}
+
+function OpenCodeKeyCard({ subject, isTightest }: { subject: QuotaSubject; isTightest: boolean }) {
+  const valid = subject.latest_valid;
+  const windows = valid?.windows ?? [];
+  return (
+    <div
+      className={cn(
+        "min-w-0 space-y-2 rounded-xl border border-[#f5d08a]/22 bg-[#130e2b]/85 px-3.5 py-2.5",
+        isTightest &&
+          "border-pink-400/60 bg-gradient-to-r from-pink-500/18 via-[#1e133b]/92 to-violet-500/18 shadow-[0_0_24px_-8px_rgba(244,114,182,0.55)]",
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono text-xs font-medium text-[#f8f3ff]">
+            {subject.account}
           </span>
-          <span className="block text-[11px] text-muted-foreground">
-            {valid
-              ? `Valid sample ${formatAge(valid.sample_age_seconds)}${valid.is_stale ? " · stale" : ""}`
-              : "No valid sample"}
-          </span>
-        </span>
-        <span className="flex items-center gap-2">
           {isTightest ? (
-            <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+            <Badge
+              variant="outline"
+              className="rounded-full border-pink-400/65 bg-pink-500/25 px-2 py-0 text-[10px] text-pink-200"
+            >
+              <Sparkles className="size-2.5" />
               Tightest
             </Badge>
           ) : null}
-          <span className="text-base font-semibold tabular-nums">
-            {primaryPercent(limiting?.remaining_percent ?? null)}
-          </span>
-          {limiting ? <WindowStatus window={limiting} /> : null}
-        </span>
-        {valid?.is_stale ||
-        attempt?.status === "error" ||
-        attempt?.status === "empty" ||
-        hasAnomaly ? (
-          <span className="flex w-full flex-wrap gap-x-2 gap-y-1 text-[11px]">
-            {valid?.is_stale ? <span className="text-amber-800">Stale sample</span> : null}
-            {attempt?.status === "error" ? (
-              <span className="text-destructive">Latest attempt failed</span>
-            ) : null}
-            {attempt?.status === "empty" ? (
-              <span className="text-amber-800">Latest attempt empty</span>
-            ) : null}
-            {hasAnomaly ? <span className="text-amber-800">Clock anomaly</span> : null}
+          {valid?.is_stale ? (
+            <Badge
+              variant="outline"
+              className="rounded-full border-amber-400/40 bg-amber-500/15 px-2 py-0 text-[10px] text-amber-200"
+            >
+              Stale
+            </Badge>
+          ) : null}
+        </div>
+        {valid ? (
+          <span
+            className="text-[11px] text-muted-foreground"
+            title={formatDateTime(valid.sampled_at)}
+          >
+            {formatAge(valid.sample_age_seconds)}
           </span>
         ) : null}
-      </summary>
-      <div className="space-y-2 border-t px-3 py-2">
-        <AttemptWarning attempt={subject.latest_attempt} />
-        <AnomalyWarning subject={subject} />
-        <AllWindows subject={subject} />
       </div>
-    </details>
+      <AttemptWarning attempt={subject.latest_attempt} />
+      <AnomalyWarning subject={subject} />
+      {windows.length > 0 ? (
+        <div className="grid gap-2.5 sm:grid-cols-3">
+          {windows.map((window) => (
+            <DiamondManaRow key={`${window.bucket_id}-${window.slot}`} window={window} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">No valid quota windows.</p>
+      )}
+    </div>
   );
 }
 
 function OpenCodeOverview({ subjects }: { subjects: Array<QuotaSubject> }) {
-  const tightestKey = openCodeTightestKey(subjects);
+  let tightestAccount: string | null = null;
+  let tightestValue = Number.POSITIVE_INFINITY;
+  for (const subject of subjects) {
+    const score = subjectLowestRemaining(subject);
+    if (score < tightestValue) {
+      tightestValue = score;
+      tightestAccount = subject.account;
+    }
+  }
+  const hasMultiple = subjects.length > 1;
   return (
-    <Card className="h-fit gap-3 py-4">
-      <CardHeader className="gap-0.5 px-4 pb-0">
+    <Card className="relative mt-5 min-w-0 gap-3 overflow-visible py-4">
+      <CharacterCutout
+        src="/mascot-deepseek.png"
+        glowFilter="drop-shadow(0 0 14px rgba(56, 189, 248, 0.5))"
+        className="absolute -top-9 left-3 z-20 h-24 w-24 sm:-top-10 sm:h-28 sm:w-28"
+      />
+      <CardHeader className="pl-28 pr-4 pb-0 sm:pl-32">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <KeyRound className="size-4 text-muted-foreground" />
-            OpenCode Go
-          </CardTitle>
-          <CardDescription className="text-xs">
-            {subjects.length} active {subjects.length === 1 ? "key" : "keys"} · last 7 days
-          </CardDescription>
+          <div>
+            <CardTitle
+              style={{ fontFamily: "var(--font-display)" }}
+              className="flex items-center gap-2 text-sm tracking-wide text-[#bae6fd]"
+            >
+              {sourceMeta("opencode").label}
+            </CardTitle>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              DeepSeek · {subjects.length} active {subjects.length === 1 ? "key" : "keys"} · 7d
+            </p>
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2 px-4">
+      <CardContent className="space-y-2.5 px-4 pt-1">
         {subjects.length === 0 ? (
-          <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
-            No OpenCode Go key has reported in the last seven days.
+          <p className="rounded-xl border border-dashed border-[#f5d08a]/25 px-3 py-3 text-xs text-muted-foreground">
+            No active OpenCode Go keys in the last 7 days.
           </p>
         ) : (
           subjects.map((subject) => (
-            <OpenCodeRow
+            <OpenCodeKeyCard
               key={`${subject.source}-${subject.account}`}
               subject={subject}
-              tightestKey={tightestKey}
+              isTightest={hasMultiple && subject.account === tightestAccount && tightestValue <= 35}
             />
           ))
         )}
-        <p className="text-[11px] text-muted-foreground">
-          Each row shows its limiting window; expand for every reading and status. Percentages are
-          never pooled across keys or windows.
-        </p>
       </CardContent>
     </Card>
   );
@@ -477,10 +824,10 @@ export function QuotaOverview({ quota }: { quota: QuotaResponse }) {
   const opencode = subjects.filter((subject) => subject.source === "opencode");
 
   return (
-    <div className="space-y-3">
-      <div className="grid items-start gap-3 lg:grid-cols-2">
-        <PlatformCard source="codex" subjects={codex} />
-        <PlatformCard source="agy" subjects={agy} />
+    <div className="space-y-3.5">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ChatGPTSubsCard subjects={codex} />
+        <GoogleAISubsCard subjects={agy} />
       </div>
       <OpenCodeOverview subjects={opencode} />
     </div>

@@ -1,8 +1,12 @@
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=JetBrains+Mono:wght@400;500&family=Quicksand:wght@500;600;700&display=swap");
 @import "tailwindcss";
 
 @theme inline {
   --font-sans:
-    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    "Quicksand", "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", ui-rounded, system-ui,
+    -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Cinzel", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -33,29 +37,51 @@
 }
 
 :root {
-  --radius: 0.75rem;
+  color-scheme: dark;
+  --radius: 1rem;
 
-  --background: oklch(0.985 0.002 247.839);
-  --foreground: oklch(0.21 0.006 285.885);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.006 285.885);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.006 285.885);
-  --primary: oklch(0.45 0.09 250);
-  --primary-foreground: oklch(0.985 0.002 247.839);
-  --secondary: oklch(0.967 0.003 264.542);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.003 264.542);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.003 264.542);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0.002 247.839);
-  --border: oklch(0.922 0.004 286.32);
-  --input: oklch(0.922 0.004 286.32);
-  --ring: oklch(0.705 0.015 286.067);
-  --chart-1: oklch(0.55 0.14 250);
-  --chart-2: oklch(0.6 0.118 184.704);
+  --background: #0f0b22;
+  --foreground: #fbf6ff;
+  --card: #1a1336;
+  --card-foreground: #fbf6ff;
+  --popover: #1e1640;
+  --popover-foreground: #fbf6ff;
+  --primary: #f472b6;
+  --primary-foreground: #190a24;
+  --secondary: #281e52;
+  --secondary-foreground: #f5ebff;
+  --muted: #221946;
+  --muted-foreground: #bfaee2;
+  --accent: #322362;
+  --accent-foreground: #fef08a;
+  --destructive: #fb7185;
+  --destructive-foreground: #190a24;
+  --border: rgba(245, 208, 138, 0.3);
+  --input: rgba(245, 208, 138, 0.36);
+  --ring: #f472b6;
+  --chart-1: #f472b6;
+  --chart-2: #fcd34d;
+}
+
+@keyframes twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+@keyframes slow-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @layer base {
@@ -65,5 +91,74 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    background-image:
+      radial-gradient(ellipse at 15% 5%, rgba(244, 114, 182, 0.28), transparent 42%),
+      radial-gradient(ellipse at 85% 10%, rgba(139, 92, 246, 0.34), transparent 44%),
+      radial-gradient(ellipse at 50% 95%, rgba(56, 189, 248, 0.16), transparent 45%),
+      radial-gradient(rgba(254, 240, 138, 0.6) 1.2px, transparent 1.2px),
+      radial-gradient(rgba(244, 114, 182, 0.45) 1px, transparent 1px),
+      radial-gradient(rgba(196, 181, 253, 0.4) 1px, transparent 1px);
+    background-size:
+      100% 100%,
+      100% 100%,
+      100% 100%,
+      54px 54px,
+      82px 82px,
+      110px 110px;
+    background-position:
+      0 0,
+      0 0,
+      0 0,
+      0 0,
+      24px 19px,
+      41px 53px;
+    background-attachment: fixed;
+  }
+}
+
+.grimoire-card {
+  position: relative;
+  background: linear-gradient(155deg, rgba(38, 27, 76, 0.94), rgba(20, 15, 45, 0.96));
+  box-shadow:
+    inset 0 0 0 1px rgba(254, 240, 138, 0.14),
+    inset 0 1px 18px rgba(244, 114, 182, 0.08),
+    0 16px 38px -16px rgba(168, 85, 247, 0.5);
+}
+
+.grimoire-card::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 5px;
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid rgba(245, 208, 138, 0.14);
+}
+
+.grimoire-header {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(
+    130deg,
+    rgba(50, 32, 96, 0.97) 0%,
+    rgba(28, 19, 62, 0.97) 52%,
+    rgba(68, 27, 84, 0.95) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(254, 240, 138, 0.3),
+    0 18px 42px -14px rgba(244, 114, 182, 0.48);
+}
+
+.grimoire-twinkle {
+  animation: twinkle 3.6s ease-in-out infinite;
+}
+
+.grimoire-spin {
+  animation: slow-spin 42s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grimoire-twinkle,
+  .grimoire-spin {
+    animation: none;
   }
 }

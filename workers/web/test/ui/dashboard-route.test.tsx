@@ -73,7 +73,9 @@ describe("shipped dashboard route", () => {
     await waitFor(() => {
       expect(overviewCalls).toBeGreaterThan(1);
     });
-    expect(await screen.findByText("Quota overview", {}, { timeout: 3000 })).toBeTruthy();
+    expect(
+      (await screen.findAllByText("OpenCode Go", {}, { timeout: 3000 })).length,
+    ).toBeGreaterThan(0);
     expect(overviewCalls).toBeGreaterThan(1);
     expect(screen.queryByText("Dashboard data could not be loaded.")).toBeNull();
   });
@@ -154,9 +156,11 @@ describe("shipped dashboard route", () => {
     const { router, queryClient } = createRouterFor(dataSource, "overview");
     rendered(router, queryClient);
 
-    expect(await screen.findByText("Quota overview", {}, { timeout: 3000 })).toBeTruthy();
+    expect(
+      (await screen.findAllByText("OpenCode Go", {}, { timeout: 3000 })).length,
+    ).toBeGreaterThan(0);
     expect((await screen.findAllByText("OpenRouter")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("Balance history")).toBeTruthy();
+    expect(await screen.findByText("Balance history (30d)")).toBeTruthy();
 
     await queryClient.refetchQueries({ queryKey: ["overview"] }).catch(() => undefined);
     await queryClient.refetchQueries({ queryKey: ["balance-history"] }).catch(() => undefined);
@@ -165,7 +169,7 @@ describe("shipped dashboard route", () => {
     expect(
       await screen.findByText("Balance history refresh failed. Showing cached history."),
     ).toBeTruthy();
-    expect(screen.getByText("Quota overview")).toBeTruthy();
+    expect(screen.getAllByText("OpenCode Go").length).toBeGreaterThan(0);
     expect(screen.getAllByText("OpenRouter").length).toBeGreaterThan(0);
   });
 
@@ -183,9 +187,9 @@ describe("shipped dashboard route", () => {
     const { router, queryClient } = createRouterFor(dataSource, "overview");
     rendered(router, queryClient);
 
-    expect(await screen.findByText(/No balance snapshots yet/u)).toBeTruthy();
+    expect(await screen.findByText("Not configured")).toBeTruthy();
     await waitFor(() => {
-      expect(screen.queryByText("Balance history")).toBeNull();
+      expect(screen.queryByText("Balance history (30d)")).toBeNull();
     });
   });
 });

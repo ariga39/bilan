@@ -560,7 +560,9 @@ describe("B3/B4 shipper to dashboard E2E", () => {
 
     const pageResponse = await httpCall(`${webUrl}/?view=overview&tz=UTC&month=${usageMonth}`);
     expect(pageResponse.status, pageResponse.body).toBe(200);
-    expect(pageResponse.body).toContain("Quota overview");
+    expect(pageResponse.body).toContain("ChatGPT Subs");
+    expect(pageResponse.body).toContain("Google AI Subs");
+    expect(pageResponse.body).toContain("OpenCode Go");
     expect(pageResponse.body).toContain("/assets/");
     expect(pageResponse.body).not.toContain("Something went wrong");
     expect(pageResponse.body).toContain("fp_a");
@@ -581,7 +583,7 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(usagePageResponse.status, usagePageResponse.body).toBe(200);
     expect(usagePageResponse.body).toContain("Token usage");
     expect(usagePageResponse.body).toContain("Requests");
-    expect(usagePageResponse.body).toContain("Daily trend");
+    expect(usagePageResponse.body).toContain("Daily requests");
     expect(usagePageResponse.body).toContain(usageDay);
     expect(usagePageResponse.body).toContain("machine-a");
     expect(usagePageResponse.body).toContain("laptop-key");
@@ -626,15 +628,13 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     expect(usageHtml).toContain("Token usage");
     expect(usageHtml).toContain("Monthly detail for Codex · debitmetre-audit-v1 · request");
     expect(usageHtml).toContain("Monthly detail for OpenCode Go · orihsus-audit-v1 · request");
-    expect(usageHtml).toContain("Daily trend");
-    expect(usageHtml).toContain("Exact daily values");
+    expect(usageHtml).toContain("Daily requests");
+    expect(usageHtml).toContain("Daily values (");
     expect(usageHtml).toContain("machine-a");
     expect(usageHtml).toContain("laptop-key");
     expect(usageHtml).toContain(">Identity<");
     expect(usageHtml).toContain(">Machine<");
-    expect(usageHtml.indexOf("Requests")).toBeLessThan(
-      usageHtml.indexOf("Monthly breakdown by machine"),
-    );
+    expect(usageHtml.indexOf("Requests")).toBeLessThan(usageHtml.indexOf("Breakdown"));
   });
 
   it("renders visible and >=7d hidden OpenCode keys from the shipped SSR overview", async () => {

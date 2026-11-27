@@ -8,11 +8,9 @@ import {
   Activity,
   AlertTriangle,
   CircleDollarSign,
-  Gauge,
   History,
-  LockKeyhole,
   RefreshCw,
-  Wallet,
+  Sparkles,
 } from "lucide-react";
 
 import { BalanceCard } from "@/components/balance-card";
@@ -28,24 +26,23 @@ import { cn } from "@/lib/utils";
 import type { DashboardSearch } from "../search";
 import { dashboardHref } from "../search";
 
-function SectionHeading({
-  icon: Icon,
-  title,
-  description,
-}: {
-  icon: typeof Activity;
-  title: string;
-  description: string;
-}) {
+function SectionLabel({ icon: Icon, title }: { icon: typeof Activity; title: string }) {
   return (
-    <div className="mb-2 flex items-start gap-2">
-      <div className="mt-0.5 flex size-6 items-center justify-center rounded-md border bg-card text-muted-foreground">
+    <div className="mb-2 flex items-center gap-2">
+      <h2
+        style={{ fontFamily: "var(--font-display)" }}
+        className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#f5d08a]"
+      >
         <Icon className="size-3.5" aria-hidden="true" />
-      </div>
-      <div>
-        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-        <p className="text-[11px] leading-snug text-muted-foreground">{description}</p>
-      </div>
+        {title}
+      </h2>
+      <span
+        aria-hidden="true"
+        className="h-px flex-1 bg-gradient-to-r from-[#f5d08a]/35 via-[#f472b6]/25 to-transparent"
+      />
+      <span aria-hidden="true" className="text-[10px] text-[#f5d08a]/65">
+        ☽ ✦
+      </span>
     </div>
   );
 }
@@ -64,21 +61,25 @@ function ViewLink({
   onNavigate: (search: DashboardSearch) => void;
 }) {
   const next = { ...search, view: target };
+  const active = current === target;
   return (
     <a
       href={dashboardHref(next)}
-      aria-current={current === target ? "page" : undefined}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "rounded-md px-2.5 py-1.5 text-sm transition-colors",
-        current === target
-          ? "bg-primary text-primary-foreground"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        "flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all",
+        active
+          ? "bg-gradient-to-r from-[#f472b6] to-[#a855f7] text-white shadow-[0_0_16px_rgba(244,114,182,0.5)]"
+          : "border border-[#f5d08a]/20 bg-[#120d28]/70 text-muted-foreground hover:border-[#f5d08a]/45 hover:text-foreground",
       )}
       onClick={(event) => {
         event.preventDefault();
         onNavigate(next);
       }}
     >
+      <span aria-hidden="true" className="text-[10px]">
+        {active ? "✦" : "✧"}
+      </span>
       {label}
     </a>
   );
@@ -102,12 +103,8 @@ function HistorySection({
     (histories[provider]?.series ?? []).map((item) => ({ provider, series: item })),
   );
   return (
-    <section>
-      <SectionHeading
-        icon={History}
-        title="Balance history"
-        description="Last 30 days. Each currency gets its own series and axis; values are never combined across currencies."
-      />
+    <section className="min-w-0">
+      <SectionLabel icon={History} title="Balance history (30d)" />
       {error && series.length > 0 ? (
         <p
           role="alert"
@@ -117,7 +114,7 @@ function HistorySection({
         </p>
       ) : null}
       {series.length > 0 ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2">
           {series.map(({ provider, series: item }) => (
             <BalanceHistoryChart
               key={`${provider}-${item.account}-${item.currency}`}
@@ -127,17 +124,18 @@ function HistorySection({
           ))}
         </div>
       ) : loading ? (
-        <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
           Loading 30-day balance history…
         </p>
       ) : (
-        <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
           {error ?? "No balance history yet."}
         </p>
       )}
     </section>
   );
 }
+
 export function DashboardLoading() {
   return (
     <div className="flex min-h-screen items-center justify-center p-6 text-sm text-muted-foreground">
@@ -178,152 +176,141 @@ export function Dashboard({
     daily && daily.timezone === search.tz && daily.month === search.month ? daily : null;
 
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-start gap-2.5">
-            <div className="flex size-10 items-center justify-center rounded-xl border bg-card shadow-sm">
-              <Wallet className="size-5" aria-hidden="true" />
+    <div className="min-h-screen overflow-x-clip">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-3 py-4 sm:px-6 lg:px-8">
+        <header className="grimoire-header rounded-2xl border border-[#f5d08a]/35 px-4 py-3 backdrop-blur-md">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                <h1
+                  style={{ fontFamily: "var(--font-display)" }}
+                  className="bg-gradient-to-r from-[#fef08a] via-[#f9a8d4] to-[#c4b5fd] bg-clip-text text-xl font-bold tracking-[0.14em] text-transparent sm:text-2xl"
+                >
+                  bilan
+                </h1>
+                <Sparkles className="grimoire-twinkle size-4 text-[#fcd34d]" aria-hidden="true" />
+              </div>
+              <nav aria-label="Dashboard views" className="flex items-center gap-1.5">
+                <ViewLink
+                  current={search.view}
+                  target="overview"
+                  label="Overview"
+                  search={search}
+                  onNavigate={onNavigate}
+                />
+                <ViewLink
+                  current={search.view}
+                  target="usage"
+                  label="Usage"
+                  search={search}
+                  onNavigate={onNavigate}
+                />
+              </nav>
             </div>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">bilan</h1>
-              <p className="text-xs text-muted-foreground">
-                Quotas, balances, and collected usage across Codex, AGY, and OpenCode Go.
-              </p>
+
+            <div className="flex items-center gap-2.5">
+              <span className="text-[11px] text-[#d8c7f7]">
+                ☽ {formatDateTime(overview.generated_at)}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-full border-[#f5d08a]/45 bg-gradient-to-r from-[#2e1e5c] to-[#43205c] text-[#fef3c7] shadow-[0_0_16px_-4px_rgba(244,114,182,0.45)] hover:from-[#3b2675] hover:to-[#542874]"
+                onClick={onRefresh}
+                disabled={refreshing}
+              >
+                <RefreshCw
+                  className={cn("size-3.5 text-[#f9a8d4]", refreshing && "animate-spin")}
+                />
+                Refresh
+              </Button>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
-            <RefreshCw className={cn(refreshing && "animate-spin")} />
-            Refresh
-          </Button>
         </header>
 
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <nav
-            aria-label="Dashboard views"
-            className="flex w-fit items-center gap-1 rounded-lg border bg-card p-0.5"
-          >
-            <ViewLink
-              current={search.view}
-              target="overview"
-              label="Overview"
-              search={search}
-              onNavigate={onNavigate}
-            />
-            <ViewLink
-              current={search.view}
-              target="usage"
-              label="Usage"
-              search={search}
-              onNavigate={onNavigate}
-            />
-          </nav>
-          <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2 py-0.5">
-            <LockKeyhole className="size-3.5" />
-            Read-only · protected by Cloudflare Access
-          </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2 py-0.5">
-            <History className="size-3.5" />
-            Generated {formatDateTime(overview.generated_at)}
-          </span>
-        </div>
+        <main className="flex min-w-0 flex-col gap-4">
+          {refreshError ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+            >
+              {refreshError}
+            </div>
+          ) : null}
 
-        {refreshError ? (
-          <div
-            role="alert"
-            className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-          >
-            {refreshError}
-          </div>
-        ) : null}
+          {search.view === "overview" ? (
+            <>
+              <section className="min-w-0">
+                <QuotaOverview quota={overview.quotas} />
+              </section>
 
-        {search.view === "overview" ? (
-          <>
-            <section>
-              <SectionHeading
-                icon={Gauge}
-                title="Quota overview"
-                description="Latest valid reading per account and window. Missing windows disappear instead of carrying forward; every reading keeps its own status."
-              />
-              <QuotaOverview quota={overview.quotas} />
-            </section>
+              <UsageEntry overview={overview} navigation={search} onNavigate={onNavigate} />
 
-            <UsageEntry overview={overview} navigation={search} onNavigate={onNavigate} />
-
-            <section>
-              <SectionHeading
-                icon={CircleDollarSign}
-                title="Balances"
-                description="Current remaining balance per provider and currency. Changes compare balance snapshots, including top-ups and usage."
-              />
               {overview.balances.length > 0 ? (
-                <div className="grid gap-4 lg:grid-cols-2">
-                  {overview.balances.map((balance) => (
-                    <BalanceCard
-                      key={`${balance.provider}-${balance.account}-${balance.currency}`}
-                      balance={balance}
-                    />
-                  ))}
-                </div>
+                <section className="min-w-0">
+                  <SectionLabel icon={CircleDollarSign} title="Balances" />
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    {overview.balances.map((balance) => (
+                      <BalanceCard
+                        key={`${balance.provider}-${balance.account}-${balance.currency}`}
+                        balance={balance}
+                      />
+                    ))}
+                  </div>
+                </section>
               ) : (
-                <p className="rounded-lg border border-dashed px-3 py-3 text-sm text-muted-foreground">
-                  No balance snapshots yet. Nothing is shown as zero until a provider reports it.
-                </p>
+                <div className="flex items-center justify-between rounded-xl border border-dashed border-[#f5d08a]/25 bg-[#161130]/60 px-3.5 py-2 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <CircleDollarSign className="size-3.5 text-[#f5d08a]/70" aria-hidden="true" />
+                    Balances
+                  </span>
+                  <span>Not configured</span>
+                </div>
               )}
-            </section>
 
-            <section>
-              <SectionHeading
-                icon={Activity}
-                title="Collection health"
-                description="Healthy collectors collapse to one line; heartbeat, last attempt, and data freshness stay distinct."
+              <HistorySection
+                providers={historyProviders}
+                histories={histories}
+                loading={historyLoading}
+                error={historyError}
               />
-              <HealthSummary overview={overview} />
-            </section>
 
-            <HistorySection
-              providers={historyProviders}
-              histories={histories}
-              loading={historyLoading}
-              error={historyError}
+              <section className="min-w-0">
+                <SectionLabel icon={Activity} title="Collectors" />
+                <HealthSummary overview={overview} />
+              </section>
+            </>
+          ) : (
+            <UsageSection
+              usage={
+                overview.usage.timezone === search.tz && overview.usage.month === search.month
+                  ? overview.usage
+                  : null
+              }
+              daily={selectedDaily}
+              timezone={search.tz}
+              month={search.month}
+              generatedAt={overview.generated_at}
+              dailyLoading={dailyLoading}
+              dailyError={dailyError}
+              onTimezoneChange={(tz) => {
+                onNavigate({ ...search, tz });
+              }}
+              onMonthChange={(month) => {
+                onNavigate({ ...search, month });
+              }}
             />
-          </>
-        ) : (
-          <UsageSection
-            usage={
-              overview.usage.timezone === search.tz && overview.usage.month === search.month
-                ? overview.usage
-                : null
-            }
-            daily={selectedDaily}
-            timezone={search.tz}
-            month={search.month}
-            generatedAt={overview.generated_at}
-            dailyLoading={dailyLoading}
-            dailyError={dailyError}
-            onTimezoneChange={(tz) => {
-              onNavigate({ ...search, tz });
-            }}
-            onMonthChange={(month) => {
-              onNavigate({ ...search, month });
-            }}
-          />
-        )}
+          )}
 
-        {overview.producers.length === 0 && overview.balances.length === 0 ? (
-          <Card className="border-dashed py-4">
-            <CardContent className="flex items-center gap-2 px-4 text-sm text-muted-foreground">
-              <AlertTriangle className="size-4" />
-              No collector data has arrived yet.
-            </CardContent>
-          </Card>
-        ) : null}
-
-        <footer className="border-t pt-4 text-xs text-muted-foreground">
-          Read-only surface. Balance collection runs on the write Worker schedule; Codex usage is
-          pushed by debitmetre; OpenCode Go usage and quotas are pushed by orihsus. Overview data
-          refreshes every 60 seconds.
-        </footer>
+          {overview.producers.length === 0 && overview.balances.length === 0 ? (
+            <Card className="border-dashed py-4">
+              <CardContent className="flex items-center gap-2 px-4 text-sm text-muted-foreground">
+                <AlertTriangle className="size-4" />
+                No collector data has arrived yet.
+              </CardContent>
+            </Card>
+          ) : null}
+        </main>
       </div>
     </div>
   );
