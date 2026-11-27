@@ -1,3 +1,4 @@
+import { filterVisibleQuotaSubjects } from "@bilan/shared";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -5,9 +6,9 @@ import {
   buildEmptyOverview,
   buildPopulatedDaily,
   buildPopulatedOverview,
+  FIXED_NOW,
   FIXTURE_MONTH,
 } from "@/stories/fixtures";
-import { resolveStorybookScenario, STORYBOOK_SCENARIOS } from "@/stories/fetch-mock";
 
 describe("Storybook fixtures", () => {
   it("returns usage rows only for the fixture month while keeping live balances and quotas", () => {
@@ -28,6 +29,20 @@ describe("Storybook fixtures", () => {
 
     expect(buildPopulatedDaily("UTC", FIXTURE_MONTH).rows.length).toBeGreaterThan(0);
     expect(buildPopulatedDaily("UTC", "2026-10").rows).toEqual([]);
+  });
+
+  it("keeps the nine-key fixture to the three recently reporting OpenCode keys", () => {
+    const subjects = buildPopulatedOverview("UTC", FIXTURE_MONTH).quotas.subjects;
+    const visible = filterVisibleQuotaSubjects(subjects, new Date(FIXED_NOW));
+    expect(subjects.filter((subject) => subject.source === "opencode")).toHaveLength(9);
+    expect(
+      visible.filter((subject) => subject.source === "opencode").map((subject) => subject.account),
+    ).toEqual(["key-fp-1", "key-fp-2", "key-fp-3"]);
+    expect(visible.find((subject) => subject.account === "key-fp-3")?.latest_attempt?.status).toBe(
+      "error",
+    );
+    expect(visible.some((subject) => subject.account === "key-fp-4")).toBe(false);
+    expect(visible.some((subject) => subject.account === "key-fp-7")).toBe(false);
   });
 
   it.each([
@@ -55,21 +70,4 @@ describe("Storybook fixtures", () => {
       }
     },
   );
-});
-
-describe("Storybook scenario vocabulary", () => {
-  it("accepts the shared scenarios and defaults only when the parameter is omitted", () => {
-    expect(resolveStorybookScenario(undefined)).toBe("populated");
-    for (const scenario of STORYBOOK_SCENARIOS) {
-      expect(resolveStorybookScenario(scenario)).toBe(scenario);
-    }
-  });
-
-  it("rejects unknown scenario values instead of silently showing populated", () => {
-    expect(() => resolveStorybookScenario("november")).toThrow(
-      /Unknown Bilan Storybook scenario "november"/u,
-    );
-    expect(() => resolveStorybookScenario(42)).toThrow(/Unknown Bilan Storybook scenario 42/u);
-    expect(() => resolveStorybookScenario(null)).toThrow(/Unknown Bilan Storybook scenario null/u);
-  });
 });

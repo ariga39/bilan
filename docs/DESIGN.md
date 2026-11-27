@@ -21,7 +21,7 @@ Upstream tools remain the authoritative collectors (sources of truth) for their 
 
 1. **Read/Write Split across two Workers sharing one D1 database**:
    - **Ingest Worker (`bilan-ingest`)**: owns all writes — unified Push API (`POST /api/v1/ingest`) + Cron Pull adapters (OpenRouter, DeepSeek).
-   - **Web/Read Worker (`bilan-web`)**: owns all reads — static dashboard UI (Workers Assets) + read-only query API (`GET /api/v1/*`), protected end-to-end by **Cloudflare Access (Zero Trust)** with `workers_dev = false` and `preview_urls = false`.
+   - **Web/Read Worker (`bilan-web`)**: serves the TanStack Start SSR Overview/Usage application with file routes, URL search state and TanStack Query prefetch/hydration, plus the read-only query API (`GET /api/v1/*`) through a Hono server entry. Protected end-to-end by **Cloudflare Access (Zero Trust)** with `workers_dev = false` and `preview_urls = false`; D1 is server-only.
 2. **Normalized D1 storage** for 3 orthogonal telemetry kinds (`usage_buckets`, `quota_observations` + `quota_windows`, `balance_snapshots`) plus producer liveness (`producers`).
 3. **In-repo shipper scripts** (`shippers/`) for `debitmetre` (Codex token usage), `orihsus` (OpenCode Go token usage + quota), and `telemetre` (AGY & Codex quota observations) that run independently on any host.
 4. **Minimal, data-first dashboard** showing OpenRouter/DeepSeek balances, AGY / Codex / OpenCode Go quota windows + reset times, Codex & OpenCode Go periodic token usage summaries, and explicit shipper liveness vs. data freshness.
@@ -423,10 +423,12 @@ Architectural stack decisions are fixed here so implementation stays consistent 
 
 - **Monorepo & Package Manager**: `pnpm` workspaces + TypeScript (`strict`).
 - **Workers Runtime & Routing**: Cloudflare Workers + D1 (`wrangler`), routed with **Hono**.
-- **Frontend (`bilan-web`, served via Workers Assets)**:
-  - **React + TypeScript + Vite**
+- **Frontend (`bilan-web`, TanStack Start SSR on Workers)**:
+  - **React + TypeScript + Vite** + **TanStack Start** (file routes and URL search)
+  - **TanStack Router** for the shared Overview/Usage navigation contract and **TanStack Query** for loader-prefetched, SSR-hydrated reads
   - **Tailwind CSS** + **shadcn/ui** (Radix UI primitives) + **lucide-react** icons
   - **Recharts** for balance history and daily usage trend charts
+- **Cloudflare Build/Runtime**: **`@cloudflare/vite-plugin`** + `wrangler`; a custom Worker entry routes public `/api/*` through Hono while TanStack Start serves SSR. D1 remains server-only.
 - **Formatting, Linting & Testing (JS/TS)**:
   - **oxfmt** (formatter)
   - **oxlint** with Cloudflare's official preset (**`@cloudflare/oxlint-config`**)
@@ -448,7 +450,7 @@ bilan/
 │   └── shared/                 # Shared TypeScript types, schema validation, SQL helpers
 ├── workers/
 │   ├── ingest/                 # bilan-ingest (Hono POST /api/v1/ingest + Cron pullers)
-│   └── web/                    # bilan-web (Hono GET /api/v1/* + Vite/React/shadcn SPA built for Workers Assets)
+│   └── web/                    # bilan-web (TanStack Start SSR + Hono GET /api/v1/*)
 └── shippers/                   # Standalone Python 3 stdlib shippers for source hosts
     ├── common.py               # Shared HTTPS push client, lockfile, batch_seq, retry
     ├── debitmetre.py
@@ -474,11 +476,13 @@ Keep v1 focused strictly on **seeing real, accurate data clearly** (zero manual-
   - Balance time-series for sparklines/tables.
 
 ### Minimal v1 Page Sections
-1. **Health Strip**: Producer liveness (`last_heartbeat_at` / errors) clearly distinguished from each data source's own `sampled_at` / `bucket_start` freshness.
-2. **Balances & Quotas**:
-   - OpenRouter & DeepSeek current balances (+ Net Balance Change; + Reported Usage Delta for OpenRouter).
-   - **AGY**, **Codex**, and **OpenCode Go** quota windows from the latest valid observation + reset countdowns + warning badge if the latest attempt failed, returned empty, or had `time_anomaly`.
-3. **Token Usage Summary (Month / Timezone switchable)**:
+0. **TanStack Start Overview / Usage navigation**: file routes with validated URL search (`view`, `tz`, `month`), TanStack Router back/forward, and TanStack Query route-loader prefetch with SSR dehydration/hydration. No custom bootstrap, history layer or manual query cache. The first document is server-rendered with real data; 30-day history and charts load secondarily.
+1. **Overview quotas first**: compact Codex, AGY and recently observed OpenCode Go summaries with the limiting reading, reset time and sample age visible; expandable details retain every window and status. OpenCode Go keys whose latest trustworthy observation is seven days old or older are omitted from the dashboard display (the read API still returns them), while a newer failed/empty attempt restores visibility.
+2. **Health Strip**: Producer liveness (`last_heartbeat_at` / errors) clearly distinguished from each data source's own `sampled_at` / `bucket_start` freshness. Healthy collectors collapse to one line.
+3. **Balances & history**:
+   - OpenRouter & DeepSeek current balances (+ Net Balance Change; + Reported Usage Delta for OpenRouter). Empty balances collapse to one line and do not request history.
+   - 30-day balance history loads after the first useful content; each currency keeps its own series and axis.
+4. **Token Usage Summary (Month / Timezone switchable)**: the Overview links to the dedicated Usage view.
    - **Codex** (`debitmetre`, by machine/model/effort) & **OpenCode Go** (`orihsus`, by identity/model) breakdown tables with separate token columns, explicit partial/coverage-gap badges, and a daily view.
    - AGY token usage is not shown (and never displayed as `0`).
 

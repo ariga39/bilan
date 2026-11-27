@@ -7,6 +7,7 @@ export default defineConfig({
   ignorePatterns: [
     ...cloudflare.ignorePatterns,
     "workers/web/dist/**",
+    "workers/web/src/routeTree.gen.ts",
     ".wrangler/**",
     "**/worker-configuration.d.ts",
   ],

@@ -8,3 +8,4 @@ coverage/
 storybook-static/
 *.log
 .DS_Store
+worker-configuration.d.ts

@@ -477,8 +477,7 @@ beforeAll(async () => {
     ingestBase = (await ingest.url).origin;
 
     web = await unstable_startWorker({
-      entrypoint: path.join(repoRoot, "workers/web/src/worker/index.ts"),
-      config: path.join(repoRoot, "workers/web/wrangler.toml"),
+      config: path.join(repoRoot, "workers/web/dist/server/wrangler.json"),
       dev: {
         persist: stateDir,
         logLevel: "none",

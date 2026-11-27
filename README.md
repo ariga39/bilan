@@ -9,10 +9,10 @@ OpenRouter and DeepSeek balance path.
 - Write Worker (`bilan-ingest`): scoped, replay-safe `POST /api/v1/ingest` on
   its own HTTPS hostname, plus scheduled pull adapters, D1 writes, and
   per-provider failure isolation. Zero read or UI routes.
-- Read Worker (`bilan-web`): read-only JSON API plus the React dashboard,
-  served exclusively on a separate Access-protected HTTPS hostname. No write
-  routes and no upstream/ingest credentials. `workers_dev` and preview URLs are
-  disabled.
+- Read Worker (`bilan-web`): TanStack Start SSR Overview/Usage application
+  (file routes, URL search, TanStack Query hydration) plus the read-only JSON
+  API, served exclusively on a separate Access-protected HTTPS hostname. No
+  write routes and no upstream/ingest credentials. `workers_dev` and preview URLs are disabled.
 - Shared D1 database: `producers`, `balance_snapshots`, `usage_buckets`, `quota_observations`, and `quota_windows`.
 - Dashboard: producer heartbeat health, balances, 7d/30d net balance change,
   OpenRouter reported usage delta, Codex machine and OpenCode Go identity token
@@ -32,7 +32,7 @@ AGY token usage, pricing, and alerting remain out of scope.
 migrations/                 D1 schema
 packages/shared/            Shared API types, schemas, and timezone helpers
 workers/ingest/             Scoped Push endpoint + scheduled balance pulls
-workers/web/                Read API + React/Tailwind/shadcn/Recharts SPA
+workers/web/                TanStack Start SSR app + read API
 shippers/                   Standalone Python 3 stdlib host shippers
 acceptance/                 B5 multi-host acceptance entry points
 ops/                        Synthetic producer, systemd, and cron templates
@@ -73,9 +73,10 @@ pnpm storybook        # http://localhost:6006
 pnpm build-storybook  # static build under workers/web/storybook-static/
 ```
 
-The preview uses the existing React/Vite client, Tailwind styles, and UI
-components. Only the read-API `fetch` boundary is mocked, with deterministic
-synthetic fixtures and a fixed clock. Desktop (1440 x 900) and mobile
+The preview uses the existing TanStack Router/Query boundary with a synthetic
+data source: route search, loaders, refresh invalidation and month/timezone
+controls keep working without Cloudflare or D1. Fixtures are deterministic and
+use a fixed clock. Desktop (1440 x 900) and mobile
 (390 x 844) viewport presets are available in the toolbar, and the populated,
 loading, empty, and failure states are separate stories. Fixture locations and
 instructions for adding a scenario are in [docs/STORYBOOK.md](docs/STORYBOOK.md).
@@ -151,7 +152,7 @@ Run the Workers in separate terminals:
 
 ```sh
 pnpm dev:ingest   # http://127.0.0.1:8787, test scheduled trigger enabled
-pnpm dev:web      # http://127.0.0.1:8788, builds the SPA first
+pnpm dev:web      # http://127.0.0.1:8788, TanStack Start dev server
 ```
 
 Trigger the real scheduled balance pull:
@@ -348,7 +349,7 @@ contains the latest valid windows per key fingerprint; a window missing from the
 latest valid sample disappears immediately. `GET /api/v1/quotas` returns the
 same quota block for focused consumers.
 
-Run the focused E2E after building the SPA. It starts local Workers against a
+Run the focused E2E after the TanStack Start build. It starts local Workers against a
 temporary D1 database, invokes the real `orihsus.py` CLI, pushes a synthetic
 Codex bucket, reads the web overview, and renders the usage/quota UI:
 
@@ -460,7 +461,7 @@ the security/privacy checklist:
 - [`ops/producers.example.json`](ops/producers.example.json)
 - [`ops/systemd/`](ops/systemd/) and [`ops/cron/bilan-shippers.example`](ops/cron/bilan-shippers.example)
 
-Run the five-platform acceptance after building the SPA:
+Run the five-platform acceptance after the TanStack Start build:
 
 ```sh
 pnpm build

@@ -30,8 +30,8 @@ daily row, or zero-valued placeholder.
 
 `bilan-ingest` owns every write: `POST /api/v1/ingest` plus the scheduled
 OpenRouter/DeepSeek pullers. `bilan-web` owns every read: the read-only JSON API
-and the dashboard served through Workers Assets. Both bind the **same** D1
-database, but they never share secrets.
+and the TanStack Start SSR dashboard through the Cloudflare Vite plugin. Both
+bind the **same** D1 database, but they never share secrets.
 
 Provisioning order:
 
@@ -43,7 +43,8 @@ Provisioning order:
 4. Put `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, and `INGEST_PRODUCERS_JSON`
    only on `bilan-ingest`.
 5. Do not add `[vars]`, upstream keys, ingest tokens, or write routes to
-   `bilan-web`. It must expose only the read API and static assets.
+   `bilan-web`. It must expose only the read API and the SSR application; D1
+   access stays in server functions and the Hono `/api` entry.
 
 The local equivalent for development and acceptance uses one persisted state
 directory for both Workers:

@@ -4,7 +4,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": ["./src/client/*"]
+    },
     "types": [
       "@cloudflare/workers-types/experimental",
       "@cloudflare/vitest-pool-workers/types",

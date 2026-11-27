@@ -393,8 +393,8 @@ beforeAll(async () => {
       logLevel: "none",
       experimental: { disableDevRegistry: true },
     });
-    web = await unstable_dev(path.join(repoRoot, "workers/web/src/worker/index.ts"), {
-      config: path.join(repoRoot, "workers/web/wrangler.toml"),
+    web = await unstable_dev(path.join(repoRoot, "workers/web/dist/server/index.js"), {
+      config: path.join(repoRoot, "workers/web/dist/server/wrangler.json"),
       persistTo: stateDir,
       logLevel: "none",
       experimental: { disableDevRegistry: true },
@@ -545,6 +545,12 @@ describe("B3/B4 shipper to dashboard E2E", () => {
       throw new Error("overview response did not match the shared schema");
     }
     const overview = parsedOverview.data;
+
+    const pageResponse = await httpCall(`${webUrl}/?view=overview&tz=UTC&month=${usageMonth}`);
+    expect(pageResponse.status, pageResponse.body).toBe(200);
+    expect(pageResponse.body).toContain("Quota overview");
+    expect(pageResponse.body).toContain("/assets/");
+    expect(pageResponse.body).not.toContain("Something went wrong");
 
     expect(overview.usage.rows).toEqual(
       expect.arrayContaining([

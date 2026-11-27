@@ -9,6 +9,12 @@ const config: StorybookConfig = {
   },
   core: {
     disableTelemetry: true,
+    builder: {
+      name: "@storybook/builder-vite",
+      options: {
+        viteConfigPath: ".storybook/vite.config.ts",
+      },
+    },
   },
 };
 

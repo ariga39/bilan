@@ -1,6 +1,7 @@
 import type { BucketAttribution } from "./time";
 
 export * from "./time";
+export * from "./quota-visibility";
 
 export const BALANCE_PROVIDERS = ["openrouter", "deepseek"] as const;
 export type BalanceProvider = (typeof BALANCE_PROVIDERS)[number];

@@ -232,7 +232,7 @@ function windowView(
     label = null,
     status = "ok",
     ...values
-  }: Omit<QuotaWindow, "bucket_id" | "slot" | "label" | "status"> & {
+  }: Partial<Omit<QuotaWindow, "bucket_id" | "slot" | "label" | "status">> & {
     bucketId?: string;
     label?: string | null;
     status?: QuotaWindow["status"];
@@ -243,6 +243,11 @@ function windowView(
     slot,
     label,
     status,
+    used_percent: null,
+    remaining_percent: null,
+    resets_at: null,
+    reset_in_seconds: null,
+    window_duration_mins: null,
     ...values,
   };
 }
@@ -319,22 +324,22 @@ const QUOTA_SUBJECTS: Array<QuotaSubject> = [
     account: "key-fp-2",
     latest_valid: observation(
       "key-fp-2-valid",
-      "2026-11-27T10:05:00Z",
-      6900,
+      "2026-11-20T12:00:01Z",
+      604_799,
       [
         windowView("rolling", {
           bucketId: "key-fp-2",
           label: "secondary-key",
           used_percent: 95,
           remaining_percent: 5,
-          resets_at: "2026-11-27T11:00:00Z",
+          resets_at: "2026-11-20T13:00:00Z",
           reset_in_seconds: 0,
           window_duration_mins: 300,
         }),
       ],
       { observer_machine: "gateway-b", is_stale: true },
     ),
-    latest_attempt: attempt("key-fp-2-valid", "2026-11-27T10:05:00Z", 6900, {
+    latest_attempt: attempt("key-fp-2-valid", "2026-11-20T12:00:01Z", 604_799, {
       observer_machine: "gateway-b",
     }),
     anomalies: [],
@@ -342,11 +347,110 @@ const QUOTA_SUBJECTS: Array<QuotaSubject> = [
   {
     source: "opencode",
     account: "key-fp-3",
-    latest_valid: null,
+    latest_valid: observation(
+      "key-fp-3-valid",
+      "2026-11-17T11:00:00Z",
+      871_200,
+      [
+        windowView("rolling", {
+          bucketId: "key-fp-3",
+          label: "reappeared-key",
+          used_percent: 70,
+          remaining_percent: 30,
+          resets_at: "2026-11-27T11:30:00Z",
+          reset_in_seconds: 0,
+          window_duration_mins: 300,
+        }),
+      ],
+      { is_stale: true },
+    ),
     latest_attempt: attempt("key-fp-3-error", "2026-11-27T11:57:00Z", 180, {
       status: "error",
       error_summary: "upstream_error",
     }),
+    anomalies: [],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-4",
+    latest_valid: observation("key-fp-4-valid", "2026-11-20T12:00:00Z", 604_800, [
+      windowView("rolling", {
+        bucketId: "key-fp-4",
+        used_percent: 60,
+        remaining_percent: 40,
+        resets_at: "2026-11-20T13:00:00Z",
+        reset_in_seconds: 0,
+      }),
+    ]),
+    latest_attempt: attempt("key-fp-4-valid", "2026-11-20T12:00:00Z", 604_800),
+    anomalies: [],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-5",
+    latest_valid: observation("key-fp-5-valid", "2026-11-19T12:00:00Z", 691_200, [
+      windowView("rolling", {
+        bucketId: "key-fp-5",
+        used_percent: 20,
+        remaining_percent: 80,
+      }),
+    ]),
+    latest_attempt: attempt("key-fp-5-valid", "2026-11-19T12:00:00Z", 691_200),
+    anomalies: [],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-6",
+    latest_valid: null,
+    latest_attempt: attempt("key-fp-6-error", "2026-11-17T12:00:00Z", 864_000, {
+      status: "error",
+      error_summary: "http_error",
+    }),
+    anomalies: [],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-7",
+    latest_valid: observation("key-fp-7-valid", "2026-11-18T12:00:00Z", 777_600, [
+      windowView("rolling", {
+        bucketId: "key-fp-7",
+        used_percent: 50,
+        remaining_percent: 50,
+      }),
+    ]),
+    latest_attempt: attempt("key-fp-7-future", "2099-01-01T00:00:00Z", null, {
+      time_anomaly: "future_clock_skew",
+    }),
+    anomalies: [
+      attempt("key-fp-7-future", "2099-01-01T00:00:00Z", null, {
+        time_anomaly: "future_clock_skew",
+      }),
+    ],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-8",
+    latest_valid: observation("key-fp-8-valid", "2026-11-20T11:59:00Z", 604_860, [
+      windowView("rolling", {
+        bucketId: "key-fp-8",
+        used_percent: 10,
+        remaining_percent: 90,
+      }),
+    ]),
+    latest_attempt: attempt("key-fp-8-valid", "2026-11-20T11:59:00Z", 604_860),
+    anomalies: [],
+  },
+  {
+    source: "opencode",
+    account: "key-fp-9",
+    latest_valid: observation("key-fp-9-valid", "2026-10-28T12:00:00Z", 2_592_000, [
+      windowView("rolling", {
+        bucketId: "key-fp-9",
+        used_percent: 30,
+        remaining_percent: 70,
+      }),
+    ]),
+    latest_attempt: attempt("key-fp-9-valid", "2026-10-28T12:00:00Z", 2_592_000),
     anomalies: [],
   },
   {

@@ -14,7 +14,8 @@ Functional delivery comes first: process, documentation, review, and compliance 
 Do not substitute bare/vanilla HTML+JS or alternate stacks without explicit new authority:
 
 - **Monorepo & Workers**: `pnpm` workspaces, TypeScript (`strict`), Cloudflare Workers + D1 (`wrangler`), routed with **Hono**.
-- **Frontend (`bilan-web` via Workers Assets)**: **React + TypeScript + Vite + Tailwind CSS + shadcn/ui + lucide-react + Recharts**.
+- **Frontend (`bilan-web`)**: **React + TypeScript + Vite + TanStack Start (SSR, file routes and search) + TanStack Router + TanStack Query + Tailwind CSS + shadcn/ui + lucide-react + Recharts**.
+- **Cloudflare build/runtime**: **`@cloudflare/vite-plugin`** with **`wrangler`**, D1 bindings, and a custom Worker server entry that routes public `/api/*` requests through Hono while TanStack Start serves the SSR application. D1 remains server-only.
 - **Formatting, Linting & Testing (JS/TS)**:
   - **oxfmt** for formatting.
   - **oxlint** with Cloudflare's official preset (**`@cloudflare/oxlint-config`**).
