@@ -2148,6 +2148,146 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(len(self.ingest.snapshot_requests()), requests)
         self.assertEqual(self.received_buckets(), acknowledged)
 
+    def test_offline_double_rotation_preserves_acknowledged_active_generation(self) -> None:
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        self.assertEqual(len(self.read_state()["audit_active_generation"]), 1)
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+
+        # retention=1: rotate twice while the shipper is offline. The first
+        # rotation would have exposed A as .1, but the second expires it before
+        # any run observes the numbered file. Both retained files still hold
+        # hour 08, so its absolute snapshot must retain A plus the new records.
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ],
+        )
+
+        self.assert_ok(self.run_cli())
+
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
+
+    def test_legacy_eof_without_archives_recovers_active_generation_once(self) -> None:
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:15:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        legacy = self.read_state()
+        del legacy["audit_active_generation"]
+        del legacy["audit_active_generation_checked"]
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+        requests = len(self.ingest.snapshot_requests())
+
+        # The cursor is already at EOF with no numbered archive. Recover the
+        # acknowledged active generation locally without replaying its rows.
+        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
+        recovered = self.read_state()
+        self.assertTrue(recovered["audit_active_generation_checked"])
+        self.assertEqual(len(recovered["audit_active_generation"]), 1)
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
+
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (4, 15))
+
+    def test_noncanonical_active_prefix_still_recovers_generation_identity(self) -> None:
+        with open(self.audit_path, "wb") as handle:
+            handle.write(b"not-canonical\n")
+        self.assert_ok(self.run_cli(extra=["--no-heartbeat"]))
+        state = self.read_state()
+        self.assertFalse(state["audit_active_generation_checked"])
+        self.assertEqual(state["audit_active_generation"], {})
+
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+            append=True,
+        )
+        self.assert_ok(self.run_cli())
+        state = self.read_state()
+        self.assertTrue(state["audit_active_generation_checked"])
+        self.assertEqual(len(state["audit_active_generation"]), 1)
+
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:25:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ],
+        )
+        self.rotate_audit(
+            keep=1,
+            new_active=[
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 7))
+
     def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
         payload = self._encode(
             [

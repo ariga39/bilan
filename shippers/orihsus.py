@@ -81,16 +81,26 @@ records of each UTC hour into one absolute snapshot. Afterwards, ordinary ticks
 still read only the active tail; a rotation or compressor change reconstructs
 the retained generations once. The state keeps an aggregate per retained
 generation keyed by its immutable starting record (so rename, compression and
-create+HUP appends stay the same generation) and an exact retired contribution
-per hour/actor/model. When
-logrotate expires a generation, its contributions are moved to the retired map
-and combined with whatever retained or active rows remain, so a split hour never
-shrinks while new rows and groups in the same hour are still published. Retired
-entries are pruned to hours still visible upstream. Ordinary ticks add these
-stored contributions to a touched hour without re-reading history, so the state
-is bounded by retention and current hours rather than growing forever. A
+create+HUP appends stay the same generation), the corresponding aggregate for
+the acknowledged active generation, and an exact retired contribution per
+hour/actor/model. When logrotate expires a generation, its contributions are
+moved to the retired map and combined with whatever retained or active rows
+remain, so a split hour never shrinks while new rows and groups in the same hour
+are still published. This includes an active generation that expires before it
+is ever observed as a numbered archive; the checkpointed active aggregate is
+retired under the same stable identity. A destructive same-file truncate or
+replacement is not treated as expiry: it keeps the restart-and-warn path.
+Retired entries are pruned to hours still visible upstream. Ordinary ticks add
+these stored contributions to a touched hour without re-reading history, so the
+state is bounded by retention and current hours rather than growing forever. A
 truncated archive or a rotation observed mid-scan fails the run before an ACK;
 envelopes and cursors remain byte-identical across retries.
+
+Upgrade boundary: a state written before generation or active-aggregate tracking
+cannot restore contributions that had already expired from the rotations before
+the upgrade. The first archive-aware run accounts only for records then still on
+disk; later arrivals for those older hours are published without the expired
+contribution.
 """
 
 from __future__ import annotations
@@ -348,15 +358,6 @@ def aggregate_audit_records(
     return _rows_from_audit_groups(groups)
 
 
-def _iter_audit_records(
-    audit_path: str, start: int, extent: int
-) -> Iterable[dict[str, Any]]:
-    for _line_start, _line_end, raw in iter_log_lines(audit_path, start, extent):
-        record = _canonical_audit_record(raw)
-        if record is not None:
-            yield record
-
-
 def _aggregate_audit_window(
     audit_path: str,
     start: int,
@@ -493,6 +494,12 @@ def _merge_audit_groups(
             _merge_audit_group(current, accumulator)
 
 
+def _generation_key(raw: bytes) -> str:
+    """Stable generation identity: the digest of its starting record."""
+
+    return hashlib.sha256(raw.rstrip(b"\r\n")).hexdigest()
+
+
 def _scan_retained_audit(
     audit_path: str,
     archives: list[tuple[int, str, str, bool]],
@@ -503,6 +510,7 @@ def _scan_retained_audit(
     set[str],
     Optional[str],
     int,
+    Dict[str, list[dict[str, Any]]],
 ]:
     """Combine retained generations and the active log into absolute hours.
 
@@ -510,7 +518,8 @@ def _scan_retained_audit(
     including a late record that landed in the previous active generation before
     rotation. Each generation is also aggregated under a content digest so a
     later expiry can retire exactly the contributions that left retention.
-    Returns ``(rows, generations, current_hours, active_hour, active_offset)``.
+    Returns ``(rows, generations, current_hours, active_hour, active_offset,
+    active_generation)``.
     """
 
     combined: Dict[tuple[str, str, str], Dict[str, Any]] = {}
@@ -518,6 +527,8 @@ def _scan_retained_audit(
     active_hours: set[str] = set()
     first_offsets: Dict[str, int] = {}
     generation_groups: Dict[str, Dict[tuple[str, str, str], Dict[str, Any]]] = {}
+    active_generation_groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    active_start_key: Optional[str] = None
 
     for entry in archives:
         start_key: Optional[str] = None
@@ -528,7 +539,7 @@ def _scan_retained_audit(
                 # whole file. logrotate create+HUP can append to a renamed log,
                 # and compression/rename preserves this prefix; matching it
                 # avoids retiring the same historical contribution again.
-                start_key = hashlib.sha256(raw.rstrip(b"\r\n")).hexdigest()
+                start_key = _generation_key(raw)
             hour = _record_hour(record)
             archive_hours.add(hour)
             _accumulate_audit_record(combined, hour, record)
@@ -545,21 +556,36 @@ def _scan_retained_audit(
         record = _canonical_audit_record(raw)
         if record is None:
             continue
+        if active_start_key is None:
+            active_start_key = _generation_key(raw)
         hour = _record_hour(record)
         active_hours.add(hour)
         first_offsets.setdefault(hour, line_start)
         _accumulate_audit_record(combined, hour, record)
+        _accumulate_audit_record(active_generation_groups, hour, record)
 
     generations = {
         key: _rows_from_audit_groups(groups)
         for key, groups in generation_groups.items()
         if groups
     }
+    active_generation: Dict[str, list[dict[str, Any]]] = {}
+    if active_start_key is not None:
+        active_generation[active_start_key] = _rows_from_audit_groups(
+            active_generation_groups
+        )
     rows = _rows_from_audit_groups(combined)
     current_hours = archive_hours | active_hours
     active_hour = max(active_hours) if active_hours else None
     active_offset = first_offsets[active_hour] if active_hour is not None else 0
-    return rows, generations, current_hours, active_hour, active_offset
+    return (
+        rows,
+        generations,
+        current_hours,
+        active_hour,
+        active_offset,
+        active_generation,
+    )
 
 
 def _merge_extra_rows(
@@ -701,6 +727,11 @@ def _audit_checkpoint(
         "archives": list(state["audit_archives"]),
         "archives_baselined": state["audit_archives_baselined"],
         "generations": {key: list(rows) for key, rows in state["audit_generations"].items()},
+        "active_generation": {
+            key: list(rows)
+            for key, rows in state["audit_active_generation"].items()
+        },
+        "active_generation_checked": state["audit_active_generation_checked"],
         "retired": {hour: list(rows) for hour, rows in state["audit_retired"].items()},
     }
     checkpoint.update(overrides)
@@ -720,6 +751,13 @@ def _apply_audit_after(state: Dict[str, Any], audit_after: Dict[str, Any]) -> No
         key: [dict(row) for row in rows]
         for key, rows in audit_after["generations"].items()
     }
+    state["audit_active_generation"] = {
+        key: [dict(row) for row in rows]
+        for key, rows in audit_after["active_generation"].items()
+    }
+    state["audit_active_generation_checked"] = bool(
+        audit_after["active_generation_checked"]
+    )
     state["audit_retired"] = {
         hour: [dict(row) for row in rows]
         for hour, rows in audit_after["retired"].items()
@@ -761,6 +799,35 @@ def _warn(message: str) -> None:
     print("orihsus-shipper: %s" % message, file=sys.stderr)
 
 
+def _recover_active_generation(
+    audit_path: str,
+    acknowledged_extent: int,
+    current_extent: int,
+) -> Optional[tuple[str, list[dict[str, Any]]]]:
+    """Recover the active generation from source once, without delivering rows.
+
+    A legacy cursor can already be at EOF, or the file may have started with
+    only noncanonical lines, so no active identity was checkpointed. Stream the
+    still-available source once: the first canonical record supplies the stable
+    identity, while only lines at or before the acknowledged cursor contribute
+    rows. Newer lines stay with the normal incremental path.
+    """
+
+    key: Optional[str] = None
+    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for _line_start, line_end, raw in iter_log_lines(audit_path, 0, current_extent):
+        record = _canonical_audit_record(raw)
+        if record is None:
+            continue
+        if key is None:
+            key = _generation_key(raw)
+        if line_end <= acknowledged_extent:
+            _accumulate_audit_record(groups, _record_hour(record), record)
+    if key is None:
+        return None
+    return key, _rows_from_audit_groups(groups)
+
+
 def _capture_audit_work(
     audit_path: str,
     state: Dict[str, Any],
@@ -778,16 +845,27 @@ def _capture_audit_work(
     cursor = state["audit_cursor"]
     if extent <= cursor:
         return [], None
-    touched_hours = {
-        _record_hour(record) for record in _iter_audit_records(audit_path, cursor, extent)
-    }
+    touched_hours: set[str] = set()
+    first_raw: Optional[bytes] = None
+    for _line_start, _line_end, raw in iter_log_lines(audit_path, cursor, extent):
+        record = _canonical_audit_record(raw)
+        if record is None:
+            continue
+        if first_raw is None and (
+            cursor == 0 or state["audit_active_generation_checked"]
+        ):
+            first_raw = raw
+        touched_hours.add(_record_hour(record))
     active_hour = state["audit_active_hour"]
     anchor = state["audit_active_hour_offset"]
     if not touched_hours:
         return [], _audit_checkpoint(state, extent, active_hour, anchor)
 
     start = anchor if active_hour is not None and min(touched_hours) >= active_hour else 0
-    rows, first_offsets = _aggregate_audit_window(audit_path, start, extent, touched_hours)
+    active_rows, first_offsets = _aggregate_audit_window(
+        audit_path, start, extent, touched_hours
+    )
+    rows = list(active_rows)
     # Add the retained-generation contribution for every touched hour. This is
     # independent of active_hour, so the first append after an empty active log
     # still completes an archived hour. Retired contributions preserve groups
@@ -805,6 +883,24 @@ def _capture_audit_work(
         create=False,
     )
 
+    # Keep the acknowledged active generation under its immutable starting
+    # record so a later rotation that expires it before it is ever observed as
+    # a numbered archive can still retire its exact contribution. Touched hours
+    # are replaced from the active window; older untouched hours stay in place.
+    active_key = next(iter(state["audit_active_generation"]), None)
+    if active_key is None and first_raw is not None:
+        active_key = _generation_key(first_raw)
+    active_generation: Dict[str, list[dict[str, Any]]] = {}
+    active_generation_checked = state["audit_active_generation_checked"]
+    if active_key is not None:
+        previous_active = state["audit_active_generation"].get(active_key, [])
+        active_generation[active_key] = [
+            dict(row)
+            for row in previous_active
+            if row["bucket_start"] not in touched_hours
+        ] + [dict(row) for row in active_rows]
+        active_generation_checked = True
+
     # Anchor on the latest hour known so far at its earliest contribution. A
     # multi-hour bootstrap must not anchor warm ticks to the oldest hour.
     new_active_hour = max(first_offsets)
@@ -817,6 +913,8 @@ def _capture_audit_work(
         extent,
         new_active_hour,
         new_anchor,
+        active_generation=active_generation,
+        active_generation_checked=active_generation_checked,
     )
 
 
@@ -1116,6 +1214,8 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "audit_archives": [],
             "audit_archives_baselined": False,
             "audit_generations": {},
+            "audit_active_generation": {},
+            "audit_active_generation_checked": False,
             "audit_retired": {},
             "usage_cursors": {},
             "usage_files": {},
@@ -1152,6 +1252,12 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
     raw["audit_archives_baselined"] = bool(raw.get("audit_archives_baselined", False))
     raw["audit_generations"] = _normalize_row_map(
         raw.get("audit_generations"), "audit generations"
+    )
+    raw["audit_active_generation"] = _normalize_row_map(
+        raw.get("audit_active_generation"), "audit active generation"
+    )
+    raw["audit_active_generation_checked"] = bool(
+        raw.get("audit_active_generation_checked", False)
     )
     raw["audit_retired"] = _normalize_row_map(raw.get("audit_retired"), "audit retired rows")
     for obsolete in (
@@ -1211,6 +1317,13 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         pending["audit_generations_after"] = _normalize_row_map(
             pending.get("audit_generations_after"), "pending audit generations"
         )
+        pending["audit_active_generation_after"] = _normalize_row_map(
+            pending.get("audit_active_generation_after"),
+            "pending audit active generation",
+        )
+        pending["audit_active_generation_checked_after"] = bool(
+            pending.get("audit_active_generation_checked_after", False)
+        )
         pending["audit_retired_after"] = _normalize_row_map(
             pending.get("audit_retired_after"), "pending audit retired rows"
         )
@@ -1267,6 +1380,13 @@ def _apply_pending(state: Dict[str, Any]) -> None:
         key: [dict(row) for row in rows]
         for key, rows in (pending.get("audit_generations_after") or {}).items()
     }
+    state["audit_active_generation"] = {
+        key: [dict(row) for row in rows]
+        for key, rows in (pending.get("audit_active_generation_after") or {}).items()
+    }
+    state["audit_active_generation_checked"] = bool(
+        pending.get("audit_active_generation_checked_after", False)
+    )
     state["audit_retired"] = {
         hour: [dict(row) for row in rows]
         for hour, rows in (pending.get("audit_retired_after") or {}).items()
@@ -1363,6 +1483,19 @@ def _send_batch(
                 else state["audit_generations"]
             ).items()
         },
+        "audit_active_generation_after": {
+            key: [dict(row) for row in rows]
+            for key, rows in (
+                audit_after["active_generation"]
+                if audit_after is not None
+                else state["audit_active_generation"]
+            ).items()
+        },
+        "audit_active_generation_checked_after": (
+            audit_after["active_generation_checked"]
+            if audit_after is not None
+            else state["audit_active_generation_checked"]
+        ),
         "audit_retired_after": {
             hour: [dict(row) for row in rows]
             for hour, rows in (
@@ -1575,20 +1708,58 @@ def run_once(
     else:
         state["audit_file_id"] = identity
 
+    # A legacy cursor can already be at EOF with no numbered archive, or the
+    # active file can have started with only noncanonical lines. Recover the
+    # acknowledged active generation once from source; never replay it as new
+    # rows, and never repeat this read on ordinary ticks.
+    if not state["audit_active_generation_checked"]:
+        if state["audit_active_generation"]:
+            state["audit_active_generation_checked"] = True
+            _save_state(state_path, state)
+        elif state["audit_cursor"] > 0:
+            recovered = _recover_active_generation(
+                audit_path, state["audit_cursor"], extent
+            )
+            if recovered is not None:
+                key, rows = recovered
+                state["audit_active_generation"] = {key: rows}
+            state["audit_active_generation_checked"] = True
+            _save_state(state_path, state)
+
     # A new install, an upgraded pre-rotation state, and any observed rotation
     # rebuild absolute hours from the retained generations. Ordinary ticks keep
     # the bounded active-tail path below.
     first_baseline = not state["audit_archives_baselined"]
     archive_changed = archive_fingerprint != state["audit_archives"]
     if (first_baseline and archives) or archive_changed or restarted:
-        usage_rows, generations, current_hours, active_hour, active_offset = (
-            _scan_retained_audit(audit_path, archives, extent)
-        )
+        (
+            usage_rows,
+            generations,
+            current_hours,
+            active_hour,
+            active_offset,
+            active_generation,
+        ) = _scan_retained_audit(audit_path, archives, extent)
         _verify_generations_retain_acknowledged(state["audit_generations"], generations)
+        # An acknowledged active generation may have become a numbered archive
+        # (even compressed); compare it there before it can be retired.
+        _verify_generations_retain_acknowledged(
+            state["audit_active_generation"], generations
+        )
         expired_rows: list[dict[str, Any]] = []
         for key, rows in state["audit_generations"].items():
             if key not in generations:
                 expired_rows.extend(rows)
+        # An active generation can expire during downtime without ever being
+        # observed as a numbered archive. Preserve its exact contribution when
+        # the rotation set changed, but keep the existing restart-and-warn
+        # behavior for a destructive active-file truncate/replacement.
+        recognized = dict(generations)
+        recognized.update(active_generation)
+        if archive_changed:
+            for key, rows in state["audit_active_generation"].items():
+                if key not in recognized:
+                    expired_rows.extend(rows)
         retired = _update_retired(
             state["audit_retired"], expired_rows, current_hours
         )
@@ -1607,6 +1778,8 @@ def run_once(
             archives=archive_fingerprint,
             archives_baselined=True,
             generations=generations,
+            active_generation=active_generation,
+            active_generation_checked=True,
             retired=retired,
         )
         _verify_scan_snapshot(audit_path, archive_fingerprint, identity, extent)
