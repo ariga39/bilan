@@ -18,10 +18,10 @@ import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Optional
-from unittest import mock
+from typing import Any, Iterator, Optional
 
 from shippers import debitmetre as shipper_module
+from shippers.tests.support import measure_peak_bytes, measure_read_bytes
 
 SHIPPER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "debitmetre.py"))
 INGEST_PATH = "/api/v1/ingest"
@@ -102,6 +102,8 @@ class _IngestState:
         self.drop_response_at: Optional[int] = None
         self.fail_next_status: Optional[int] = None
         self.fail_next_location: Optional[str] = None
+        self.discard = False
+        self.on_receive: Any = None
 
     def receive(
         self,
@@ -109,6 +111,19 @@ class _IngestState:
         authorization: Optional[str],
         path: str,
     ) -> tuple[int, bool, Optional[str]]:
+        if self.discard:
+            with self.lock:
+                self.requests.append(
+                    {
+                        "body": body,
+                        "payload": None,
+                        "authorization": authorization,
+                        "path": path,
+                        "status": 200,
+                        "dropped": False,
+                    }
+                )
+            return 200, False, None
         with self.lock:
             payload = json.loads(body.decode("utf-8"))
             if self.fail_next_status is not None:
@@ -205,6 +220,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.headers.get("Authorization"),
             self.path,
         )
+        callback = self.server.ingest.on_receive  # type: ignore[attr-defined]
+        if callback is not None:
+            self.server.ingest.on_receive = None  # type: ignore[attr-defined]
+            callback()
         if drop:
             # The mock "commits" the batch but loses the ACK by closing the
             # socket without writing a response.
@@ -325,6 +344,68 @@ class DebitmetreShipperTests(unittest.TestCase):
 
     def assert_ok(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def write_records_streaming(
+        self,
+        records: Any,
+        *,
+        path: Optional[str] = None,
+        append: bool = False,
+    ) -> int:
+        target = path or self.usage_path
+        with open(target, "ab" if append else "wb") as handle:
+            for record in records:
+                handle.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+        return os.path.getsize(target)
+
+    def run_paths(
+        self, usage_path: str, state_path: str, *, backfill: bool = False
+    ) -> bool:
+        return shipper_module.run_once(
+            usage_path=usage_path,
+            state_path=state_path,
+            producer_id="debitmetre-main",
+            endpoint=self.endpoint,
+            token=TOKEN,
+            backfill=backfill,
+            heartbeat=True,
+            timeout=5,
+            quiet=True,
+        )
+
+    def run_in_process(self, *, backfill: bool = False, heartbeat: bool = True) -> bool:
+        return shipper_module.run_once(
+            usage_path=self.usage_path,
+            state_path=self.state_path,
+            producer_id="debitmetre-main",
+            endpoint=self.endpoint,
+            token=TOKEN,
+            backfill=backfill,
+            heartbeat=heartbeat,
+            timeout=5,
+            quiet=True,
+        )
+
+    @staticmethod
+    def bootstrap_records(old_rows: int) -> Iterator[dict[str, Any]]:
+        for _ in range(old_rows):
+            yield audit_record("2026-01-01T00:05:00Z", machine_id="machine-a")
+        for _ in range(8):
+            yield audit_record("2026-02-01T00:05:00Z", machine_id="machine-a")
+
+    def _first_warm_read_bytes(self, label: str, old_rows: int) -> int:
+        directory = os.path.join(self.tempdir, label)
+        os.makedirs(directory)
+        usage = os.path.join(directory, "usage.jsonl")
+        state = os.path.join(directory, "state.json")
+        self.write_records_streaming(self.bootstrap_records(old_rows), path=usage)
+        self.assertTrue(self.run_paths(usage, state))
+        extra = audit_record("2026-02-01T00:10:00Z", machine_id="machine-a")
+        with open(usage, "ab") as handle:
+            handle.write(json.dumps(extra, separators=(",", ":")).encode("utf-8") + b"\n")
+        with measure_read_bytes(usage) as meter:
+            self.assertTrue(self.run_paths(usage, state))
+        return meter["bytes"]
 
     # -- tests -----------------------------------------------------------
 
@@ -685,133 +766,72 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
         self.assertEqual(self.read_state()["cursor"], os.path.getsize(self.usage_path))
 
-    def test_pending_unacknowledged_suffix_cannot_be_replaced(self) -> None:
-        records = [
-            audit_record("2026-11-01T13:05:00Z", machine_id="machine-a"),
-            audit_record("2026-11-01T13:25:00Z", machine_id="machine-a"),
-        ]
-        full_size = self.write_records(records)
+    def test_pending_is_replayed_before_a_rotated_generation_is_read(self) -> None:
+        records = [audit_record("2026-11-01T13:05:00Z", machine_id="machine-a")]
+        self.write_records(records)
         self.ingest.drop_next_response = True
         first = self.run_cli()
         self.assertNotEqual(first.returncode, 0)
         state = self.read_state()
-        self.assertEqual(state["pending"]["cursor_after"], full_size)
-        self.assertEqual(state["pending"]["source_extent"], full_size)
-        self.assertEqual(state["pending"]["source_checkpoint"]["cursor"], full_size)
-        requests_before = len(self.ingest.snapshot_requests())
+        self.assertEqual(state["pending"]["batch_seq"], 1)
+        self.assertEqual(state["pending"]["cursor_after"], os.path.getsize(self.usage_path))
+        first_body = self.ingest.snapshot_requests()[0]["body"]
 
-        replacement = [
-            audit_record(
-                f"2026-11-01T1{hour}:05:00Z",
-                machine_id="machine-replacement-" + "x" * 80,
-                model="gpt-5-replacement",
-            )
-            for hour in (4, 5, 6)
-        ]
-        replacement_size = self.write_records(replacement)
-        self.assertGreaterEqual(replacement_size, full_size)
+        replacement = [audit_record("2026-11-01T14:05:00Z", machine_id="machine-b")]
+        rotated = os.path.join(self.tempdir, "usage.next.jsonl")
+        with open(rotated, "wb") as handle:
+            for record in replacement:
+                handle.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+        replacement_size = os.path.getsize(rotated)
+        os.replace(rotated, self.usage_path)
 
-        replaced = self.run_cli()
-        self.assertNotEqual(replaced.returncode, 0)
-        self.assertIn("restore the complete source log", replaced.stderr.lower())
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
+        second = self.run_cli()
+        self.assert_ok(second)
+        self.assertIn("rotated or truncated", second.stderr)
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 3)
+        # The immutable outbox is retried byte-for-byte before the new
+        # generation is read from zero.
+        self.assertEqual(requests[1]["body"], first_body)
+        self.assertEqual(requests[2]["payload"]["batch_seq"], 2)
+        self.assertEqual(
+            set(self.bucket_map(requests[2]["payload"])),
+            {("2026-11-01T14:00:00Z", "machine-b", "gpt-5", "high")},
+        )
         state = self.read_state()
-        self.assertEqual(state["cursor"], 0)
-        self.assertIsNotNone(state["pending"])
-
-        self.write_records(records)
-        self.assert_ok(self.run_cli())
-        state = self.read_state()
-        self.assertEqual(state["batch_seq"], 1)
-        self.assertEqual(state["cursor"], full_size)
+        self.assertEqual(state["batch_seq"], 2)
+        self.assertEqual(state["cursor"], replacement_size)
         self.assertIsNone(state["pending"])
 
-        self.write_records(
-            [audit_record("2026-11-01T13:45:00Z", machine_id="machine-a")],
-            append=True,
-        )
-        self.assert_ok(self.run_cli())
-        payload = self.ingest.snapshot_requests()[-1]["payload"]
-        self.assertEqual(payload["batch_seq"], 2)
-        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+    def test_backfill_reads_the_source_once_on_a_fresh_run(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        records = hourly_records(1500, start)
+        size = self.write_records(records)
+        self.ingest.discard = True
 
-    def test_backfill_first_checkpoints_the_aggregated_source_extent(self) -> None:
-        records = [
-            audit_record("2026-11-01T14:05:00Z", machine_id="machine-a"),
-            audit_record("2026-11-01T14:25:00Z", machine_id="machine-a"),
-        ]
-        full_size = self.write_records(records)
-        self.assert_ok(self.run_cli(extra=["--backfill"]))
+        with measure_read_bytes(self.usage_path) as meter:
+            self.assertTrue(self.run_in_process(backfill=True))
+
+        # One aggregation pass plus the bounded tail scan, not a second full
+        # aggregation of the same stable extent.
+        self.assertLess(meter["bytes"], size + 128 * 1024)
         state = self.read_state()
-        self.assertEqual(state["batch_seq"], 1)
-        self.assertEqual(state["cursor"], 0)
-        self.assertEqual(state["source_extent"], full_size)
-        self.assertEqual(state["source_checkpoint"]["cursor"], full_size)
-        requests_before = len(self.ingest.snapshot_requests())
-
-        self.write_records(
-            [
-                audit_record(
-                    f"2026-11-01T1{hour}:05:00Z",
-                    machine_id="machine-rotated-" + "y" * 80,
-                    model="gpt-5-rotated",
-                )
-                for hour in (5, 6, 7)
-            ]
-        )
-        replaced = self.run_cli()
-        self.assertNotEqual(replaced.returncode, 0)
-        self.assertIn("restore the complete source log", replaced.stderr.lower())
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
-        state = self.read_state()
-        self.assertEqual(state["cursor"], 0)
-        self.assertEqual(state["source_extent"], full_size)
-
-        self.write_records(
-            records + [audit_record("2026-11-01T14:45:00Z", machine_id="machine-a")]
-        )
-        self.assert_ok(self.run_cli())
-        payload = self.ingest.snapshot_requests()[-1]["payload"]
-        self.assertEqual(payload["batch_seq"], 2)
-        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
+        self.assertEqual(state["batch_seq"], 3)
+        self.assertIsNone(state["backfill"])
 
     def test_incremental_aggregation_is_bounded_to_captured_extent(self) -> None:
         first = audit_record("2026-11-01T16:05:00Z", machine_id="machine-a")
         self.write_records([first])
         captured_extent = os.path.getsize(self.usage_path)
         late = audit_record("2026-11-01T16:35:00Z", machine_id="machine-a")
-        real_read = shipper_module._read_appended_records
-        appended = False
+        self.ingest.on_receive = lambda: self.write_records([late], append=True)
 
-        def capture_then_append(path: str, cursor: int):
-            nonlocal appended
-            records, next_cursor = real_read(path, cursor)
-            if not appended:
-                appended = True
-                self.write_records([late], append=True)
-            return records, next_cursor
+        self.assertTrue(self.run_in_process())
 
-        with mock.patch.object(
-            shipper_module, "_read_appended_records", side_effect=capture_then_append
-        ):
-            ok = shipper_module.run_once(
-                usage_path=self.usage_path,
-                state_path=self.state_path,
-                producer_id="debitmetre-main",
-                endpoint=self.endpoint,
-                token=TOKEN,
-                backfill=False,
-                heartbeat=True,
-                timeout=5,
-                quiet=True,
-            )
-
-        self.assertTrue(ok)
         payload = self.ingest.snapshot_requests()[0]["payload"]
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 1)
         state = self.read_state()
         self.assertEqual(state["cursor"], captured_extent)
-        self.assertEqual(state["source_extent"], captured_extent)
 
         # The concurrent append is picked up by the next run.
         self.assert_ok(self.run_cli())
@@ -837,12 +857,21 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertNotEqual(interrupted.returncode, 0)
         state = self.read_state()
         self.assertEqual(state["cursor"], preexisting_cursor)
-        self.assertEqual(state["source_extent"], source_extent)
+        self.assertEqual(state["backfill"]["source_extent"], source_extent)
         self.assertIsNotNone(state["pending"])
         self.assertEqual(state["pending"]["backfill_index"], 1)
         self.assertEqual(state["backfill"]["next_batch"], 1)
         self.assertEqual(state["backfill"]["total_batches"], 3)
         self.assertEqual(len(self.ingest.snapshot_requests()), 3)
+
+        # Interrupt the replayed outbox a second time: the same deterministic
+        # resume must still converge across multiple batches.
+        self.ingest.drop_response_at = 4
+        again = self.run_cli()
+        self.assertNotEqual(again.returncode, 0)
+        state = self.read_state()
+        self.assertEqual(state["pending"]["backfill_index"], 1)
+        self.assertEqual(state["backfill"]["next_batch"], 1)
 
         # Appending beyond the stable backfill extent must not enter this
         # operation or advance the incremental cursor.
@@ -854,9 +883,8 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assertIsNone(state["pending"])
         self.assertIsNone(state["backfill"])
         self.assertEqual(state["cursor"], preexisting_cursor)
-        self.assertEqual(state["source_extent"], source_extent)
         self.assertEqual(state["batch_seq"], 4)
-        self.assertEqual(len(self.ingest.snapshot_requests()), 5)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 6)
         self.assertEqual(len(self.ingest.snapshot_rows()), 1002)
         self.assertFalse(
             any(row["actor_id"] == "machine-after" for row in self.ingest.snapshot_rows().values())
@@ -867,100 +895,73 @@ class DebitmetreShipperTests(unittest.TestCase):
         self.assert_ok(self.run_cli())
         state = self.read_state()
         self.assertEqual(state["cursor"], os.path.getsize(self.usage_path))
-        self.assertEqual(state["source_extent"], state["cursor"])
         self.assertEqual(len(self.ingest.snapshot_rows()), 1003)
         self.assertTrue(
             any(row["actor_id"] == "machine-after" for row in self.ingest.snapshot_rows().values())
         )
 
-    def test_full_extent_checkpoint_detects_rewrite_beyond_old_window(self) -> None:
-        records = hourly_records(1000, datetime(2026, 1, 1, tzinfo=timezone.utc))
-        size = self.write_records(records)
-        self.assertGreater(size, 128 * 1024)
+    def test_replaced_source_generation_restarts_even_when_regrown(self) -> None:
+        self.write_records([audit_record("2026-11-01T11:05:00Z", machine_id="machine-a")])
         self.assert_ok(self.run_cli())
-        requests_before = len(self.ingest.snapshot_requests())
-        cursor = self.read_state()["cursor"]
-        self.assertEqual(cursor, size)
+        shipped_state = self.read_state()
 
-        offset = 1000
-        self.assertGreater(size - offset, 64 * 1024)
-        with open(self.usage_path, "rb") as handle:
-            original = handle.read()
-        mutated = bytearray(original)
-        mutated[offset] = ord("Z") if mutated[offset] != ord("Z") else ord("Y")
-        with open(self.usage_path, "wb") as handle:
-            handle.write(mutated)
-        self.assertEqual(os.path.getsize(self.usage_path), size)
+        replacement = [
+            audit_record("2026-11-01T12:05:00Z", machine_id="machine-z"),
+            audit_record("2026-11-01T12:15:00Z", machine_id="machine-z"),
+        ]
+        rotated = os.path.join(self.tempdir, "usage.grown.jsonl")
+        with open(rotated, "wb") as handle:
+            for record in replacement:
+                handle.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+        new_size = os.path.getsize(rotated)
+        self.assertGreater(new_size, shipped_state["cursor"])
+        os.replace(rotated, self.usage_path)
 
-        rewritten = self.run_cli()
-        self.assertNotEqual(rewritten.returncode, 0)
-        self.assertIn("restore the complete source log", rewritten.stderr.lower())
-        self.assertEqual(len(self.ingest.snapshot_requests()), requests_before)
-        self.assertEqual(self.read_state()["cursor"], cursor)
+        replaced = self.run_cli()
+        self.assert_ok(replaced)
+        self.assertIn("rotated or truncated", replaced.stderr)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(
+            set(self.bucket_map(payload)),
+            {("2026-11-01T12:00:00Z", "machine-z", "gpt-5", "high")},
+        )
+        state = self.read_state()
+        self.assertEqual(state["cursor"], new_size)
+        self.assertNotEqual(state["file_id"], shipped_state["file_id"])
+        self.assertEqual(
+            state["file_id"],
+            [os.stat(self.usage_path).st_dev, os.stat(self.usage_path).st_ino],
+        )
 
-        with open(self.usage_path, "wb") as handle:
-            handle.write(original)
-        self.assert_ok(self.run_cli())
-        self.assertEqual(self.read_state()["cursor"], cursor)
-
-    def test_truncated_source_fails_closed_and_recovers_after_restore(self) -> None:
+    def test_truncated_source_restarts_with_a_warning(self) -> None:
         records = [
             audit_record("2026-11-01T10:05:00Z", machine_id="machine-a"),
             audit_record("2026-11-01T10:25:00Z", machine_id="machine-a"),
         ]
-        full_size = self.write_records(records)
+        self.write_records(records)
         self.assert_ok(self.run_cli())
-        shipped_state = self.read_state()
-        self.assertEqual(shipped_state["batch_seq"], 1)
-        self.assertEqual(shipped_state["cursor"], full_size)
-        shipped_requests = len(self.ingest.snapshot_requests())
+        self.assertEqual(self.ingest.snapshot_requests()[0]["payload"]["usage_buckets"][0]["unit_count"], 2)
 
-        # A shorter source must not be replayed from zero and replace the
-        # complete already-shipped hour with partial usage.
-        self.write_records(records[:1])
+        # A same-generation truncation is accepted as an accounting loss for
+        # the active hour; the shipper warns and restarts instead of locking up.
+        truncated_size = self.write_records(records[:1])
         truncated = self.run_cli()
-        self.assertNotEqual(truncated.returncode, 0)
-        self.assertIn("restore the complete source log", truncated.stderr.lower())
-        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
-        after_truncation = self.read_state()
-        self.assertEqual(after_truncation["batch_seq"], 1)
-        self.assertEqual(after_truncation["cursor"], full_size)
+        self.assert_ok(truncated)
+        self.assertIn("rotated or truncated", truncated.stderr)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        self.assertEqual(payload["batch_seq"], 2)
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 1)
+        self.assertEqual(self.read_state()["cursor"], truncated_size)
 
-        # Backfill must not bypass the same guard.
-        backfill = self.run_cli(extra=["--backfill"])
-        self.assertNotEqual(backfill.returncode, 0)
-        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
-        self.assertEqual(self.read_state()["cursor"], full_size)
-
-        # Restoring the complete log plus a new line resumes normally with a
-        # complete touched-hour correction.
+        # Appending afterwards resumes normally and rebuilds the complete hour.
         self.write_records(
-            records + [audit_record("2026-11-01T10:45:00Z", machine_id="machine-a")]
+            [audit_record("2026-11-01T10:25:00Z", machine_id="machine-a")], append=True
         )
         self.assert_ok(self.run_cli())
         payload = self.ingest.snapshot_requests()[-1]["payload"]
-        self.assertEqual(payload["batch_seq"], 2)
-        self.assertEqual(len(payload["usage_buckets"]), 1)
-        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 3)
-
-    def test_replaced_source_with_different_content_fails_closed(self) -> None:
-        self.write_records([audit_record("2026-11-01T11:05:00Z", machine_id="machine-a")])
-        self.assert_ok(self.run_cli())
-        shipped_state = self.read_state()
-        shipped_requests = len(self.ingest.snapshot_requests())
-
-        self.write_records(
-            [
-                audit_record("2026-11-01T12:05:00Z", machine_id="machine-z"),
-                audit_record("2026-11-01T12:15:00Z", machine_id="machine-z"),
-            ]
-        )
-        replaced = self.run_cli()
-        self.assertNotEqual(replaced.returncode, 0)
-        self.assertIn("restore the complete source log", replaced.stderr.lower())
-        self.assertEqual(len(self.ingest.snapshot_requests()), shipped_requests)
-        self.assertEqual(self.read_state()["cursor"], shipped_state["cursor"])
-        self.assertEqual(self.read_state()["batch_seq"], shipped_state["batch_seq"])
+        self.assertEqual(payload["usage_buckets"][0]["unit_count"], 2)
+        self.assertEqual(self.read_state()["cursor"], os.path.getsize(self.usage_path))
 
     def test_backfill_extent_state_migrates_intact(self) -> None:
         records = [
@@ -1063,6 +1064,193 @@ class DebitmetreShipperTests(unittest.TestCase):
         payload = self.ingest.snapshot_requests()[0]["payload"]
         self.assertEqual(len(payload["usage_buckets"]), 1)
         self.assertEqual(payload["usage_buckets"][0]["unit_count"], 1)
+
+    # -- streaming, anchors and rotation ---------------------------------
+
+    def test_idle_tick_reads_no_source_bytes(self) -> None:
+        self.write_records([audit_record("2026-11-01T10:05:00Z")])
+        self.assert_ok(self.run_cli())
+        size = os.path.getsize(self.usage_path)
+
+        with measure_read_bytes(self.usage_path) as meter:
+            self.assertTrue(self.run_in_process())
+
+        self.assertEqual(meter["bytes"], 0)
+        self.assertEqual(self.read_state()["cursor"], size)
+        self.assertEqual(len(self.ingest.snapshot_requests()), 2)  # idle heartbeat
+
+    def test_first_warm_tick_after_multi_hour_bootstrap_reads_only_active_tail(self) -> None:
+        self.write_records_streaming(self.bootstrap_records(15_000))
+        self.assertGreater(os.path.getsize(self.usage_path), 4 * 1024 * 1024)
+        self.assertTrue(self.run_in_process())
+        state = self.read_state()
+        self.assertEqual(state["active_hour"], "2026-02-01T00:00:00Z")
+        self.assertGreater(state["active_hour_offset"], 0)
+
+        # The idle tick between the bootstrap and the first append must not
+        # read history either.
+        with measure_read_bytes(self.usage_path) as idle:
+            self.assertTrue(self.run_in_process())
+        self.assertEqual(idle["bytes"], 0)
+
+        extra = audit_record("2026-02-01T00:10:00Z", machine_id="machine-a")
+        with open(self.usage_path, "ab") as handle:
+            handle.write(json.dumps(extra, separators=(",", ":")).encode("utf-8") + b"\n")
+
+        with (
+            measure_read_bytes(self.usage_path) as meter,
+            measure_peak_bytes() as memory,
+        ):
+            self.assertTrue(self.run_in_process())
+
+        # A bootstrap spanning January and February must anchor on February, so
+        # this first warm tick reads only the active February tail.
+        self.assertLess(meter["bytes"], 64 * 1024)
+        self.assertLess(memory["peak"], 2 * 1024 * 1024)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        buckets = self.bucket_map(payload)
+        self.assertEqual(
+            set(buckets),
+            {("2026-02-01T00:00:00Z", "machine-a", "gpt-5", "high")},
+        )
+        self.assertEqual(
+            buckets[("2026-02-01T00:00:00Z", "machine-a", "gpt-5", "high")]["unit_count"], 9
+        )
+
+    def test_tenfold_older_history_keeps_the_first_warm_read_identical(self) -> None:
+        self.ingest.discard = True
+
+        small = self._first_warm_read_bytes("small-history", 15_000)
+        large = self._first_warm_read_bytes("large-history", 150_000)
+
+        self.assertLess(small, 64 * 1024)
+        self.assertEqual(large, small)
+
+    def test_late_older_append_falls_back_exactly_and_preserves_latest_anchor(self) -> None:
+        self.write_records_streaming(self.bootstrap_records(200))
+        self.assertTrue(self.run_in_process())
+        state = self.read_state()
+        self.assertEqual(state["active_hour"], "2026-02-01T00:00:00Z")
+        february_anchor = state["active_hour_offset"]
+        file_size = os.path.getsize(self.usage_path)
+
+        late = audit_record("2026-01-01T00:25:00Z", machine_id="machine-a")
+        with open(self.usage_path, "ab") as handle:
+            handle.write(json.dumps(late, separators=(",", ":")).encode("utf-8") + b"\n")
+
+        with measure_read_bytes(self.usage_path) as fallback:
+            self.assertTrue(self.run_in_process())
+
+        # An older late record triggers the exact streaming fallback from zero.
+        self.assertGreaterEqual(fallback["bytes"], file_size)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        buckets = self.bucket_map(payload)
+        self.assertEqual(
+            set(buckets),
+            {("2026-01-01T00:00:00Z", "machine-a", "gpt-5", "high")},
+        )
+        self.assertEqual(
+            buckets[("2026-01-01T00:00:00Z", "machine-a", "gpt-5", "high")]["unit_count"],
+            201,
+        )
+        state = self.read_state()
+        # The late hour must not drag the tracked maximum or its anchor back.
+        self.assertEqual(state["active_hour"], "2026-02-01T00:00:00Z")
+        self.assertEqual(state["active_hour_offset"], february_anchor)
+
+        extra = audit_record("2026-02-01T00:15:00Z", machine_id="machine-a")
+        with open(self.usage_path, "ab") as handle:
+            handle.write(json.dumps(extra, separators=(",", ":")).encode("utf-8") + b"\n")
+        with measure_read_bytes(self.usage_path) as warm:
+            self.assertTrue(self.run_in_process())
+        self.assertLess(warm["bytes"], 64 * 1024)
+        payload = self.ingest.snapshot_requests()[-1]["payload"]
+        buckets = self.bucket_map(payload)
+        self.assertEqual(
+            buckets[("2026-02-01T00:00:00Z", "machine-a", "gpt-5", "high")]["unit_count"], 9
+        )
+
+    def test_backfill_peak_memory_is_bounded_on_high_cardinality(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+        def records() -> Iterator[dict[str, Any]]:
+            for hour in range(1000):
+                timestamp = (start + timedelta(hours=hour)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for _ in range(30):
+                    yield audit_record(timestamp, machine_id="machine-a")
+
+        size = self.write_records_streaming(records())
+        self.assertGreater(size, 4 * 1024 * 1024)
+        self.ingest.discard = True
+
+        with measure_peak_bytes() as memory:
+            self.assertTrue(self.run_in_process(backfill=True))
+
+        self.assertLess(memory["peak"], size / 2)
+        self.assertIsNone(self.read_state()["backfill"])
+
+    def test_legacy_v1_state_keeps_sequence_cursor_and_outbox(self) -> None:
+        size = self.write_records([audit_record("2026-11-01T09:05:00Z")])
+        payload = shipper_module.envelope(8, [])
+        legacy = {
+            "version": 1,
+            "producer_id": "debitmetre-main",
+            "batch_seq": 7,
+            "cursor": 0,
+            "source_extent": 0,
+            "source_checkpoint": {"cursor": 0, "scope": "full", "digest": "0" * 64},
+            "pending": {
+                "batch_seq": 8,
+                "payload": payload,
+                "cursor_after": size,
+                "source_extent": size,
+                "source_checkpoint": {"cursor": size, "scope": "full", "digest": "a" * 64},
+                "created_at": "2026-11-01T09:06:00Z",
+            },
+            "backfill": None,
+        }
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+
+        self.assert_ok(self.run_cli())
+
+        requests = self.ingest.snapshot_requests()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["payload"], payload)
+        state = self.read_state()
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["batch_seq"], 8)
+        self.assertEqual(state["cursor"], size)
+        self.assertIsNone(state["pending"])
+        self.assertNotIn("source_checkpoint", state)
+
+    def test_legacy_v1_in_progress_backfill_resumes_without_hashes(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        size = self.write_records(hourly_records(1001, start))
+        legacy = {
+            "version": 1,
+            "producer_id": "debitmetre-main",
+            "batch_seq": 5,
+            "cursor": 0,
+            "source_extent": size,
+            "source_checkpoint": {"cursor": size, "scope": "full", "digest": "b" * 64},
+            "pending": None,
+            "backfill": {"source_extent": size, "next_batch": 1, "total_batches": 3},
+        }
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+
+        self.assert_ok(self.run_cli())
+
+        self.assertEqual(len(self.ingest.snapshot_requests()), 2)
+        state = self.read_state()
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["batch_seq"], 7)
+        self.assertIsNone(state["backfill"])
+        self.assertEqual(state["cursor"], 0)
+        # Chunk 0 was already committed before the legacy state was captured,
+        # so only the remaining 501 rows are replayed by this run.
+        self.assertEqual(len(self.ingest.snapshot_rows()), 501)
 
 
 if __name__ == "__main__":

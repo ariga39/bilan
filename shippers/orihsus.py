@@ -60,8 +60,18 @@ byte cursor for ``audit.jsonl``, one byte cursor per daily usage file, and the
 exact in-flight envelope. The envelope is written to disk before the HTTP
 attempt. A timeout or lost ACK therefore retries the identical payload with the
 identical ``batch_seq``; only an exact HTTP 200 ACK advances the cursors.
-Offline backlogs across several daily files are consumed in one tick because
-every file has its own durable cursor.
+Offline backlogs across several daily files are consumed in bounded batches
+because every file has its own durable cursor.
+
+Streaming and the active-hour anchor
+------------------------------------
+Both logs are streamed in bounded chunks, so peak memory follows the number of
+distinct usage buckets or the payload size rather than the number of historical
+lines. The audit state remembers ``audit_active_hour`` and its earliest byte
+offset; append-only ticks rebuild only the touched hours from that anchor, while
+an older late record falls back to an exact stream from byte 0. Audit and quota
+cursors are bound to the file generation ``(st_dev, st_ino)``; a rotation or
+truncation is logged and restarted instead of locking the shipper up.
 """
 
 from __future__ import annotations
@@ -86,6 +96,8 @@ if __package__:
         ShipperError,
         atomic_write_json,
         canonical_json_bytes,
+        inspect_source,
+        iter_log_lines,
         load_json_file,
         parse_utc_timestamp,
         post_envelope,
@@ -102,6 +114,8 @@ else:
         ShipperError,
         atomic_write_json,
         canonical_json_bytes,
+        inspect_source,
+        iter_log_lines,
         load_json_file,
         parse_utc_timestamp,
         post_envelope,
@@ -109,7 +123,7 @@ else:
         utc_now_iso,
     )
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 DEFAULT_PRODUCER_ID = "orihsus-main"
 SOURCE = "opencode"
 ACCOUNTING_BASIS = "orihsus-audit-v1"
@@ -238,59 +252,39 @@ def _canonical_audit_record(raw: bytes) -> Optional[dict[str, Any]]:
     return record
 
 
-def _records_from_snapshot(snapshot: bytes, extent: int) -> list[dict[str, Any]]:
-    """Parse canonical records from a coherent in-memory extent snapshot."""
-
-    records: list[dict[str, Any]] = []
-    for raw in snapshot[:extent].split(b"\n"):
-        if not raw:
-            continue
-        record = _canonical_audit_record(raw)
-        if record is not None:
-            records.append(record)
-    return records
-
-
 def _record_hour(record: dict[str, Any]) -> str:
     return utc_hour_start(parse_utc_timestamp(record["timestamp"]))
 
 
-def aggregate_audit_records(
-    records: Iterable[dict[str, Any]],
-    touched_hours: Optional[set[str]] = None,
-) -> list[dict[str, Any]]:
-    """Aggregate canonical audit records into complete UTC-hour buckets.
+def _accumulate_audit_record(
+    groups: Dict[tuple[str, str, str], Dict[str, Any]],
+    hour: str,
+    record: dict[str, Any],
+) -> None:
+    key = (hour, _identity(record.get("gateway_key")), _model(record.get("model")))
+    accumulator = groups.get(key)
+    if accumulator is None:
+        accumulator = _new_audit_accumulator()
+        groups[key] = accumulator
 
-    ``touched_hours`` restricts output to the hours newly observed, while every
-    record in those hours (including earlier lines already consumed) is included
-    so each pushed bucket is complete rather than a delta.
-    """
-
-    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-    for record in records:
-        hour = _record_hour(record)
-        if touched_hours is not None and hour not in touched_hours:
+    accumulator["unit_count"] += 1
+    missing_required = False
+    for payload_column, record_field, counted_column, required in TOKEN_COLUMNS:
+        value = _token_value(record.get(record_field))
+        if value is None:
+            if required:
+                missing_required = True
             continue
-        key = (hour, _identity(record.get("gateway_key")), _model(record.get("model")))
-        accumulator = groups.get(key)
-        if accumulator is None:
-            accumulator = _new_audit_accumulator()
-            groups[key] = accumulator
+        current = accumulator[payload_column]
+        accumulator[payload_column] = value if current is None else current + value
+        accumulator[counted_column] += 1
+    if missing_required:
+        accumulator["coverage_gaps"] += 1
 
-        accumulator["unit_count"] += 1
-        missing_required = False
-        for payload_column, record_field, counted_column, required in TOKEN_COLUMNS:
-            value = _token_value(record.get(record_field))
-            if value is None:
-                if required:
-                    missing_required = True
-                continue
-            current = accumulator[payload_column]
-            accumulator[payload_column] = value if current is None else current + value
-            accumulator[counted_column] += 1
-        if missing_required:
-            accumulator["coverage_gaps"] += 1
 
+def _rows_from_audit_groups(
+    groups: Dict[tuple[str, str, str], Dict[str, Any]],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for (hour, actor_id, model), accumulator in sorted(groups.items()):
         row: Dict[str, Any] = {
@@ -314,15 +308,55 @@ def aggregate_audit_records(
     return rows
 
 
-EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+def aggregate_audit_records(
+    records: Iterable[dict[str, Any]],
+    touched_hours: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
+    """Aggregate canonical audit records into complete UTC-hour buckets.
+
+    ``touched_hours`` restricts output to the hours newly observed, while every
+    record in those hours (including earlier lines already consumed) is included
+    so each pushed bucket is complete rather than a delta.
+    """
+
+    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for record in records:
+        hour = _record_hour(record)
+        if touched_hours is not None and hour not in touched_hours:
+            continue
+        _accumulate_audit_record(groups, hour, record)
+    return _rows_from_audit_groups(groups)
 
 
-def _is_sha256_hex(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
+def _iter_audit_records(
+    audit_path: str, start: int, extent: int
+) -> Iterable[dict[str, Any]]:
+    for _line_start, _line_end, raw in iter_log_lines(audit_path, start, extent):
+        record = _canonical_audit_record(raw)
+        if record is not None:
+            yield record
+
+
+def _aggregate_audit_window(
+    audit_path: str,
+    start: int,
+    extent: int,
+    touched_hours: set[str],
+) -> tuple[list[dict[str, Any]], Dict[str, int]]:
+    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    first_offsets: Dict[str, int] = {}
+    for line_start, _line_end, raw in iter_log_lines(audit_path, start, extent):
+        record = _canonical_audit_record(raw)
+        if record is None:
+            continue
+        hour = _record_hour(record)
+        # Keep every hour's first offset so a late-only fallback scan can
+        # preserve the prior latest hour and its true earliest contribution.
+        first_offsets.setdefault(hour, line_start)
+        if hour not in touched_hours:
+            continue
+        _accumulate_audit_record(groups, hour, record)
+    return _rows_from_audit_groups(groups), first_offsets
 
 
 def _require_audit_log(audit_path: str) -> None:
@@ -334,161 +368,53 @@ def _require_audit_log(audit_path: str) -> None:
         raise ShipperError("audit log path is not a file")
 
 
-def _hash_prefix_handle(handle: Any, size: int) -> str:
-    """Hash exactly one prefix from an already-open audit handle."""
-
-    handle.seek(0)
-    digest = hashlib.sha256()
-    remaining = size
-    while remaining > 0:
-        chunk = handle.read(min(1024 * 1024, remaining))
-        if not chunk:
-            raise ShipperError(
-                "audit log ended before the saved cursor; "
-                "refusing to replay complete hourly totals"
-            )
-        digest.update(chunk)
-        remaining -= len(chunk)
-    return digest.hexdigest()
+def _warn(message: str) -> None:
+    print("orihsus-shipper: %s" % message, file=sys.stderr)
 
 
-def _prefix_sha256(audit_path: str, size: int) -> str:
-    """Hash exactly the consumed audit prefix so rewrites fail closed."""
-
-    try:
-        with open(audit_path, "rb") as handle:
-            return _hash_prefix_handle(handle, size)
-    except FileNotFoundError as exc:
-        raise ShipperError(
-            "audit log disappeared; refusing to replay complete hourly totals"
-        ) from exc
-
-
-def _verify_audit_prefix(audit_path: str, cursor: int, expected: str) -> None:
-    try:
-        size = os.path.getsize(audit_path)
-    except FileNotFoundError as exc:
-        raise ShipperError(
-            "audit log disappeared; refusing to replay complete hourly totals"
-        ) from exc
-    if cursor > size:
-        raise ShipperError(
-            "audit log shrank below the saved cursor; refusing to replay because "
-            "complete hourly totals could be overwritten"
-        )
-    actual = _prefix_sha256(audit_path, cursor)
-    if actual != expected:
-        raise ShipperError(
-            "audit log prefix changed below the saved cursor; refusing to replay because "
-            "complete hourly totals could be overwritten"
-        )
-
-
-def _read_audit_snapshot(audit_path: str) -> bytes:
-    """Read one coherent audit snapshot and reject a replaced or truncated file."""
-
-    try:
-        with open(audit_path, "rb") as handle:
-            stat_before = os.fstat(handle.fileno())
-            snapshot = handle.read()
-            stat_after = os.fstat(handle.fileno())
-    except FileNotFoundError as exc:
-        raise ShipperError("audit log disappeared while reading") from exc
-    except OSError as exc:
-        raise ShipperError("audit log could not be inspected") from exc
-
-    try:
-        path_stat = os.stat(audit_path)
-    except FileNotFoundError as exc:
-        raise ShipperError("audit log disappeared during capture") from exc
-    if (path_stat.st_dev, path_stat.st_ino) != (stat_before.st_dev, stat_before.st_ino):
-        raise ShipperError(
-            "audit log was replaced during capture; refusing to trust the new extent"
-        )
-    if stat_after.st_size < len(snapshot):
-        raise ShipperError(
-            "audit log changed during capture; refusing to trust the new extent"
-        )
-    return snapshot
-
-
-def _snapshot_prefix_sha256(snapshot: bytes, size: int) -> str:
-    if size < 0 or size > len(snapshot):
-        raise ShipperError("audit snapshot is shorter than the required extent")
-    return hashlib.sha256(snapshot[:size]).hexdigest()
-
-
-def _capture_audit_extent(
+def _capture_audit_work(
     audit_path: str,
-    ack_cursor: int,
-    ack_prefix: str,
-    inflight_cursor: Optional[int],
-    inflight_prefix: Optional[str],
-) -> tuple[list[dict[str, Any]], int, str]:
-    """Verify, parse, and aggregate from one coherent audit snapshot.
+    state: Dict[str, Any],
+    extent: int,
+) -> tuple[list[dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Aggregate the touched audit hours from the captured complete-line extent.
 
-    All protected boundaries are checked against the same bytes that identify
-    touched hours and produce the next digest. A single path recheck after the
-    snapshot ties that digest back to the file before it is persisted or sent.
+    Returns the rows and the new position to commit once those rows are ACKed
+    (``None`` when no source bytes were captured). The anchor only moves to the
+    earliest byte offset that contributes to the new active hour.
     """
 
-    snapshot = _read_audit_snapshot(audit_path)
+    cursor = state["audit_cursor"]
+    if extent <= cursor:
+        return [], None
+    touched_hours = {
+        _record_hour(record) for record in _iter_audit_records(audit_path, cursor, extent)
+    }
+    active_hour = state["audit_active_hour"]
+    anchor = state["audit_active_hour_offset"]
+    if not touched_hours:
+        return [], {
+            "cursor": extent,
+            "active_hour": active_hour,
+            "active_hour_offset": anchor,
+            "file_id": state["audit_file_id"],
+        }
 
-    if len(snapshot) < ack_cursor:
-        raise ShipperError(
-            "audit log shrank below the saved cursor; refusing to replay because "
-            "complete hourly totals could be overwritten"
-        )
-    if _snapshot_prefix_sha256(snapshot, ack_cursor) != ack_prefix:
-        raise ShipperError(
-            "audit log prefix changed below the saved cursor; refusing to replay because "
-            "complete hourly totals could be overwritten"
-        )
-
-    if inflight_cursor is not None:
-        if inflight_prefix is None or inflight_cursor > len(snapshot):
-            raise ShipperError(
-                "audit log no longer contains the in-flight extent; "
-                "refusing to aggregate a replacement"
-            )
-        if _snapshot_prefix_sha256(snapshot, inflight_cursor) != inflight_prefix:
-            raise ShipperError(
-                "audit log prefix changed within the in-flight extent; "
-                "refusing to aggregate a replacement"
-            )
-
-    last_newline = snapshot.rfind(b"\n")
-    next_cursor = last_newline + 1 if last_newline >= 0 else 0
-    if next_cursor < ack_cursor:
-        raise ShipperError(
-            "audit log no longer contains the acknowledged extent; "
-            "refusing to aggregate a replacement"
-        )
-    if inflight_cursor is not None and next_cursor < inflight_cursor:
-        raise ShipperError(
-            "audit log no longer contains the in-flight extent; "
-            "refusing to aggregate a replacement"
-        )
-
-    next_prefix = _snapshot_prefix_sha256(snapshot, next_cursor)
-    appended_records = _records_from_snapshot(
-        snapshot[ack_cursor:next_cursor],
-        next_cursor - ack_cursor,
-    )
-    touched_hours = {_record_hour(record) for record in appended_records}
-    if touched_hours:
-        usage_rows = aggregate_audit_records(
-            _records_from_snapshot(snapshot, next_cursor),
-            touched_hours,
-        )
-    else:
-        usage_rows = []
-
-    # The snapshot and its parsed rows are coherent. Before returning (and
-    # before run_once persists an extent or sends), confirm the path still
-    # matches that digest. Appends beyond next_cursor are permitted.
-    _verify_audit_prefix(audit_path, next_cursor, next_prefix)
-    return usage_rows, next_cursor, next_prefix
+    start = anchor if active_hour is not None and min(touched_hours) >= active_hour else 0
+    rows, first_offsets = _aggregate_audit_window(audit_path, start, extent, touched_hours)
+    # Anchor on the latest hour known so far at its earliest contribution. A
+    # multi-hour bootstrap must not anchor warm ticks to the oldest hour.
+    new_active_hour = max(first_offsets)
+    new_anchor = first_offsets[new_active_hour]
+    if active_hour is not None and active_hour > new_active_hour:
+        new_active_hour = active_hour
+        new_anchor = anchor
+    return rows, {
+        "cursor": extent,
+        "active_hour": new_active_hour,
+        "active_hour_offset": new_anchor,
+        "file_id": state["audit_file_id"],
+    }
 
 
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
@@ -617,77 +543,67 @@ def _usage_files(usage_dir: str) -> list[tuple[str, str]]:
     return files
 
 
-def _read_appended_usage(
-    path: str,
-    cursor: int,
-    interval_seconds: int,
-    observer_machine: str,
-) -> tuple[list[dict[str, Any]], int, bool]:
-    """Read complete appended usage lines and return (observations, cursor, reset)."""
-
-    try:
-        size = os.path.getsize(path)
-    except FileNotFoundError:
-        return [], cursor, False
-    reset = False
-    if cursor > size:
-        cursor = 0
-        reset = True
-        size = os.path.getsize(path)
-
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(cursor)
-            appended = handle.read()
-    except FileNotFoundError:
-        return [], cursor, reset
-
-    last_newline = appended.rfind(b"\n")
-    if last_newline < 0:
-        return [], cursor, reset
-    complete = appended[: last_newline + 1]
-    observations = []
-    for raw in complete.split(b"\n"):
-        if not raw:
-            continue
-        observation = _parse_usage_line(raw, interval_seconds, observer_machine)
-        if observation is not None:
-            observations.append(observation)
-    return observations, cursor + len(complete), reset
-
-
-def _read_usage_backlog(
+def _prepare_usage_files(
     usage_dir: str,
     cursors: Dict[str, int],
+    files: Dict[str, list[int]],
+) -> list[tuple[str, str, int, int]]:
+    """Reset rotated daily files and capture their complete-line extents.
+
+    Returns ``(day, path, cursor, extent)`` for every file with unread complete
+    lines. Rotated or truncated files are warned about and restarted from zero.
+    """
+
+    prepared: list[tuple[str, str, int, int]] = []
+    for day, path in _usage_files(usage_dir):
+        cursor = cursors.get(day, 0)
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            continue
+        identity = [info.st_dev, info.st_ino]
+        previous = files.get(day)
+        restarted = cursor > info.st_size or (
+            previous is not None and list(previous) != identity
+        )
+        if restarted:
+            _warn(
+                "usage file %s.jsonl was rotated or truncated; restarting from byte 0" % day
+            )
+            cursor = 0
+            cursors[day] = 0
+        extent, identity, shrank = inspect_source(path, cursor, None)
+        if shrank:
+            _warn(
+                "usage file %s.jsonl was rotated or truncated; restarting from byte 0" % day
+            )
+            cursor = 0
+            cursors[day] = 0
+            extent, identity, _ = inspect_source(path, 0, None)
+        files[day] = identity
+        if extent > cursor:
+            prepared.append((day, path, cursor, extent))
+    return prepared
+
+
+def _iter_quota_items(
+    prepared: Iterable[tuple[str, str, int, int]],
     interval_seconds: int,
     observer_machine: str,
-) -> tuple[list[dict[str, Any]], Dict[str, int], list[str]]:
-    """Read every daily file from its own cursor, covering an offline backlog."""
+) -> Iterable[tuple[Optional[dict[str, Any]], str, int]]:
+    """Stream usage lines as ``(observation_or_none, day, line_end)``.
 
-    observations: list[dict[str, Any]] = []
-    seen_sample_ids: set[str] = set()
-    updated = dict(cursors)
-    reset_days: list[str] = []
-    for day, path in _usage_files(usage_dir):
-        records, next_cursor, reset = _read_appended_usage(
-            path,
-            cursors.get(day, 0),
-            interval_seconds,
-            observer_machine,
-        )
-        updated[day] = next_cursor
-        if reset:
-            reset_days.append(day)
-        for record in records:
-            sample_id = record["sample_id"]
-            if sample_id in seen_sample_ids:
-                # Equivalent repeated poll lines resolve to the first immutable
-                # observation; cursors still advance past every consumed line.
-                continue
-            seen_sample_ids.add(sample_id)
-            observations.append(record)
-    observations.sort(key=lambda item: (item["sampled_at"], item["sample_id"]))
-    return observations, updated, reset_days
+    A ``None`` observation still consumed a complete line (malformed or
+    unknown); its cursor advance belongs to the batch that is being filled.
+    """
+
+    for day, path, cursor, extent in prepared:
+        for _line_start, line_end, raw in iter_log_lines(path, cursor, extent):
+            yield (
+                _parse_usage_line(raw, interval_seconds, observer_machine),
+                day,
+                line_end,
+            )
 
 
 # -- durable state & transport ----------------------------------------------
@@ -710,6 +626,48 @@ def _validate_cursors(value: Any, label: str) -> Dict[str, int]:
     return validated
 
 
+def _normalize_identity(value: Any) -> Optional[list[int]]:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(isinstance(part, bool) or not isinstance(part, int) for part in value)
+    ):
+        raise ShipperError("invalid file identity in shipper state")
+    return [int(value[0]), int(value[1])]
+
+
+def _normalize_files(value: Any) -> Dict[str, list[int]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ShipperError("invalid usage file identities in shipper state")
+    normalized: Dict[str, list[int]] = {}
+    for day, identity in value.items():
+        if not isinstance(day, str) or not day:
+            raise ShipperError("invalid usage file identities in shipper state")
+        normalized_identity = _normalize_identity(identity)
+        if normalized_identity is None:
+            raise ShipperError("invalid usage file identities in shipper state")
+        normalized[day] = normalized_identity
+    return normalized
+
+
+def _normalize_anchor(active: Any, offset: Any, cursor: int) -> tuple[Optional[str], int]:
+    if active is not None and not isinstance(active, str):
+        raise ShipperError("invalid audit active hour in shipper state")
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or offset < 0
+        or offset > cursor
+        or (active is None and offset != 0)
+    ):
+        raise ShipperError("invalid audit active hour anchor in shipper state")
+    return active, offset
+
+
 def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
     raw = load_json_file(state_path)
     if raw is None:
@@ -718,13 +676,14 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "producer_id": producer_id,
             "batch_seq": 0,
             "audit_cursor": 0,
-            "audit_prefix_sha256": EMPTY_SHA256,
-            "audit_inflight_extent_cursor": None,
-            "audit_inflight_extent_sha256": None,
+            "audit_active_hour": None,
+            "audit_active_hour_offset": 0,
+            "audit_file_id": None,
             "usage_cursors": {},
+            "usage_files": {},
             "pending": None,
         }
-    if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
+    if not isinstance(raw, dict) or raw.get("version") not in (3, STATE_VERSION):
         raise ShipperError("unsupported shipper state version")
     if raw.get("producer_id") != producer_id:
         raise ShipperError(
@@ -733,28 +692,25 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         )
     batch_seq = raw.get("batch_seq")
     audit_cursor = raw.get("audit_cursor")
-    audit_prefix = raw.get("audit_prefix_sha256")
     if isinstance(batch_seq, bool) or not isinstance(batch_seq, int) or batch_seq < 0:
         raise ShipperError("invalid batch_seq in shipper state")
     if isinstance(audit_cursor, bool) or not isinstance(audit_cursor, int) or audit_cursor < 0:
         raise ShipperError("invalid audit_cursor in shipper state")
-    if not _is_sha256_hex(audit_prefix):
-        raise ShipperError("invalid audit_prefix_sha256 in shipper state")
-    if audit_cursor == 0 and audit_prefix != EMPTY_SHA256:
-        raise ShipperError("audit_prefix_sha256 does not match the empty cursor")
-    inflight_cursor = raw.get("audit_inflight_extent_cursor")
-    inflight_hash = raw.get("audit_inflight_extent_sha256")
-    if (inflight_cursor is None) != (inflight_hash is None):
-        raise ShipperError("invalid audit in-flight extent in shipper state")
-    if inflight_cursor is not None:
-        if (
-            isinstance(inflight_cursor, bool)
-            or not isinstance(inflight_cursor, int)
-            or inflight_cursor < audit_cursor
-            or not _is_sha256_hex(inflight_hash)
-        ):
-            raise ShipperError("invalid audit in-flight extent in shipper state")
-    _validate_cursors(raw.get("usage_cursors"), "usage_cursors")
+
+    # v3 kept full-prefix hashes and an in-flight extent. They are obsolete;
+    # the cursor, active anchor, and durable outbox remain authoritative.
+    raw["version"] = STATE_VERSION
+    raw.pop("audit_prefix_sha256", None)
+    raw.pop("audit_inflight_extent_cursor", None)
+    raw.pop("audit_inflight_extent_sha256", None)
+    active, offset = _normalize_anchor(
+        raw.get("audit_active_hour"), raw.get("audit_active_hour_offset", 0), audit_cursor
+    )
+    raw["audit_active_hour"] = active
+    raw["audit_active_hour_offset"] = offset
+    raw["audit_file_id"] = _normalize_identity(raw.get("audit_file_id"))
+    raw["usage_cursors"] = _validate_cursors(raw.get("usage_cursors"), "usage_cursors")
+    raw["usage_files"] = _normalize_files(raw.get("usage_files"))
 
     pending = raw.get("pending")
     if pending is not None:
@@ -762,9 +718,6 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             raise ShipperError("invalid pending outbox in shipper state")
         pending_seq = pending.get("batch_seq")
         pending_audit_cursor = pending.get("audit_cursor_after")
-        pending_audit_prefix = pending.get("audit_prefix_sha256_after")
-        pending_extent_cursor = pending.get("audit_extent_cursor")
-        pending_extent_prefix = pending.get("audit_extent_sha256")
         payload = pending.get("payload")
         if (
             isinstance(pending_seq, bool)
@@ -772,29 +725,35 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             or pending_seq <= batch_seq
             or isinstance(pending_audit_cursor, bool)
             or not isinstance(pending_audit_cursor, int)
-            or pending_audit_cursor < 0
-            or not _is_sha256_hex(pending_audit_prefix)
-            or isinstance(pending_extent_cursor, bool)
-            or not isinstance(pending_extent_cursor, int)
-            or pending_extent_cursor < pending_audit_cursor
-            or not _is_sha256_hex(pending_extent_prefix)
+            or pending_audit_cursor < audit_cursor
             or not isinstance(payload, dict)
-            or (inflight_cursor is not None and pending_extent_cursor < inflight_cursor)
         ):
             raise ShipperError("invalid pending outbox in shipper state")
-        _validate_cursors(pending.get("usage_cursors_after"), "usage_cursors_after")
         if payload.get("batch_seq") != pending_seq:
             raise ShipperError("pending outbox batch_seq does not match its payload")
+        for obsolete in (
+            "audit_prefix_sha256_after",
+            "audit_extent_cursor",
+            "audit_extent_sha256",
+        ):
+            pending.pop(obsolete, None)
+        pending_active, pending_offset = _normalize_anchor(
+            pending.get("audit_active_hour"),
+            pending.get("audit_active_hour_offset", 0),
+            pending_audit_cursor,
+        )
+        pending["audit_active_hour"] = pending_active
+        pending["audit_active_hour_offset"] = pending_offset
+        pending["audit_file_id"] = _normalize_identity(pending.get("audit_file_id"))
+        pending["usage_cursors_after"] = _validate_cursors(
+            pending.get("usage_cursors_after"), "usage_cursors_after"
+        )
+        pending["usage_files_after"] = _normalize_files(pending.get("usage_files_after"))
     return raw
 
 
 def _save_state(state_path: str, state: Dict[str, Any]) -> None:
     atomic_write_json(state_path, state)
-
-
-def _clear_audit_inflight(state: Dict[str, Any]) -> None:
-    state["audit_inflight_extent_cursor"] = None
-    state["audit_inflight_extent_sha256"] = None
 
 
 def _envelope(
@@ -811,41 +770,23 @@ def _envelope(
     }
 
 
-def _split_payload(
-    usage_rows: list[dict[str, Any]],
-    observations: list[dict[str, Any]],
-) -> list[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
-    """Split work into contract-sized chunks counting observation windows."""
-
-    chunks: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
-    usage_index = 0
-    observation_index = 0
-    while usage_index < len(usage_rows) or observation_index < len(observations):
-        budget = MAX_PAYLOAD_ROWS
-        usage_chunk: list[dict[str, Any]] = []
-        observation_chunk: list[dict[str, Any]] = []
-        while usage_index < len(usage_rows) and budget >= 1:
-            usage_chunk.append(usage_rows[usage_index])
-            usage_index += 1
-            budget -= 1
-        while observation_index < len(observations):
-            observation = observations[observation_index]
-            cost = 1 + len(observation.get("windows") or [])
-            if cost > budget:
-                break
-            observation_chunk.append(observation)
-            observation_index += 1
-            budget -= cost
-        chunks.append((usage_chunk, observation_chunk))
-    return chunks or [([], [])]
-
-
 def _send_once(endpoint: str, token: str, payload: Dict[str, Any], timeout: float) -> None:
     post_envelope(endpoint, token, payload, timeout_seconds=timeout)
 
 
+def _apply_pending(state: Dict[str, Any]) -> None:
+    pending = state["pending"]
+    state["batch_seq"] = pending["batch_seq"]
+    state["audit_cursor"] = pending["audit_cursor_after"]
+    state["audit_active_hour"] = pending.get("audit_active_hour")
+    state["audit_active_hour_offset"] = pending.get("audit_active_hour_offset", 0)
+    state["audit_file_id"] = pending.get("audit_file_id")
+    state["usage_cursors"] = dict(pending["usage_cursors_after"])
+    state["usage_files"] = dict(pending.get("usage_files_after") or {})
+    state["pending"] = None
+
+
 def _send_pending(
-    audit_path: str,
     endpoint: str,
     token: str,
     state_path: str,
@@ -853,15 +794,10 @@ def _send_pending(
     timeout: float,
     quiet: bool,
 ) -> bool:
+    """Replay the persisted envelope verbatim before the sources are read."""
+
     pending = state["pending"]
     sequence = pending["batch_seq"]
-    # The payload was built from the full consumed audit extent. It must still
-    # be the same source before a retry can be sent.
-    _verify_audit_prefix(
-        audit_path,
-        pending["audit_extent_cursor"],
-        pending["audit_extent_sha256"],
-    )
     try:
         _send_once(endpoint, token, pending["payload"], timeout)
     except HTTPPushError as exc:
@@ -870,25 +806,7 @@ def _send_pending(
             file=sys.stderr,
         )
         return False
-    # Do not advance to an extent that changed after the request was sent.
-    _verify_audit_prefix(
-        audit_path,
-        pending["audit_extent_cursor"],
-        pending["audit_extent_sha256"],
-    )
-    state["batch_seq"] = sequence
-    state["audit_cursor"] = pending["audit_cursor_after"]
-    state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
-    if (
-        state["audit_cursor"] == pending["audit_extent_cursor"]
-        and state["audit_prefix_sha256"] == pending["audit_extent_sha256"]
-    ):
-        _clear_audit_inflight(state)
-    else:
-        state["audit_inflight_extent_cursor"] = pending["audit_extent_cursor"]
-        state["audit_inflight_extent_sha256"] = pending["audit_extent_sha256"]
-    state["usage_cursors"] = dict(pending["usage_cursors_after"])
-    state["pending"] = None
+    _apply_pending(state)
     _save_state(state_path, state)
     if not quiet:
         payload = pending["payload"]
@@ -904,83 +822,203 @@ def _send_pending(
     return True
 
 
-def _send_rows(
-    audit_path: str,
-    usage_rows: list[dict[str, Any]],
-    observations: list[dict[str, Any]],
-    audit_extent_cursor: int,
-    audit_extent_sha256: str,
-    usage_cursors_after: Dict[str, int],
+def _send_batch(
     endpoint: str,
     token: str,
     state_path: str,
     state: Dict[str, Any],
+    usage_rows: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    audit_after: Optional[Dict[str, Any]],
+    usage_cursors_after: Dict[str, int],
+    usage_files_after: Dict[str, list[int]],
     timeout: float,
     quiet: bool,
 ) -> bool:
-    batches = _split_payload(usage_rows, observations)
-    for index, (usage_chunk, observation_chunk) in enumerate(batches):
-        sequence = state["batch_seq"] + 1
-        if sequence > MAX_BATCH_SEQ:
-            raise ShipperError("batch_seq exceeded the supported integer range")
-        is_last = index == len(batches) - 1
-        pending = {
-            "batch_seq": sequence,
-            "payload": _envelope(sequence, usage_chunk, observation_chunk),
-            "audit_cursor_after": (
-                audit_extent_cursor if is_last else state["audit_cursor"]
-            ),
-            "audit_prefix_sha256_after": (
-                audit_extent_sha256 if is_last else state["audit_prefix_sha256"]
-            ),
-            # Every chunk was derived from the same full consumed extent. Persist
-            # and verify that extent even when this chunk does not advance the
-            # cursor yet, so a lost ACK cannot retry against a changed source.
-            "audit_extent_cursor": audit_extent_cursor,
-            "audit_extent_sha256": audit_extent_sha256,
-            "usage_cursors_after": (
-                dict(usage_cursors_after) if is_last else dict(state["usage_cursors"])
-            ),
-            "created_at": utc_now_iso(),
-        }
-        state["pending"] = pending
-        # Persist the exact in-flight batch before the first network attempt.
-        _save_state(state_path, state)
+    sequence = state["batch_seq"] + 1
+    if sequence > MAX_BATCH_SEQ:
+        raise ShipperError("batch_seq exceeded the supported integer range")
+    pending = {
+        "batch_seq": sequence,
+        "payload": _envelope(sequence, usage_rows, observations),
+        "audit_cursor_after": (
+            audit_after["cursor"] if audit_after is not None else state["audit_cursor"]
+        ),
+        "audit_active_hour": (
+            audit_after["active_hour"]
+            if audit_after is not None
+            else state["audit_active_hour"]
+        ),
+        "audit_active_hour_offset": (
+            audit_after["active_hour_offset"]
+            if audit_after is not None
+            else state["audit_active_hour_offset"]
+        ),
+        "audit_file_id": (
+            audit_after["file_id"] if audit_after is not None else state["audit_file_id"]
+        ),
+        "usage_cursors_after": dict(usage_cursors_after),
+        "usage_files_after": dict(usage_files_after),
+        "created_at": utc_now_iso(),
+    }
+    state["pending"] = pending
+    # Persist the exact in-flight batch before the first network attempt.
+    _save_state(state_path, state)
 
-        _verify_audit_prefix(audit_path, audit_extent_cursor, audit_extent_sha256)
-        try:
-            _send_once(endpoint, token, pending["payload"], timeout)
-        except HTTPPushError as exc:
+    try:
+        _send_once(endpoint, token, pending["payload"], timeout)
+    except HTTPPushError as exc:
+        print(
+            "orihsus-shipper: batch_seq %d not acknowledged: %s" % (sequence, exc),
+            file=sys.stderr,
+        )
+        return False
+    _apply_pending(state)
+    _save_state(state_path, state)
+    if not quiet:
+        if usage_rows or observations:
             print(
-                "orihsus-shipper: batch_seq %d not acknowledged: %s" % (sequence, exc),
-                file=sys.stderr,
+                "orihsus-shipper: sent %d usage bucket(s) and %d quota observation(s) as batch_seq %d"
+                % (len(usage_rows), len(observations), sequence)
             )
-            return False
-        _verify_audit_prefix(audit_path, audit_extent_cursor, audit_extent_sha256)
-
-        state["batch_seq"] = sequence
-        state["audit_cursor"] = pending["audit_cursor_after"]
-        state["audit_prefix_sha256"] = pending["audit_prefix_sha256_after"]
-        if (
-            state["audit_cursor"] == audit_extent_cursor
-            and state["audit_prefix_sha256"] == audit_extent_sha256
-        ):
-            _clear_audit_inflight(state)
         else:
-            state["audit_inflight_extent_cursor"] = audit_extent_cursor
-            state["audit_inflight_extent_sha256"] = audit_extent_sha256
-        state["usage_cursors"] = dict(pending["usage_cursors_after"])
-        state["pending"] = None
-        _save_state(state_path, state)
-        if not quiet:
-            if usage_chunk or observation_chunk:
-                print(
-                    "orihsus-shipper: sent %d usage bucket(s) and %d quota observation(s) as batch_seq %d"
-                    % (len(usage_chunk), len(observation_chunk), sequence)
-                )
-            else:
-                print("orihsus-shipper: sent idle heartbeat as batch_seq %d" % sequence)
+            print("orihsus-shipper: sent idle heartbeat as batch_seq %d" % sequence)
     return True
+
+
+def _ship_work(
+    endpoint: str,
+    token: str,
+    state_path: str,
+    state: Dict[str, Any],
+    audit_rows: list[dict[str, Any]],
+    audit_after: Optional[Dict[str, Any]],
+    quota_items: Iterable[tuple[Optional[dict[str, Any]], str, int]],
+    cursors: Dict[str, int],
+    files: Dict[str, list[int]],
+    timeout: float,
+    quiet: bool,
+) -> tuple[bool, bool]:
+    """Pack audit rows and streamed quota observations into contract batches.
+
+    Only a batch's exact payload and its cursor advances are persisted before
+    the request, so an ACK (or a duplicate replay) moves every offset safely.
+    """
+
+    audit_index = 0
+    usage_chunk: list[dict[str, Any]] = []
+    observation_chunk: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    used = 0
+    cursor_updates: Dict[str, int] = {}
+    audit_committed = False
+    sent_any = False
+
+    def flush() -> bool:
+        nonlocal audit_index, usage_chunk, observation_chunk, seen, used
+        nonlocal cursor_updates, cursors, audit_committed, sent_any
+        target = (
+            audit_after
+            if audit_after is not None and not audit_committed and audit_index >= len(audit_rows)
+            else None
+        )
+        merged_cursors = dict(cursors)
+        merged_cursors.update(cursor_updates)
+        rows = list(usage_chunk)
+        observations = list(observation_chunk)
+
+        if not rows and not observations:
+            # Only complete non-canonical or duplicate lines were consumed.
+            # Nothing needs delivery, so advancing local offsets is safe.
+            changed = (
+                target is not None
+                or merged_cursors != state["usage_cursors"]
+                or files != state["usage_files"]
+            )
+            cursors = merged_cursors
+            if changed:
+                state["usage_cursors"] = dict(merged_cursors)
+                state["usage_files"] = dict(files)
+                if target is not None:
+                    state["audit_cursor"] = target["cursor"]
+                    state["audit_active_hour"] = target["active_hour"]
+                    state["audit_active_hour_offset"] = target["active_hour_offset"]
+                    state["audit_file_id"] = target["file_id"]
+                    audit_committed = True
+                _save_state(state_path, state)
+            usage_chunk = []
+            observation_chunk = []
+            seen = set()
+            used = 0
+            cursor_updates = {}
+            return True
+
+        if not _send_batch(
+            endpoint,
+            token,
+            state_path,
+            state,
+            rows,
+            observations,
+            target,
+            merged_cursors,
+            files,
+            timeout,
+            quiet,
+        ):
+            return False
+        sent_any = True
+        if target is not None:
+            audit_committed = True
+        cursors = merged_cursors
+        usage_chunk = []
+        observation_chunk = []
+        seen = set()
+        used = 0
+        cursor_updates = {}
+        return True
+
+    quota_iter = iter(quota_items)
+    pending_item: Optional[tuple[Optional[dict[str, Any]], str, int]] = None
+    quota_done = False
+    while True:
+        if audit_index < len(audit_rows) and used < MAX_PAYLOAD_ROWS:
+            usage_chunk.append(audit_rows[audit_index])
+            audit_index += 1
+            used += 1
+            continue
+        if pending_item is None and not quota_done:
+            try:
+                pending_item = next(quota_iter)
+            except StopIteration:
+                quota_done = True
+        if pending_item is None:
+            if audit_index < len(audit_rows):
+                # The quota stream is exhausted but audit rows still need room.
+                if not flush():
+                    return False, sent_any
+                continue
+            break
+        observation, day, line_end = pending_item
+        if observation is None or observation["sample_id"] in seen:
+            # Consumed but not deliverable; its offset belongs to this batch.
+            cursor_updates[day] = line_end
+            pending_item = None
+            continue
+        cost = 1 + len(observation.get("windows") or [])
+        if used + cost > MAX_PAYLOAD_ROWS:
+            if not flush():
+                return False, sent_any
+            continue
+        observation_chunk.append(observation)
+        seen.add(observation["sample_id"])
+        used += cost
+        cursor_updates[day] = line_end
+        pending_item = None
+
+    if not flush():
+        return False, sent_any
+    return True, sent_any
 
 
 def run_once(
@@ -1001,70 +1039,59 @@ def run_once(
 
     pending_acked = False
     if state["pending"] is not None:
-        if not _send_pending(audit_path, endpoint, token, state_path, state, timeout, quiet):
+        if not _send_pending(endpoint, token, state_path, state, timeout, quiet):
             return False
         pending_acked = True
 
-    inflight_cursor = state["audit_inflight_extent_cursor"]
-    usage_rows, next_audit_cursor, next_audit_prefix = _capture_audit_extent(
-        audit_path,
-        state["audit_cursor"],
-        state["audit_prefix_sha256"],
-        inflight_cursor,
-        state["audit_inflight_extent_sha256"],
+    extent, identity, restarted = inspect_source(
+        audit_path, state["audit_cursor"], state["audit_file_id"]
     )
-    if next_audit_cursor != state["audit_cursor"] or inflight_cursor is not None:
-        # Persist the full extent before sending so a crash after a partial
-        # multi-chunk ACK still protects every already-committed batch.
-        state["audit_inflight_extent_cursor"] = next_audit_cursor
-        state["audit_inflight_extent_sha256"] = next_audit_prefix
-        _save_state(state_path, state)
+    if restarted:
+        _warn("audit log was rotated or truncated; restarting from byte 0")
+        state["audit_cursor"] = 0
+        state["audit_active_hour"] = None
+        state["audit_active_hour_offset"] = 0
+        extent, identity, _ = inspect_source(audit_path, 0, identity)
+    state["audit_file_id"] = identity
 
-    observations, next_usage_cursors, reset_days = _read_usage_backlog(
-        usage_dir,
-        state["usage_cursors"],
-        interval_seconds,
-        observer_machine,
+    usage_rows, audit_after = _capture_audit_work(audit_path, state, extent)
+
+    cursors = dict(state["usage_cursors"])
+    files = dict(state["usage_files"])
+    prepared = _prepare_usage_files(usage_dir, cursors, files)
+    ok, sent_any = _ship_work(
+        endpoint,
+        token,
+        state_path,
+        state,
+        usage_rows,
+        audit_after,
+        _iter_quota_items(prepared, interval_seconds, observer_machine),
+        cursors,
+        files,
+        timeout,
+        quiet,
     )
-    for day in reset_days:
-        print(
-            "orihsus-shipper: usage file %s.jsonl shrank below the saved cursor; replaying it"
-            % day,
-            file=sys.stderr,
-        )
-
-    if usage_rows or observations:
-        return _send_rows(
-            audit_path,
-            usage_rows,
-            observations,
-            next_audit_cursor,
-            next_audit_prefix,
-            next_usage_cursors,
-            endpoint,
-            token,
-            state_path,
-            state,
-            timeout,
-            quiet,
-        )
+    if not ok:
+        return False
     # An ACKed pending batch already refreshed producer liveness for this run.
-    if heartbeat and not pending_acked:
-        return _send_rows(
-            audit_path,
-            [],
-            [],
-            next_audit_cursor,
-            next_audit_prefix,
-            next_usage_cursors,
-            endpoint,
-            token,
-            state_path,
-            state,
-            timeout,
-            quiet,
-        )
-    return True
+    if sent_any or pending_acked or not heartbeat:
+        return True
+    # Use the offsets _ship_work may have advanced locally (for consumed
+    # non-canonical or duplicate lines) instead of the pre-run copies.
+    return _send_batch(
+        endpoint,
+        token,
+        state_path,
+        state,
+        [],
+        [],
+        None,
+        dict(state["usage_cursors"]),
+        dict(state["usage_files"]),
+        timeout,
+        quiet,
+    )
 
 
 # -- command line -----------------------------------------------------------
