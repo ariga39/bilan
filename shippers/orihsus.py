@@ -63,8 +63,8 @@ identical ``batch_seq``; only an exact HTTP 200 ACK advances the cursors.
 Offline backlogs across several daily files are consumed in bounded batches
 because every file has its own durable cursor.
 
-Streaming and the active-hour anchor
-------------------------------------
+Streaming, rotations and the active-hour anchor
+-----------------------------------------------
 Both logs are streamed in bounded chunks, so peak memory follows the number of
 distinct usage buckets or the payload size rather than the number of historical
 lines. The audit state remembers ``audit_active_hour`` and its earliest byte
@@ -72,11 +72,27 @@ offset; append-only ticks rebuild only the touched hours from that anchor, while
 an older late record falls back to an exact stream from byte 0. Audit and quota
 cursors are bound to the file generation ``(st_dev, st_ino)``; a rotation or
 truncation is logged and restarted instead of locking the shipper up.
+
+``orihsus`` rotates ``audit.jsonl`` through logrotate, so the newest generation
+is ``audit.jsonl.1`` (often plain) and older ones are ``audit.jsonl.N.gz``. On
+the first archive-aware run (a new install or an upgraded pre-rotation state)
+the shipper scans the active log and every retained rotation, combining the
+records of each UTC hour into one absolute snapshot. Afterwards, ordinary ticks
+still read only the active tail; a rotation triggers a bounded catch-up scan
+from the last published hour. If a UTC hour spans the newest archive and the
+active log, the archived contribution is kept as a small carry so later active
+appends continue to publish the complete hour. When logrotate expires the
+oldest archive, the prefix hour of the new oldest file may have lost records
+that were already published; that hour is frozen and never replaced by its
+retained suffix. Completed generation fingerprints and the carry live in the
+same durable state/outbox as the cursors, so pending batches and repeats remain
+byte-identical and idempotent.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -359,6 +375,313 @@ def _aggregate_audit_window(
     return _rows_from_audit_groups(groups), first_offsets
 
 
+# -- retained logrotate generations -----------------------------------------
+
+
+def _audit_archive_entries(audit_path: str) -> list[tuple[int, str, str, bool]]:
+    """Return retained ``audit.jsonl.N[.gz]`` files, oldest generation first.
+
+    logrotate keeps the most recent generation as ``.1`` (plain when
+    ``delaycompress`` is enabled) and compresses older generations to
+    ``.N.gz``. The number is the generation distance from the active log, so
+    the highest number is the oldest retained file.
+    """
+
+    directory = os.path.dirname(os.path.abspath(audit_path))
+    base = os.path.basename(audit_path)
+    pattern = re.compile(r"^" + re.escape(base) + r"\.(\d+)(\.gz)?$")
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    by_number: Dict[int, tuple[int, str, str, bool]] = {}
+    for name in names:
+        match = pattern.match(name)
+        if match is None:
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        number = int(match.group(1))
+        compressed = match.group(2) is not None
+        current = by_number.get(number)
+        if current is not None:
+            # A compressed generation is the settled form; never scan both
+            # spellings of the same rotation number.
+            if current[3] and not compressed:
+                continue
+        by_number[number] = (number, path, name, compressed)
+    return [by_number[number] for number in sorted(by_number, reverse=True)]
+
+
+def _audit_archive_fingerprint(
+    entries: Iterable[tuple[int, str, str, bool]],
+) -> list[list[Any]]:
+    """Describe the retained set so a rotation is detected without reading it."""
+
+    fingerprint: list[list[Any]] = []
+    for _number, path, name, _compressed in entries:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        fingerprint.append([name, size])
+    return fingerprint
+
+
+def _iter_archive_lines(entry: tuple[int, str, str, bool]) -> Iterable[bytes]:
+    """Yield complete lines from one retained generation without unbounded reads."""
+
+    _number, path, name, compressed = entry
+    opener = gzip.open if compressed else open
+    try:
+        with opener(path, "rb") as handle:
+            for raw in handle:
+                if raw.endswith(b"\n"):
+                    yield raw
+    except (OSError, EOFError) as exc:
+        # A truncated/corrupt archive or a rotation race must not produce a
+        # partial absolute snapshot. Fail the tick before anything is ACKed.
+        raise ShipperError(
+            "audit rotation %s could not be read completely (%s); retrying next run"
+            % (name, exc.__class__.__name__)
+        ) from exc
+
+
+def _iter_archive_records(
+    entry: tuple[int, str, str, bool],
+) -> Iterable[dict[str, Any]]:
+    for raw in _iter_archive_lines(entry):
+        record = _canonical_audit_record(raw)
+        if record is not None:
+            yield record
+
+
+def _archive_prefix(
+    entry: tuple[int, str, str, bool],
+) -> tuple[str, Optional[datetime]]:
+    """Return a stable marker and timestamp for the oldest generation's start.
+
+    The marker detects that logrotate expired the previous oldest generation
+    (its first line disappears), which means the new oldest file may begin in
+    the middle of an hour whose earlier records are gone.
+    """
+
+    for raw in _iter_archive_lines(entry):
+        record = _canonical_audit_record(raw)
+        if record is None:
+            continue
+        digest = hashlib.sha256(raw.rstrip(b"\r\n")).hexdigest()
+        return "sha256:" + digest, parse_utc_timestamp(record["timestamp"])
+    return "empty", None
+
+
+def _merge_audit_group(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Add one accumulator or bucket row into another in place."""
+
+    target["unit_count"] += source["unit_count"]
+    target["coverage_gaps"] += source["coverage_gaps"]
+    for payload_column, _record_field, counted_column, _required in TOKEN_COLUMNS:
+        value = source[payload_column]
+        if value is not None:
+            current = target[payload_column]
+            target[payload_column] = value if current is None else current + value
+        target[counted_column] += source[counted_column]
+
+
+def _merge_audit_groups(
+    target: Dict[tuple[str, str, str], Dict[str, Any]],
+    source: Dict[tuple[str, str, str], Dict[str, Any]],
+) -> None:
+    for key, accumulator in source.items():
+        current = target.get(key)
+        if current is None:
+            target[key] = dict(accumulator)
+        else:
+            _merge_audit_group(current, accumulator)
+
+
+def _rows_for_hours(
+    groups: Dict[tuple[str, str, str], Dict[str, Any]],
+    hours: set[str],
+) -> list[dict[str, Any]]:
+    if not hours:
+        return []
+    return _rows_from_audit_groups(
+        {key: value for key, value in groups.items() if key[0] in hours}
+    )
+
+
+def _archive_rows_for_hours(
+    archives: Iterable[tuple[int, str, str, bool]],
+    hours: set[str],
+) -> list[dict[str, Any]]:
+    """Re-read retained generations for out-of-order hours only."""
+
+    if not hours:
+        return []
+    groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for entry in archives:
+        for record in _iter_archive_records(entry):
+            hour = _record_hour(record)
+            if hour in hours:
+                _accumulate_audit_record(groups, hour, record)
+    return _rows_from_audit_groups(groups)
+
+
+def _scan_retained_audit(
+    audit_path: str,
+    archives: list[tuple[int, str, str, bool]],
+    active_extent: int,
+    skip_hours: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str], int]:
+    """Combine retained generations and the active log into absolute hours.
+
+    The scan is timestamp-order independent: every retained record is included,
+    including a late record that landed in the previous active generation before
+    rotation. Returns ``(rows, carry_rows, active_hour, active_offset)``.
+    ``carry_rows`` contains the archived contribution of the hour that can still
+    receive active appends, so a later active append can be added to it.
+    """
+
+    archive_groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    active_groups: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    archive_hours: set[str] = set()
+    active_hours: set[str] = set()
+    first_offsets: Dict[str, int] = {}
+
+    for entry in archives:
+        for record in _iter_archive_records(entry):
+            hour = _record_hour(record)
+            archive_hours.add(hour)
+            if hour in skip_hours:
+                continue
+            _accumulate_audit_record(archive_groups, hour, record)
+
+    for line_start, _line_end, raw in iter_log_lines(audit_path, 0, active_extent):
+        record = _canonical_audit_record(raw)
+        if record is None:
+            continue
+        hour = _record_hour(record)
+        active_hours.add(hour)
+        first_offsets.setdefault(hour, line_start)
+        if hour in skip_hours:
+            continue
+        _accumulate_audit_record(active_groups, hour, record)
+
+    combined: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    _merge_audit_groups(combined, archive_groups)
+    _merge_audit_groups(combined, active_groups)
+
+    carry_hours = (archive_hours & active_hours) - skip_hours
+    if archive_hours:
+        # Even with an empty active log, the newest archived hour can still
+        # receive later appends while it remains the current hour.
+        carry_hours.add(max(archive_hours))
+    carry_rows = _rows_for_hours(archive_groups, carry_hours)
+    rows = _rows_from_audit_groups(combined)
+
+    active_hour = max(active_hours) if active_hours else None
+    active_offset = first_offsets[active_hour] if active_hour is not None else 0
+    return rows, carry_rows, active_hour, active_offset
+
+
+def _merge_extra_rows(
+    rows: list[dict[str, Any]],
+    extra_rows: Iterable[dict[str, Any]],
+    hours: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
+    """Add extra absolute-row contributions into matching rows by group."""
+
+    merged: Dict[tuple[str, str, str], Dict[str, Any]] = {
+        (row["bucket_start"], row["actor_id"], row["model"]): dict(row) for row in rows
+    }
+    for extra in extra_rows:
+        if hours is not None and extra["bucket_start"] not in hours:
+            continue
+        key = (extra["bucket_start"], extra["actor_id"], extra["model"])
+        current = merged.get(key)
+        if current is None:
+            merged[key] = dict(extra)
+        else:
+            _merge_audit_group(current, extra)
+    return [merged[key] for key in sorted(merged)]
+
+
+def _merge_carry_rows(
+    rows: list[dict[str, Any]],
+    carry_rows: list[dict[str, Any]],
+    hours: set[str],
+) -> list[dict[str, Any]]:
+    """Add archived contributions back into the active-derived touched hours."""
+
+    if not carry_rows:
+        return rows
+    return _merge_extra_rows(rows, carry_rows, hours)
+
+
+def _audit_checkpoint(
+    state: Dict[str, Any],
+    cursor: int,
+    active_hour: Optional[str],
+    active_hour_offset: int,
+    **overrides: Any,
+) -> Dict[str, Any]:
+    """Build the complete audit portion of a pending/committed checkpoint."""
+
+    checkpoint: Dict[str, Any] = {
+        "cursor": cursor,
+        "active_hour": active_hour,
+        "active_hour_offset": active_hour_offset,
+        "file_id": state["audit_file_id"],
+        "archives": list(state["audit_archives"]),
+        "archives_baselined": state["audit_archives_baselined"],
+        "oldest_marker": state["audit_oldest_marker"],
+        "frozen_hour": state["audit_frozen_hour"],
+        "carry": list(state["audit_carry"]),
+        "published_through": state["audit_published_through"],
+    }
+    checkpoint.update(overrides)
+    return checkpoint
+
+
+def _apply_audit_after(state: Dict[str, Any], audit_after: Dict[str, Any]) -> None:
+    """Copy a complete audit checkpoint into the live state."""
+
+    state["audit_cursor"] = audit_after["cursor"]
+    state["audit_active_hour"] = audit_after["active_hour"]
+    state["audit_active_hour_offset"] = audit_after["active_hour_offset"]
+    state["audit_file_id"] = audit_after["file_id"]
+    state["audit_archives"] = list(audit_after["archives"])
+    state["audit_archives_baselined"] = bool(audit_after["archives_baselined"])
+    state["audit_oldest_marker"] = audit_after["oldest_marker"]
+    state["audit_frozen_hour"] = audit_after["frozen_hour"]
+    state["audit_carry"] = list(audit_after["carry"])
+    state["audit_published_through"] = audit_after["published_through"]
+
+
+def _verify_scan_snapshot(
+    audit_path: str,
+    archive_fingerprint: list[list[Any]],
+    identity: Optional[list[int]],
+    extent: int,
+) -> None:
+    """Abort a reconstruction if rotation changed the files underneath it."""
+
+    current = _audit_archive_entries(audit_path)
+    if _audit_archive_fingerprint(current) != archive_fingerprint:
+        raise ShipperError(
+            "audit rotations changed while the snapshot was being built; retrying next run"
+        )
+    _current_extent, current_identity, restarted = inspect_source(
+        audit_path, extent, identity
+    )
+    if restarted or current_identity != identity:
+        raise ShipperError(
+            "audit log rotated while the snapshot was being built; retrying next run"
+        )
+
+
 def _require_audit_log(audit_path: str) -> None:
     """Refuse to run when the audit source is absent or not a regular file."""
 
@@ -376,12 +699,15 @@ def _capture_audit_work(
     audit_path: str,
     state: Dict[str, Any],
     extent: int,
+    archives: Iterable[tuple[int, str, str, bool]] = (),
 ) -> tuple[list[dict[str, Any]], Optional[Dict[str, Any]]]:
     """Aggregate the touched audit hours from the captured complete-line extent.
 
     Returns the rows and the new position to commit once those rows are ACKed
     (``None`` when no source bytes were captured). The anchor only moves to the
-    earliest byte offset that contributes to the new active hour.
+    earliest byte offset that contributes to the new active hour. An
+    out-of-order (late) hour re-reads its archived contribution so a prior
+    acknowledged absolute bucket is completed rather than replaced by a suffix.
     """
 
     cursor = state["audit_cursor"]
@@ -392,16 +718,42 @@ def _capture_audit_work(
     }
     active_hour = state["audit_active_hour"]
     anchor = state["audit_active_hour_offset"]
+    carry_rows = list(state["audit_carry"])
+    frozen_hour = state["audit_frozen_hour"]
     if not touched_hours:
-        return [], {
-            "cursor": extent,
-            "active_hour": active_hour,
-            "active_hour_offset": anchor,
-            "file_id": state["audit_file_id"],
-        }
+        return [], _audit_checkpoint(
+            state,
+            extent,
+            active_hour,
+            anchor,
+            carry=carry_rows,
+        )
 
     start = anchor if active_hour is not None and min(touched_hours) >= active_hour else 0
     rows, first_offsets = _aggregate_audit_window(audit_path, start, extent, touched_hours)
+    carry_hours = {row["bucket_start"] for row in carry_rows}
+    rows = _merge_carry_rows(rows, carry_rows, touched_hours)
+
+    # A late record can belong to any earlier hour, including an hour that only
+    # exists in a retained generation. Recover that hour independently of the
+    # current high-water mark. A frozen hour is only recoverable from carry;
+    # never republish its retained suffix.
+    late_hours = {
+        hour
+        for hour in touched_hours
+        if active_hour is not None and hour < active_hour and hour not in carry_hours
+    }
+    if frozen_hour is not None:
+        late_hours.discard(frozen_hour)
+    if late_hours:
+        rows = _merge_extra_rows(
+            rows,
+            _archive_rows_for_hours(archives, late_hours),
+            late_hours,
+        )
+    if frozen_hour is not None and frozen_hour not in carry_hours:
+        rows = [row for row in rows if row["bucket_start"] != frozen_hour]
+
     # Anchor on the latest hour known so far at its earliest contribution. A
     # multi-hour bootstrap must not anchor warm ticks to the oldest hour.
     new_active_hour = max(first_offsets)
@@ -409,12 +761,17 @@ def _capture_audit_work(
     if active_hour is not None and active_hour > new_active_hour:
         new_active_hour = active_hour
         new_anchor = anchor
-    return rows, {
-        "cursor": extent,
-        "active_hour": new_active_hour,
-        "active_hour_offset": new_anchor,
-        "file_id": state["audit_file_id"],
-    }
+    published = state["audit_published_through"]
+    if published is None or max(touched_hours) > published:
+        published = max(touched_hours)
+    return rows, _audit_checkpoint(
+        state,
+        extent,
+        new_active_hour,
+        new_anchor,
+        carry=carry_rows,
+        published_through=published,
+    )
 
 
 # -- usage/YYYY-MM-DD.jsonl -> quota observations ---------------------------
@@ -647,6 +1004,47 @@ def _normalize_files(value: Any) -> Dict[str, list[int]]:
     return normalized
 
 
+def _normalize_optional_hour(value: Any, label: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ShipperError("invalid %s in shipper state" % label)
+    return value
+
+
+def _normalize_archives(value: Any) -> list[list[Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ShipperError("invalid audit archive fingerprints in shipper state")
+    normalized: list[list[Any]] = []
+    for item in value:
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or isinstance(item[1], bool)
+            or not isinstance(item[1], int)
+            or item[1] < 0
+        ):
+            raise ShipperError("invalid audit archive fingerprints in shipper state")
+        normalized.append([item[0], item[1]])
+    return normalized
+
+
+def _normalize_carry(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ShipperError("invalid audit carry in shipper state")
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("bucket_start"), str):
+            raise ShipperError("invalid audit carry in shipper state")
+        normalized.append(dict(item))
+    return normalized
+
+
 def _normalize_anchor(active: Any, offset: Any, cursor: int) -> tuple[Optional[str], int]:
     if active is not None and not isinstance(active, str):
         raise ShipperError("invalid audit active hour in shipper state")
@@ -672,6 +1070,12 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
             "audit_active_hour": None,
             "audit_active_hour_offset": 0,
             "audit_file_id": None,
+            "audit_archives": [],
+            "audit_archives_baselined": False,
+            "audit_oldest_marker": None,
+            "audit_frozen_hour": None,
+            "audit_carry": [],
+            "audit_published_through": None,
             "usage_cursors": {},
             "usage_files": {},
             "pending": None,
@@ -702,6 +1106,19 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
     raw["audit_active_hour"] = active
     raw["audit_active_hour_offset"] = offset
     raw["audit_file_id"] = _normalize_identity(raw.get("audit_file_id"))
+    raw["audit_archives"] = _normalize_archives(raw.get("audit_archives"))
+    raw["audit_archives_baselined"] = bool(raw.get("audit_archives_baselined", False))
+    oldest_marker = raw.get("audit_oldest_marker")
+    if oldest_marker is not None and not isinstance(oldest_marker, str):
+        raise ShipperError("invalid audit oldest marker in shipper state")
+    raw["audit_oldest_marker"] = oldest_marker
+    raw["audit_frozen_hour"] = _normalize_optional_hour(
+        raw.get("audit_frozen_hour"), "audit frozen hour"
+    )
+    raw["audit_carry"] = _normalize_carry(raw.get("audit_carry"))
+    raw["audit_published_through"] = _normalize_optional_hour(
+        raw.get("audit_published_through"), "audit published-through hour"
+    )
     raw["usage_cursors"] = _validate_cursors(raw.get("usage_cursors"), "usage_cursors")
     raw["usage_files"] = _normalize_files(raw.get("usage_files"))
 
@@ -738,6 +1155,24 @@ def _load_state(state_path: str, producer_id: str) -> Dict[str, Any]:
         pending["audit_active_hour"] = pending_active
         pending["audit_active_hour_offset"] = pending_offset
         pending["audit_file_id"] = _normalize_identity(pending.get("audit_file_id"))
+        pending["audit_archives_after"] = _normalize_archives(
+            pending.get("audit_archives_after")
+        )
+        pending["audit_archives_baselined_after"] = bool(
+            pending.get("audit_archives_baselined_after", False)
+        )
+        pending_marker = pending.get("audit_oldest_marker_after")
+        if pending_marker is not None and not isinstance(pending_marker, str):
+            raise ShipperError("invalid pending audit oldest marker in shipper state")
+        pending["audit_oldest_marker_after"] = pending_marker
+        pending["audit_frozen_hour_after"] = _normalize_optional_hour(
+            pending.get("audit_frozen_hour_after"), "pending audit frozen hour"
+        )
+        pending["audit_carry_after"] = _normalize_carry(pending.get("audit_carry_after"))
+        pending["audit_published_through_after"] = _normalize_optional_hour(
+            pending.get("audit_published_through_after"),
+            "pending audit published-through hour",
+        )
         pending["usage_cursors_after"] = _validate_cursors(
             pending.get("usage_cursors_after"), "usage_cursors_after"
         )
@@ -774,6 +1209,14 @@ def _apply_pending(state: Dict[str, Any]) -> None:
     state["audit_active_hour"] = pending.get("audit_active_hour")
     state["audit_active_hour_offset"] = pending.get("audit_active_hour_offset", 0)
     state["audit_file_id"] = pending.get("audit_file_id")
+    state["audit_archives"] = list(pending.get("audit_archives_after") or [])
+    state["audit_archives_baselined"] = bool(
+        pending.get("audit_archives_baselined_after", False)
+    )
+    state["audit_oldest_marker"] = pending.get("audit_oldest_marker_after")
+    state["audit_frozen_hour"] = pending.get("audit_frozen_hour_after")
+    state["audit_carry"] = list(pending.get("audit_carry_after") or [])
+    state["audit_published_through"] = pending.get("audit_published_through_after")
     state["usage_cursors"] = dict(pending["usage_cursors_after"])
     state["usage_files"] = dict(pending.get("usage_files_after") or {})
     state["pending"] = None
@@ -849,6 +1292,32 @@ def _send_batch(
         ),
         "audit_file_id": (
             audit_after["file_id"] if audit_after is not None else state["audit_file_id"]
+        ),
+        "audit_archives_after": list(
+            audit_after["archives"] if audit_after is not None else state["audit_archives"]
+        ),
+        "audit_archives_baselined_after": (
+            audit_after["archives_baselined"]
+            if audit_after is not None
+            else state["audit_archives_baselined"]
+        ),
+        "audit_oldest_marker_after": (
+            audit_after["oldest_marker"]
+            if audit_after is not None
+            else state["audit_oldest_marker"]
+        ),
+        "audit_frozen_hour_after": (
+            audit_after["frozen_hour"]
+            if audit_after is not None
+            else state["audit_frozen_hour"]
+        ),
+        "audit_carry_after": list(
+            audit_after["carry"] if audit_after is not None else state["audit_carry"]
+        ),
+        "audit_published_through_after": (
+            audit_after["published_through"]
+            if audit_after is not None
+            else state["audit_published_through"]
         ),
         "usage_cursors_after": dict(usage_cursors_after),
         "usage_files_after": dict(usage_files_after),
@@ -933,10 +1402,7 @@ def _ship_work(
                 state["usage_cursors"] = dict(merged_cursors)
                 state["usage_files"] = dict(files)
                 if target is not None:
-                    state["audit_cursor"] = target["cursor"]
-                    state["audit_active_hour"] = target["active_hour"]
-                    state["audit_active_hour_offset"] = target["active_hour_offset"]
-                    state["audit_file_id"] = target["file_id"]
+                    _apply_audit_after(state, target)
                     audit_committed = True
                 _save_state(state_path, state)
             usage_chunk = []
@@ -1039,6 +1505,9 @@ def run_once(
     # a missing or rotated input cannot block an already-built batch.
     _require_audit_log(audit_path)
 
+    archives = _audit_archive_entries(audit_path)
+    archive_fingerprint = _audit_archive_fingerprint(archives)
+
     extent, identity, restarted = inspect_source(
         audit_path, state["audit_cursor"], state["audit_file_id"]
     )
@@ -1054,7 +1523,101 @@ def run_once(
     else:
         state["audit_file_id"] = identity
 
-    usage_rows, audit_after = _capture_audit_work(audit_path, state, extent)
+    # A new install, an upgraded pre-rotation state, and any observed rotation
+    # rebuild absolute hours from the retained generations. Ordinary ticks keep
+    # the bounded active-tail path below.
+    first_baseline = not state["audit_archives_baselined"]
+    archive_changed = archive_fingerprint != state["audit_archives"]
+    if (first_baseline and archives) or archive_changed or restarted:
+        oldest_marker = None
+        frozen_hour = state["audit_frozen_hour"]
+        prefix_hour: Optional[str] = None
+        if archives:
+            oldest_marker, first_seen = _archive_prefix(archives[0])
+            if first_seen is not None:
+                prefix_hour = utc_hour_start(first_seen)
+            expired = (
+                not first_baseline
+                and state["audit_oldest_marker"] is not None
+                and oldest_marker != state["audit_oldest_marker"]
+            )
+            if expired:
+                published = state["audit_published_through"]
+                mid_hour = first_seen is not None and (
+                    first_seen.minute or first_seen.second or first_seen.microsecond
+                )
+                if (
+                    mid_hour
+                    and published is not None
+                    and prefix_hour is not None
+                    and prefix_hour <= published
+                ):
+                    # The new oldest file starts mid-hour and that hour was
+                    # already acknowledged. Earlier records vanished with the
+                    # expired generation, so never replace the complete bucket
+                    # with the retained suffix. A never-published hour is still
+                    # imported below.
+                    frozen_hour = prefix_hour
+                else:
+                    frozen_hour = None
+            elif (
+                frozen_hour is not None
+                and prefix_hour is not None
+                and prefix_hour > frozen_hour
+            ):
+                # The previously frozen prefix has aged out of retention.
+                frozen_hour = None
+        elif archive_changed:
+            frozen_hour = None
+
+        skip_hours = {frozen_hour} if frozen_hour is not None else set()
+        usage_rows, carry, active_hour, active_offset = _scan_retained_audit(
+            audit_path,
+            archives,
+            extent,
+            skip_hours,
+        )
+        published = state["audit_published_through"]
+        observed = max((row["bucket_start"] for row in usage_rows), default=None)
+        if observed is not None and (published is None or observed > published):
+            published = observed
+        audit_after = _audit_checkpoint(
+            state,
+            extent,
+            active_hour,
+            active_offset,
+            file_id=identity,
+            archives=archive_fingerprint,
+            archives_baselined=True,
+            oldest_marker=oldest_marker,
+            frozen_hour=frozen_hour,
+            carry=carry,
+            published_through=published,
+        )
+        _verify_scan_snapshot(audit_path, archive_fingerprint, identity, extent)
+    else:
+        usage_rows, audit_after = _capture_audit_work(
+            audit_path, state, extent, archives
+        )
+        if first_baseline:
+            # No retained rotation exists; keep the incremental cursor exactly
+            # where the old state left it and just record the archive baseline.
+            if audit_after is None:
+                audit_after = _audit_checkpoint(
+                    state,
+                    extent,
+                    state["audit_active_hour"],
+                    state["audit_active_hour_offset"],
+                    archives=[],
+                    archives_baselined=True,
+                    oldest_marker=None,
+                    frozen_hour=None,
+                )
+            else:
+                audit_after["archives"] = []
+                audit_after["archives_baselined"] = True
+                audit_after["oldest_marker"] = None
+                audit_after["frozen_hour"] = None
 
     cursors = dict(state["usage_cursors"])
     files = dict(state["usage_files"])

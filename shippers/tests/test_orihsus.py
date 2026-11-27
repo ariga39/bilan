@@ -10,6 +10,7 @@ can be compared byte-for-byte. Fixtures use only synthetic ``audit.jsonl`` and
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -275,6 +276,57 @@ class OrihsusShipperTests(unittest.TestCase):
             handle.write(data)
         return os.path.getsize(self.audit_path)
 
+    def write_audit_archive(
+        self,
+        number: int,
+        records: list[dict[str, Any]],
+        *,
+        compressed: bool = False,
+    ) -> str:
+        name = "audit.jsonl.%d%s" % (number, ".gz" if compressed else "")
+        path = os.path.join(self.tempdir, name)
+        data = self._encode(records)
+        if compressed:
+            with gzip.open(path, "wb") as handle:
+                handle.write(data)
+        else:
+            with open(path, "wb") as handle:
+                handle.write(data)
+        return path
+
+    def rotate_audit(
+        self,
+        *,
+        keep: int,
+        new_active: list[dict[str, Any]],
+    ) -> None:
+        """Rotate like logrotate compress + delaycompress for a numbered set."""
+
+        existing: dict[int, str] = {}
+        for name in os.listdir(self.tempdir):
+            if not name.startswith("audit.jsonl."):
+                continue
+            suffix = name[len("audit.jsonl.") :]
+            number_text = suffix[:-3] if suffix.endswith(".gz") else suffix
+            if number_text.isdigit():
+                existing[int(number_text)] = os.path.join(self.tempdir, name)
+        for number in sorted(existing, reverse=True):
+            path = existing[number]
+            if number + 1 > keep:
+                os.remove(path)
+                continue
+            target = os.path.join(self.tempdir, "audit.jsonl.%d.gz" % (number + 1))
+            if path.endswith(".gz"):
+                os.replace(path, target)
+                continue
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            with gzip.open(target, "wb") as handle:
+                handle.write(payload)
+            os.remove(path)
+        os.replace(self.audit_path, os.path.join(self.tempdir, "audit.jsonl.1"))
+        self.write_audit(new_active)
+
     def write_usage(
         self,
         day: str,
@@ -341,6 +393,12 @@ class OrihsusShipperTests(unittest.TestCase):
                 row["model"],
             ): row
             for row in payload["usage_buckets"]
+        }
+
+    def received_buckets(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        return {
+            (row["bucket_start"], row["actor_id"], row["model"]): row
+            for row in self.ingest.snapshot_usage_rows().values()
         }
 
     def assert_ok(self, result: subprocess.CompletedProcess[str]) -> None:
@@ -1492,6 +1550,325 @@ class OrihsusShipperTests(unittest.TestCase):
         self.assertEqual(
             buckets[("2026-02-01T00:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 9
         )
+
+    # -- retained logrotate generations -----------------------------------
+
+    @staticmethod
+    def _tokens(input_tokens: int) -> dict[str, Any]:
+        return {
+            "input_tokens": input_tokens,
+            "cached_tokens": 0,
+            "uncached_tokens": input_tokens,
+            "output_tokens": 0,
+        }
+
+    def test_initial_import_combines_plain_and_compressed_rotations(self) -> None:
+        self.write_audit_archive(
+            2,
+            [
+                audit_record(
+                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+            compressed=True,
+        )
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:59:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                ),
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:55:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ]
+        )
+
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        hour8 = buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
+        hour9 = buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 12))
+
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:58:00.000Z", gateway_key="laptop-key", **self._tokens(16)
+                )
+            ],
+            append=True,
+        )
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        self.assertEqual(
+            (buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
+             buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
+            (3, 28),
+        )
+
+        # logrotate with compress + delaycompress expires .2.gz, compresses the
+        # previous .1 to .2.gz, and makes the previous active log the new .1.
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T10:05:00.000Z", gateway_key="laptop-key", **self._tokens(32)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        self.assertEqual(
+            (buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
+             buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
+            (2, 3),
+        )
+        self.assertEqual(
+            (buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
+             buckets[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
+            (3, 28),
+        )
+        self.assertEqual(
+            (buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"],
+             buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["input_tokens"]),
+            (1, 32),
+        )
+
+        # A repeat run must not replace the complete oldest hour with its
+        # retained suffix after the earlier generation expired.
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.received_buckets(), buckets)
+
+    def test_rotation_recovers_a_late_record_from_the_new_archive(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:01:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T10:03:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        self.assertEqual(
+            self.received_buckets()[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")][
+                "unit_count"
+            ],
+            1,
+        )
+
+        # A late 08:02 record lands while the shipper is offline, then the
+        # previous active generation (with that late record) becomes .1.
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:02:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ],
+            append=True,
+        )
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T11:00:00.000Z", gateway_key="laptop-key", **self._tokens(16)
+                )
+            ],
+        )
+
+        self.assert_ok(self.run_cli())
+        buckets = self.received_buckets()
+        hour8 = buckets[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+        self.assertEqual(
+            buckets[("2026-11-26T10:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 1
+        )
+        self.assertEqual(
+            buckets[("2026-11-26T11:00:00Z", "laptop-key", "deepseek-chat")]["unit_count"], 1
+        )
+
+        # A later late append lands in the new active log, whose current hour is
+        # 11. The retained archives still hold the 08 contribution, so the
+        # acknowledged bucket is completed rather than replaced by active-only
+        # records.
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:03:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+            append=True,
+        )
+        self.assert_ok(self.run_cli())
+        hour8 = self.received_buckets()[
+            ("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (3, 7))
+
+    def test_append_to_newest_archived_hour_keeps_archived_counts(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ],
+        )
+        self.assert_ok(self.run_cli())
+        self.assertEqual(
+            self.received_buckets()[("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")][
+                "unit_count"
+            ],
+            1,
+        )
+
+        # The active log was empty during the rotation scan; the next append is
+        # still in the newest archived hour and must be added to its carry.
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:20:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        hour9 = self.received_buckets()[
+            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (2, 6))
+
+    def test_never_published_prefix_hour_is_not_frozen_after_downtime(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T07:30:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        self.assertNotIn(
+            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat"), self.received_buckets()
+        )
+
+        # Long downtime: the old oldest generation expires and the new oldest
+        # starts mid-hour 09, which the receiver has never seen.
+        self.rotate_audit(keep=2, new_active=[])
+        self.rotate_audit(
+            keep=2,
+            new_active=[
+                audit_record(
+                    "2026-11-26T10:00:00.000Z", gateway_key="laptop-key", **self._tokens(8)
+                )
+            ],
+        )
+        os.remove(os.path.join(self.tempdir, "audit.jsonl.2.gz"))
+        self.write_audit_archive(
+            2,
+            [
+                audit_record(
+                    "2026-11-26T09:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+            compressed=True,
+        )
+
+        self.assert_ok(self.run_cli())
+        hour9 = self.received_buckets()[
+            ("2026-11-26T09:00:00Z", "laptop-key", "deepseek-chat")
+        ]
+        self.assertEqual((hour9["unit_count"], hour9["input_tokens"]), (1, 4))
+
+    def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
+        payload = self._encode(
+            [
+                audit_record(
+                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:30:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ]
+        )
+        corrupt = gzip.compress(payload)[:-8]
+        with open(os.path.join(self.tempdir, "audit.jsonl.2.gz"), "wb") as handle:
+            handle.write(corrupt)
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T09:30:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ],
+        )
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not be read completely", result.stderr)
+        self.assertEqual(self.ingest.snapshot_requests(), [])
+
+    def test_rotation_race_aborts_the_snapshot_before_sending(self) -> None:
+        self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:00:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                )
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:00:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                )
+            ]
+        )
+        real_scan = shipper_module._scan_retained_audit
+
+        def scan_then_rotate(*args: Any, **kwargs: Any):
+            rows = real_scan(*args, **kwargs)
+            self.write_audit_archive(
+                2,
+                [
+                    audit_record(
+                        "2026-11-26T07:00:00.000Z",
+                        gateway_key="laptop-key",
+                        **self._tokens(3),
+                    )
+                ],
+                compressed=True,
+            )
+            return rows
+
+        with mock.patch.object(
+            shipper_module, "_scan_retained_audit", side_effect=scan_then_rotate
+        ):
+            with self.assertRaises(shipper_module.ShipperError):
+                self.run_in_process()
+
+        self.assertEqual(self.ingest.snapshot_requests(), [])
 
     def test_quota_backlog_peak_memory_is_bounded_by_a_batch(self) -> None:
         start = datetime(2026, 11, 26, 0, 0, 0)
