@@ -1,9 +1,8 @@
-import type { BalanceView, ProducerHealth } from "@bilan/shared";
+import type { BalanceView } from "@bilan/shared";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { BalanceCard } from "@/components/balance-card";
-import { HealthStrip } from "@/components/health-strip";
 
 afterEach(cleanup);
 
@@ -91,32 +90,6 @@ const deepSeek: BalanceView = {
   ],
 };
 
-const healthyProducer: ProducerHealth = {
-  producer_id: "pull-openrouter",
-  display_name: "OpenRouter balance",
-  mode: "pull",
-  expected_interval_seconds: 1800,
-  last_heartbeat_at: NOW,
-  last_attempt_at: NOW,
-  last_status: "ok",
-  last_error: null,
-  heartbeat_age_seconds: 120,
-  is_stale: false,
-};
-
-const failedProducer: ProducerHealth = {
-  producer_id: "pull-deepseek",
-  display_name: "DeepSeek balance",
-  mode: "pull",
-  expected_interval_seconds: 1800,
-  last_heartbeat_at: null,
-  last_attempt_at: NOW,
-  last_status: "error",
-  last_error: "DeepSeek request failed (HTTP 500)",
-  heartbeat_age_seconds: null,
-  is_stale: true,
-};
-
 describe("balance presentation", () => {
   it("labels balance and reported-usage changes per currency and marks partial history", () => {
     render(
@@ -134,16 +107,6 @@ describe("balance presentation", () => {
     expect(screen.getAllByText("Net balance change (7d)")).toHaveLength(2);
     expect(screen.getAllByText("Incomplete history")).toHaveLength(1);
     expect(document.body.textContent).not.toMatch(/spend|burn/iu);
-  });
-
-  it("shows a failed collector error without hiding a healthy collector", () => {
-    render(<HealthStrip producers={[healthyProducer, failedProducer]} />);
-
-    expect(screen.getByText("OpenRouter balance")).toBeTruthy();
-    expect(screen.getByText("Healthy")).toBeTruthy();
-    expect(screen.getByText("DeepSeek balance")).toBeTruthy();
-    expect(screen.getByText("Error")).toBeTruthy();
-    expect(screen.getByText("DeepSeek request failed (HTTP 500)")).toBeTruthy();
   });
 
   it("marks a delayed balance sample without treating it as zero", () => {

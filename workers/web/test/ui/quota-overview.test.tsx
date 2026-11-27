@@ -185,7 +185,7 @@ describe("QuotaOverview display", () => {
     expect(screen.getByText("80%")).toBeTruthy();
   });
 
-  it("renders server-visible subjects while surfacing stale and failure warnings", () => {
+  it("renders server-visible subjects with stale, reset, limited, and anomaly warnings", () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     const visibleQuota = {
       ...overview.quotas,
@@ -193,13 +193,97 @@ describe("QuotaOverview display", () => {
     };
     render(<QuotaOverview quota={visibleQuota} />);
 
+    expect(screen.getByText("key-fp-1")).toBeTruthy();
     expect(screen.getByText("key-fp-2")).toBeTruthy();
     expect(screen.getByText("key-fp-3")).toBeTruthy();
     expect(screen.queryByText("key-fp-4")).toBeNull();
     expect(screen.queryByText("key-fp-5")).toBeNull();
     expect(screen.queryByText("key-fp-7")).toBeNull();
 
+    // Only the latest valid sample's windows are visible with exact values,
+    // countdowns, and sample ages.
+    expect(screen.getByTitle(/57\.5% remaining · 42\.5% used/u)).toBeTruthy();
+    expect(screen.getByText("in 15 min")).toBeTruthy();
+    expect(screen.getByText(/5 min ago/u)).toBeTruthy();
+    expect(screen.getAllByText("Reset passed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
+    expect(screen.getByText("Limited")).toBeTruthy();
+    expect(screen.getByText(/upstream_error/u)).toBeTruthy();
+
+    expect(screen.getByText("Gemini")).toBeTruthy();
+    expect(screen.getByText("5h")).toBeTruthy();
+    expect(screen.getByText("7d")).toBeTruthy();
+    expect(screen.getByText(/Clock anomaly/u)).toBeTruthy();
+    expect(screen.getByText(/future_clock_skew/u)).toBeTruthy();
+    expect(screen.queryByText("0%")).toBeNull();
+  });
+
+  it("keeps the last valid windows while warning about empty and failed attempts", () => {
+    const base = subject({ source: "opencode", account: "key-attempts" });
+    if (!base.latest_valid) {
+      throw new Error("fixture must have a valid observation");
+    }
+    const emptyAttempt = subject({
+      source: "opencode",
+      account: "key-empty-attempt",
+      latest_valid: {
+        ...base.latest_valid,
+        windows: [
+          {
+            ...base.latest_valid.windows[0]!,
+            bucket_id: "key-empty-attempt",
+            slot: "rolling",
+            label: null,
+            used_percent: 0,
+            remaining_percent: 100,
+            status: "ok",
+            resets_at: null,
+            reset_in_seconds: null,
+          },
+        ],
+      },
+      latest_attempt: {
+        sample_id: "empty-attempt",
+        observer_machine: "gateway-a",
+        sampled_at: "2026-11-27T11:59:00Z",
+        sample_age_seconds: 60,
+        status: "empty",
+        time_anomaly: null,
+        error_summary: null,
+      },
+    });
+    const failedOnly = subject({
+      source: "opencode",
+      account: "key-failed-only",
+      latest_valid: null,
+      latest_attempt: {
+        sample_id: "failed-only",
+        observer_machine: "gateway-a",
+        sampled_at: "2026-11-27T11:57:00Z",
+        sample_age_seconds: 180,
+        status: "error",
+        time_anomaly: null,
+        error_summary: "upstream_error",
+      },
+    });
+
+    render(<QuotaOverview quota={quota([emptyAttempt, failedOnly])} />);
+
+    expect(screen.getByText("100%")).toBeTruthy();
+    expect(screen.getByText(/Latest attempt was empty/u)).toBeTruthy();
     expect(screen.getByText(/Latest attempt failed/u)).toBeTruthy();
+    expect(screen.getByText(/upstream_error/u)).toBeTruthy();
+    expect(screen.getByText("No valid quota windows.")).toBeTruthy();
+    expect(screen.queryByText("0%")).toBeNull();
+  });
+
+  it("shows explicit empty states without inventing quota readings", () => {
+    render(<QuotaOverview quota={quota([])} />);
+
+    expect(screen.getByText("No ChatGPT Subs quota observations yet.")).toBeTruthy();
+    expect(screen.getByText("No Google AI Subs quota observations yet.")).toBeTruthy();
+    expect(screen.getByText("No active OpenCode Go keys in the last 7 days.")).toBeTruthy();
+    expect(screen.queryByText("0%")).toBeNull();
+    expect(screen.queryByText("Not reported")).toBeNull();
   });
 });
