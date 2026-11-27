@@ -631,9 +631,14 @@ class OrihsusShipperTests(unittest.TestCase):
             reasoning_tokens=None,
         )
         metadata["key_fingerprint"] = None
+        metadata_without_attempts = dict(metadata)
+        metadata_without_attempts["timestamp"] = "2026-11-26T14:06:00.000Z"
+        metadata_without_attempts["request_id"] = "req-metadata-without-attempts"
+        metadata_without_attempts.pop("attempts")
         self.write_audit(
             [
                 metadata,
+                metadata_without_attempts,
                 audit_record(
                     "2026-11-26T14:10:00.000Z",
                     gateway_key="laptop-key",

@@ -200,42 +200,16 @@ def _model(value: Any) -> str:
     return "unknown"
 
 
-def _text_is_absent(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return not value.strip()
-    return False
-
-
-def _attempts_present(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, (list, tuple, dict)):
-        return len(value) > 0
-    return True
-
-
 def _is_gateway_metadata_read(record: dict[str, Any]) -> bool:
-    """Return true only for a successful models/status metadata read.
-
-    orihsus records ``/v1/models`` and ``/v1/status`` through the rejected-
-    request path: status 200 with no model, selected key, caller key, upstream
-    attempt, outcome, or token counter. Errors, canceled streams, and any other
-    shape remain inference requests.
-    """
-
+    """Match the successful /v1/models and /v1/status audit shape."""
     return (
-        record.get("status") == 200
-        and _text_is_absent(record.get("model"))
-        and _text_is_absent(record.get("key_fingerprint"))
-        and _text_is_absent(record.get("gateway_key"))
-        and not _attempts_present(record.get("attempts"))
-        and _text_is_absent(record.get("outcome"))
-        and all(
-            record.get(field) is None
-            for _column, field, _counted, _required in TOKEN_COLUMNS
-        )
+        record["status"] == 200
+        and record.get("model", "") is None
+        and record.get("key_fingerprint", "") is None
+        and record.get("gateway_key", "") is None
+        and record.get("attempts") in (None, [])
+        and record.get("outcome") is None
+        and all(record.get(field) is None for _, field, _, _ in TOKEN_COLUMNS)
     )
 
 

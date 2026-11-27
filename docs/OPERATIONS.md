@@ -239,9 +239,10 @@ one row with three units, not double-counted data.
 
 On installations with retained rotations, a normal rotation triggers the rebuild.
 To trigger it sooner, remove `audit_archives` under the shipper's instance lock,
-release the lock, and run the shipper once. The existing retained-archive rescan rewrites the
-absolute hourly buckets and emits zero-unit tombstones for metadata-only groups.
-Leave `batch_seq`, cursors, and every other state field unchanged.
+release the lock, and run the shipper once. The existing retained-archive rescan
+rewrites the absolute hourly buckets and emits zero-unit tombstones for
+metadata-only groups. Leave `batch_seq`, cursors, and every other state field
+unchanged.
 
 ## 7. Local five-platform acceptance
 

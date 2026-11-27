@@ -267,10 +267,10 @@ B3 adds the `orihsus` shipper and two read surfaces:
 
 - OpenCode Go token usage from `audit.jsonl`, attributed to the caller
   `gateway_key` as `actor_kind = 'identity'` with
-  `accounting_basis = 'orihsus-audit-v1'`. Successful gateway metadata reads (status `200` with no model, selected key,
-  caller key, upstream attempt, outcome, or token counter) are excluded, while
-  errors, canceled streams, and unclassified records remain visible in
-  `unit_count` / `coverage_gaps`.
+  `accounting_basis = 'orihsus-audit-v1'`. Successful gateway metadata reads
+  (status `200` with no model, selected key, caller key, upstream attempt,
+  outcome, or token counter) are excluded, while errors, canceled streams, and
+  unclassified records remain visible in `unit_count` / `coverage_gaps`.
 - Per-key quota history from `usage/YYYY-MM-DD.jsonl`. Each key fingerprint is
   its own `(source, account)` subject, and only the single latest valid
   observation (`status = 'ok'` and `time_anomaly IS NULL`) supplies current
