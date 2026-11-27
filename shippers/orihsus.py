@@ -558,28 +558,21 @@ def _prepare_usage_files(
     for day, path in _usage_files(usage_dir):
         cursor = cursors.get(day, 0)
         try:
-            info = os.stat(path)
-        except FileNotFoundError:
-            continue
-        identity = [info.st_dev, info.st_ino]
-        previous = files.get(day)
-        restarted = cursor > info.st_size or (
-            previous is not None and list(previous) != identity
-        )
+            # Inspect once with the saved generation so a replacement between
+            # discovery and inspection cannot apply the old cursor to the new
+            # file. A restart already returns the aligned extent from zero.
+            extent, identity, restarted = inspect_source(path, cursor, files.get(day))
+        except ShipperError as exc:
+            # A file that vanished after discovery is still treated as absent.
+            if isinstance(exc.__cause__, FileNotFoundError):
+                continue
+            raise
         if restarted:
             _warn(
                 "usage file %s.jsonl was rotated or truncated; restarting from byte 0" % day
             )
             cursor = 0
             cursors[day] = 0
-        extent, identity, shrank = inspect_source(path, cursor, None)
-        if shrank:
-            _warn(
-                "usage file %s.jsonl was rotated or truncated; restarting from byte 0" % day
-            )
-            cursor = 0
-            cursors[day] = 0
-            extent, identity, _ = inspect_source(path, 0, None)
         files[day] = identity
         if extent > cursor:
             prepared.append((day, path, cursor, extent))

@@ -9,6 +9,8 @@ can be compared byte-for-byte. Fixtures use only synthetic ``audit.jsonl`` and
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -20,6 +22,7 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Iterator, Optional
+from unittest import mock
 
 from shippers import orihsus as shipper_module
 from shippers.tests.support import measure_peak_bytes, measure_read_bytes
@@ -1658,6 +1661,119 @@ class OrihsusShipperTests(unittest.TestCase):
         again = self.run_cli(extra=["--no-heartbeat"])
         self.assert_ok(again)
         self.assertNotIn("rotated or truncated", again.stderr)
+
+    def test_replacement_just_before_inspection_ships_replacement_prefix(self) -> None:
+        day = "2026-11-26"
+        base = datetime(2026, 11, 26, 0, 0, 0)
+
+        def records(prefix: str, count: int, noise: int) -> list[dict[str, Any]]:
+            result = []
+            for index in range(count):
+                record = usage_record(
+                    (base + timedelta(minutes=index)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    key_fingerprint="%s-%02d" % (prefix, index),
+                    rolling=window(percent=float(index)),
+                )
+                record["noise"] = "x" * noise
+                result.append(record)
+            return result
+
+        def encode(items: list[dict[str, Any]]) -> bytes:
+            return b"".join(
+                json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n"
+                for record in items
+            )
+
+        path = self.write_usage(day, records("old", 3, 1500))
+        old_size = os.path.getsize(path)
+        self.assert_ok(self.run_cli())
+        self.assertEqual(self.read_state()["usage_cursors"][day], old_size)
+
+        replacement = records("new", 5, 1000)
+        replacement_bytes = encode(replacement)
+        prefix_accounts = {record["key_fingerprint"] for record in replacement[:3]}
+        self.assertGreaterEqual(len(replacement_bytes), old_size)
+        self.assertLess(len(encode(replacement[:3])), old_size)
+
+        rotated = os.path.join(self.usage_dir, day + ".rotated.jsonl")
+        real_inspect = shipper_module.inspect_source
+        replaced = False
+
+        def replace_then_inspect(path_arg: str, cursor: int, expected: Any):
+            nonlocal replaced
+            if os.path.abspath(path_arg) == os.path.abspath(path) and not replaced:
+                replaced = True
+                with open(rotated, "wb") as handle:
+                    handle.write(replacement_bytes)
+                os.replace(rotated, path)
+            return real_inspect(path_arg, cursor, expected)
+
+        warning = io.StringIO()
+        with (
+            mock.patch.object(
+                shipper_module,
+                "inspect_source",
+                side_effect=replace_then_inspect,
+            ),
+            contextlib.redirect_stderr(warning),
+        ):
+            self.assertTrue(self.run_in_process())
+
+        self.assertTrue(replaced)
+        self.assertIn("rotated or truncated", warning.getvalue())
+        observations = self.ingest.snapshot_requests()[-1]["payload"]["quota_observations"]
+        shipped = {observation["account"] for observation in observations}
+        self.assertTrue(prefix_accounts <= shipped)
+        self.assertEqual(shipped, {record["key_fingerprint"] for record in replacement})
+        self.assertEqual(self.read_state()["usage_cursors"][day], len(replacement_bytes))
+
+    def test_usage_file_disappearing_before_inspection_is_skipped(self) -> None:
+        gone_day = "2026-11-26"
+        other_day = "2026-11-27"
+        gone_path = self.write_usage(
+            gone_day,
+            [
+                usage_record(
+                    "2026-11-26T10:00:00.000Z",
+                    key_fingerprint="fp_gone",
+                    rolling=window(percent=10.0),
+                )
+            ],
+        )
+        self.write_usage(
+            other_day,
+            [
+                usage_record(
+                    "2026-11-27T10:00:00.000Z",
+                    key_fingerprint="fp_other",
+                    rolling=window(percent=20.0),
+                )
+            ],
+        )
+
+        real_inspect = shipper_module.inspect_source
+        removed = False
+
+        def remove_then_inspect(path_arg: str, cursor: int, expected: Any):
+            nonlocal removed
+            if os.path.abspath(path_arg) == os.path.abspath(gone_path) and not removed:
+                removed = True
+                os.remove(gone_path)
+            return real_inspect(path_arg, cursor, expected)
+
+        with mock.patch.object(
+            shipper_module,
+            "inspect_source",
+            side_effect=remove_then_inspect,
+        ):
+            self.assertTrue(self.run_in_process())
+
+        self.assertTrue(removed)
+        observations = self.ingest.snapshot_requests()[-1]["payload"]["quota_observations"]
+        self.assertEqual({observation["account"] for observation in observations}, {"fp_other"})
+        state = self.read_state()
+        self.assertNotIn(gone_day, state["usage_cursors"])
+        self.assertIn(other_day, state["usage_cursors"])
 
 
 if __name__ == "__main__":
