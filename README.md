@@ -226,7 +226,7 @@ only `usage.jsonl` is not enough:
    | Collector    | Copy with the state file                                                             | State file                                                                    |
    | :----------- | :----------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
    | `debitmetre` | `usage.jsonl`                                                                        | Explicit `--state-file`, or `.bilan-debitmetre-state.json` beside the log     |
-   | `orihsus`    | `audit.jsonl` **and every `usage/YYYY-MM-DD.jsonl`**                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
+   | `orihsus`    | `audit.jsonl`, all retained `audit.jsonl.N[.gz]`, and every `usage/YYYY-MM-DD.jsonl`                                 | Explicit `--state-file`, or `.bilan-orihsus-state.json` beside `audit.jsonl`  |
    | `telemetre`  | SQLite backup API/CLI backup, or verified offline backup after stopping the database | Explicit `--state-file`, or `.bilan-telemetre-state.json` beside the database |
 
    Omitting `orihsus` daily usage files treats them as empty and drops unsent
@@ -329,7 +329,9 @@ Audit log recovery:
   already-built pending envelope is replayed first.
 - Retained `audit.jsonl.N[.gz]` generations are scanned on first use and whenever
   the archive set changes; ordinary ticks read them only for touched archived
-  hours. A corrupt or unreadable archive stops the new scan before it publishes.
+  hours. Read errors, damaged gzip streams and incomplete final lines stop the
+  scan before publication. Noncanonical records are skipped. A plain archive
+  shortened at a record boundary can still parse as a complete file.
   If part of a UTC hour has expired, rebuilding that hour can replace its previous
   total with the smaller total still on disk, including after downtime or retry.
 - If the audit file shrinks or is replaced, the shipper logs a warning and
