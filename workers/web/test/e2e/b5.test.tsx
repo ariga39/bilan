@@ -14,12 +14,13 @@ import {
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+import { JSDOM } from "jsdom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { unstable_startWorker } from "wrangler";
 
 import { BalanceCard } from "@/components/balance-card";
-import { QuotaSection } from "@/components/quota-section";
 import { UsageSection } from "@/components/usage-section";
 
 type DevWorker = Awaited<ReturnType<typeof unstable_startWorker>>;
@@ -227,31 +228,37 @@ interface UsageHistoryRecord {
   monthly?: UsageWindowRecord;
 }
 
+function utcSecond(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/u, "Z");
+}
+
 function usageHistoryRecord(
   timestamp: string,
   fingerprint: string,
   rollingPercent: number,
   includeMonthly: boolean,
 ): UsageHistoryRecord {
+  const sampled = Date.parse(timestamp);
+  const resetAt = (minutes: number) => utcSecond(new Date(sampled + minutes * 60_000));
   const record: UsageHistoryRecord = {
     timestamp,
     key_fingerprint: fingerprint,
     rolling: {
       status: "ok",
       percent: rollingPercent,
-      resetsAt: "2026-11-27T12:15:00Z",
+      resetsAt: resetAt(15),
     },
     weekly: {
       status: "ok",
       percent: 20,
-      resetsAt: "2026-12-01T00:00:00Z",
+      resetsAt: resetAt(5 * 24 * 60),
     },
   };
   if (includeMonthly) {
     record.monthly = {
       status: "ok",
       percent: 30,
-      resetsAt: "2026-12-31T00:00:00Z",
+      resetsAt: resetAt(30 * 24 * 60),
     };
   }
   return record;
@@ -303,9 +310,16 @@ function createHostFixtures(): void {
       reasoning: 2,
     }),
   ]);
-  writeJsonl(path.join(hostOrihsusDir, "usage", "2026-11-26.jsonl"), [
-    usageHistoryRecord("2026-11-26T14:30:00Z", "fp_a", 42.5, false),
-    usageHistoryRecord("2026-11-26T14:31:00Z", "fp_b", 90, true),
+  // Quota observations must stay inside the seven-day OpenCode visibility
+  // window relative to the real Worker clock, independently of the historical
+  // November audit/token fixtures used for monthly usage assertions.
+  const quotaObservedAt = new Date(Date.now() - 2 * 60 * 60_000);
+  const quotaDay = quotaObservedAt.toISOString().slice(0, 10);
+  const quotaAt = (minutesAgo: number) =>
+    utcSecond(new Date(quotaObservedAt.getTime() - minutesAgo * 60_000));
+  writeJsonl(path.join(hostOrihsusDir, "usage", `${quotaDay}.jsonl`), [
+    usageHistoryRecord(quotaAt(10), "fp_a", 42.5, false),
+    usageHistoryRecord(quotaAt(9), "fp_b", 90, true),
   ]);
 
   const fixture = path.join(repoRoot, "workers/web/test/e2e/fixtures/make-telemetre-db.py");
@@ -328,6 +342,31 @@ async function readOverview(webUrl: string): Promise<OverviewResponse> {
     throw new Error("overview response did not match the shared schema");
   }
   return parsed.data;
+}
+
+function visibleMain(html: string): HTMLElement {
+  const { document } = new JSDOM(html).window;
+  // Hydration payloads repeat the same values inside <script> elements. Remove
+  // them so assertions can only match server-rendered, user-visible markup.
+  for (const script of document.querySelectorAll("script")) {
+    script.remove();
+  }
+  const main = document.querySelector("main");
+  if (main === null) {
+    throw new Error("SSR overview page has no main element");
+  }
+  return main;
+}
+
+function quotaCard(main: HTMLElement, title: string): HTMLElement {
+  const heading = [...main.querySelectorAll<HTMLElement>('[data-slot="card-title"]')].find(
+    (element) => element.textContent?.trim() === title,
+  );
+  const card = heading?.closest<HTMLElement>('[data-slot="card"]');
+  if (card === undefined || card === null) {
+    throw new Error(`SSR overview page has no ${title} card`);
+  }
+  return card;
 }
 
 async function selectUpstreamFixture(
@@ -791,12 +830,34 @@ describe("B5 multi-host acceptance", () => {
     expect(usageHtml).not.toContain("AGY");
     expect(usageHtml).not.toContain("Antigravity");
 
-    const quotaHtml = renderToStaticMarkup(<QuotaSection quota={overview.quotas} />);
-    expect(quotaHtml).toContain("AGY");
-    expect(quotaHtml).toContain("personal");
-    expect(quotaHtml).toContain("Codex");
-    expect(quotaHtml).toContain("OpenCode Go");
-    expect(quotaHtml).toContain("fp_a");
+    // Quota cards are verified through the normal shipped SSR overview path,
+    // not a standalone render of a legacy component. Parse only visible markup
+    // inside the matching card so hydration scripts cannot satisfy assertions.
+    const overviewPage = await httpCall(
+      `${webUrl}/?view=overview&tz=${encodeURIComponent(TIMEZONE)}&month=${MONTH}`,
+    );
+    expect(overviewPage.status, overviewPage.body).toBe(200);
+    const main = visibleMain(overviewPage.body);
+    expect(main.textContent).not.toContain("Something went wrong");
+
+    const codexCardText = quotaCard(main, "ChatGPT Subs").textContent ?? "";
+    expect(codexCardText).toContain("primary");
+    expect(codexCardText).toContain("90%");
+    expect(codexCardText).toContain("secondary");
+    expect(codexCardText).toContain("100%");
+
+    const agyCardText = quotaCard(main, "Google AI Subs").textContent ?? "";
+    expect(agyCardText).toContain("Gemini");
+    expect(agyCardText).toContain("5h");
+    expect(agyCardText).toContain("42%");
+    expect(agyCardText).toContain("7d");
+    expect(agyCardText).toContain("90%");
+
+    const openCodeCardText = quotaCard(main, "OpenCode Go").textContent ?? "";
+    expect(openCodeCardText).toContain("fp_a");
+    expect(openCodeCardText).toContain("fp_b");
+    expect(openCodeCardText).toContain("58%");
+    expect(openCodeCardText).toContain("10%");
 
     const balanceHtml = renderToStaticMarkup(
       <div>
