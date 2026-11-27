@@ -220,13 +220,21 @@ stores its cursor/outbox beside its own state path, retries the identical
    source writers. Leave the old shipper disabled and the old state file
    untouched; never resume both sides.
 
-Never reset `batch_seq` to `1`, never edit the state file, and never replay a
-truncated/replaced source log. The shipper verifies a digest over the consumed
-source extent and fails closed instead of overwriting a complete hourly total.
-If state is lost, recover the recorded sequence or restore the state/outbox
-backup before writing again. The local acceptance suite exercises this exact
-copy-and-continue path for `debitmetre` and asserts one row with three units, not
-double-counted data.
+A copied JSONL input is a new file generation, so the first run on the new host
+warns and restarts from byte `0`; complete hourly buckets are replaced
+idempotently.
+
+Never reset `batch_seq` to `1` and never edit the state file. Always replay a
+pending outbox first, even if the source is currently missing. If a source is
+truncated or replaced, the shipper warns and restarts from byte `0`; it does not
+fail closed or verify a prefix digest. A shortened replacement can overwrite an
+already-published part of the active hour, and unread tails or late records can
+affect more than one hour. Same-inode `copytruncate` followed by rapid regrowth
+past the cursor may go undetected. Exact totals require quiescing writers and
+preserving complete logs/state. If state is lost, recover the recorded sequence
+or restore the state/outbox backup before writing again. The local acceptance
+suite exercises this exact copy-and-continue path for `debitmetre` and asserts
+one row with three units, not double-counted data.
 
 ## 7. Local five-platform acceptance
 
@@ -305,7 +313,7 @@ python -m unittest discover -s shippers/tests -v
 | `401 unauthorized` | Token is missing or its hash is not in `INGEST_PRODUCERS_JSON`. |
 | `403 forbidden_scope` | The producer is pushing a `(source, kind)` pair it does not own. |
 | `409 stale_batch` | Old host or stale state is still writing; restore the correct state. |
-| Missing log / shorter log | Restore the complete source file; do not truncate or replace it. |
+| Missing log / shorter or replaced log | Missing input blocks new reads, but a pending outbox is still retried first. A shorter or replaced log warns and restarts from zero, which can overwrite part of the active hour; quiesce writers and restore complete logs/state for exact totals. |
 | Heartbeat fresh but data old | Expected: liveness and data freshness are separate. |
 | Quota card stale | Check the shipper timer, the latest attempt warning, and the sample age. |
 | AGY token total missing | Expected in v1: AGY token usage is not collected and must not be shown as `0`. |

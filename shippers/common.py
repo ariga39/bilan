@@ -1,9 +1,10 @@
 """Shared Python 3 standard-library helpers for bilan host shippers.
 
-The helpers here are intentionally small and transport-oriented: a
-cross-platform single-instance lock, atomic JSON state persistence, strict UTC
-timestamp handling, deterministic JSON encoding, and the scoped Bearer-token
-push client. Source-specific collection and aggregation stay in each shipper.
+The helpers here are intentionally small and transport-oriented: bounded
+chunked JSONL reading, cross-platform single-instance locking, atomic JSON state
+persistence, strict UTC timestamp handling, deterministic JSON encoding, and the
+scoped Bearer-token push client. Source-specific collection and aggregation stay
+in each shipper.
 """
 
 from __future__ import annotations
@@ -16,12 +17,13 @@ import tempfile
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 SCHEMA_VERSION = 1
 MAX_PAYLOAD_ROWS = 500
 MAX_PAYLOAD_BYTES = 512 * 1024
 REQUEST_TIMEOUT_SECONDS = 15
+LOG_CHUNK_BYTES = 64 * 1024
 
 
 class ShipperError(Exception):
@@ -99,6 +101,94 @@ def envelope(batch_seq: int, usage_buckets: list[dict[str, Any]]) -> Dict[str, A
         "quota_observations": [],
         "balance_snapshots": [],
     }
+
+
+def file_identity(stat_result: os.stat_result) -> list[int]:
+    """Return the stable ``(device, inode)`` identity of an open source file."""
+
+    return [stat_result.st_dev, stat_result.st_ino]
+
+
+def _complete_extent(handle: Any, start: int, size: int) -> int:
+    """Find the newline-aligned end of ``[start, size)`` using bounded reads."""
+
+    position = size
+    while position > start:
+        window = min(LOG_CHUNK_BYTES, position - start)
+        handle.seek(position - window)
+        chunk = handle.read(window)
+        index = chunk.rfind(b"\n")
+        if index >= 0:
+            return position - window + index + 1
+        position -= window
+    return start
+
+
+def inspect_source(
+    path: str,
+    cursor: int,
+    expected_identity: Optional[Any],
+) -> tuple[int, list[int], bool]:
+    """Return ``(complete_extent, identity, restarted)`` for an append-only log.
+
+    ``restarted`` is true when the saved cursor cannot belong to the file now at
+    ``path``: the file shrank below the cursor, or it is a different generation
+    (replaced/rotated) even if the new file is already larger. Callers then
+    restart at byte 0 and warn instead of applying an old cursor to a new log.
+    Only a newline-aligned extent is consumed, so a partially written trailing
+    line is deferred to the next tick.
+    """
+
+    try:
+        with open(path, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            identity = file_identity(info)
+            restarted = cursor > info.st_size
+            if expected_identity is not None and list(expected_identity) != identity:
+                restarted = True
+            start = 0 if restarted else cursor
+            extent = _complete_extent(handle, start, info.st_size)
+    except FileNotFoundError as exc:
+        raise ShipperError("source log disappeared while being inspected") from exc
+    return extent, identity, restarted
+
+
+def iter_log_lines(path: str, start: int, end: int) -> Iterator[tuple[int, int, bytes]]:
+    """Yield ``(line_start, line_end, raw)`` for complete lines in ``[start, end)``.
+
+    Reads in bounded chunks and keeps only an unfinished line in memory, so the
+    caller can aggregate arbitrarily large histories without materializing the
+    file or a record list. ``end`` must be newline-aligned (as returned by
+    :func:`inspect_source`); a trailing partial line is never yielded.
+    """
+
+    if end <= start:
+        return
+    try:
+        handle = open(path, "rb")
+    except FileNotFoundError as exc:
+        raise ShipperError("source log disappeared while being read") from exc
+    with handle:
+        handle.seek(start)
+        offset = start
+        buffer = b""
+        remaining = end - start
+        while remaining > 0:
+            chunk = handle.read(min(LOG_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise ShipperError("source log shrank while being read")
+            remaining -= len(chunk)
+            buffer += chunk
+            search = 0
+            while True:
+                newline = buffer.find(b"\n", search)
+                if newline < 0:
+                    break
+                yield offset + search, offset + newline + 1, buffer[search:newline]
+                search = newline + 1
+            if search:
+                buffer = buffer[search:]
+                offset += search
 
 
 def atomic_write_json(path: str, value: Any) -> None:
