@@ -338,9 +338,10 @@ Audit log recovery:
   generation is recovered.
 - If `logrotate` expires the oldest generation, its exact contribution is moved
   into a retired map keyed by hour/actor/model and combined with the retained
-  rows, so an already-acknowledged hour never shrinks. New groups or new rows in
-  the same hour are still published, and a prefix hour never seen by the
-  receiver is imported normally.
+  rows, so an already-acknowledged hour still present in retention never shrinks.
+  New groups or new rows in the same hour are still published, a prefix hour
+  never seen by the receiver is imported normally, and later arrivals after
+  every generation for their hour has expired are published on their own.
 - A corrupt/truncated rotation, a failed gzip CRC, or a rotation observed during
   the reconstruction makes the run fail before any ACK so the snapshot is
   retried instead of committing partial counts.

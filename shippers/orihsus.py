@@ -442,11 +442,13 @@ def _iter_archive_lines(entry: tuple[int, str, str, bool]) -> Iterable[bytes]:
         with opener(path, "rb") as handle:
             for raw in handle:
                 if not raw.endswith(b"\n"):
-                    # Immutable rotations normally end on a newline. Ignore a
-                    # trailing fragment rather than blocking every later run on
-                    # a file that will never be rewritten; decompression/CRC
-                    # failures below still abort the snapshot.
-                    break
+                    # Immutable rotations end on a complete record. A trailing
+                    # fragment means the generation was truncated, so abort the
+                    # snapshot instead of publishing its smaller prefix.
+                    raise ShipperError(
+                        "audit rotation %s ends with an incomplete record; "
+                        "retrying next run" % name
+                    )
                 yield raw
     except (OSError, EOFError) as exc:
         # A truncated/corrupt archive or a rotation race must not produce a

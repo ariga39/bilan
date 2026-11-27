@@ -2072,6 +2072,45 @@ class OrihsusShipperTests(unittest.TestCase):
         ]
         self.assertEqual(hour9["input_tokens"], 6)
 
+    def test_truncated_plain_rotation_fails_without_acking_a_smaller_snapshot(self) -> None:
+        archive = self.write_audit_archive(
+            1,
+            [
+                audit_record(
+                    "2026-11-26T08:05:00.000Z", gateway_key="laptop-key", **self._tokens(1)
+                ),
+                audit_record(
+                    "2026-11-26T08:35:00.000Z", gateway_key="laptop-key", **self._tokens(2)
+                ),
+            ],
+        )
+        self.write_audit(
+            [
+                audit_record(
+                    "2026-11-26T09:05:00.000Z", gateway_key="laptop-key", **self._tokens(4)
+                )
+            ]
+        )
+        self.assert_ok(self.run_cli())
+        acknowledged = self.received_buckets()
+        hour8 = acknowledged[("2026-11-26T08:00:00Z", "laptop-key", "deepseek-chat")]
+        self.assertEqual((hour8["unit_count"], hour8["input_tokens"]), (2, 3))
+        requests = len(self.ingest.snapshot_requests())
+
+        # Cut midway through the second record, leaving only its first line
+        # complete. The size change triggers a reconstruction on the next run.
+        first_line = self.offset_after_lines(archive, 1)
+        size = os.path.getsize(archive)
+        with open(archive, "r+b") as handle:
+            handle.truncate(first_line + (size - first_line) // 2)
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("audit.jsonl.1", result.stderr)
+        self.assertEqual(len(self.ingest.snapshot_requests()), requests)
+        self.assertEqual(self.received_buckets(), acknowledged)
+
     def test_corrupt_compressed_rotation_fails_without_acking_a_partial_snapshot(self) -> None:
         payload = self._encode(
             [
