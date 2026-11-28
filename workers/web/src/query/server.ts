@@ -1,12 +1,23 @@
 /* oxlint-disable typescript/no-unsafe-assignment, typescript/no-unsafe-call, typescript/no-unsafe-return, typescript/no-unsafe-member-access, typescript/no-unsafe-argument -- TanStack Start server-function boundary with framework-generated types */
-import { dashboardQuotaSubjects, isValidMonth, isValidTimeZone } from "@bilan/shared";
+import {
+  dashboardQuotaSubjects,
+  isUsageRangeWindow,
+  isValidMonth,
+  isValidTimeZone,
+} from "@bilan/shared";
 import type { BalanceProvider, OverviewResponse } from "@bilan/shared";
 import { createServerFn } from "@tanstack/react-start";
 import { setResponseHeader } from "@tanstack/react-start/server";
 import { env } from "cloudflare:workers";
 
-import { getBalanceHistory, getOverview, getUsageDaily, isBalanceProvider } from "~/worker/queries";
-import type { DashboardDataSource, UsageInput } from "./dashboard";
+import {
+  getBalanceHistory,
+  getOverview,
+  getUsageDaily,
+  getUsageRange,
+  isBalanceProvider,
+} from "~/worker/queries";
+import type { DashboardDataSource, UsageInput, UsageRangeInput } from "./dashboard";
 
 function validateUsageInput(input: UsageInput): UsageInput {
   if (!isValidTimeZone(input.timezone) || !isValidMonth(input.month)) {
@@ -37,6 +48,20 @@ const getUsageDailyData = createServerFn({ method: "GET" })
     return getUsageDaily(env.DB, data);
   });
 
+function validateRangeInput(input: UsageRangeInput): UsageRangeInput {
+  if (!isValidTimeZone(input.timezone) || !isUsageRangeWindow(input.window)) {
+    throw new Error("invalid_usage_query");
+  }
+  return input;
+}
+
+const getUsageRangeData = createServerFn({ method: "GET" })
+  .validator(validateRangeInput)
+  .handler(async ({ data }) => {
+    setResponseHeader("Cache-Control", "private, no-store");
+    return getUsageRange(env.DB, data);
+  });
+
 const getHistoryData = createServerFn({ method: "GET" })
   .validator((input: { provider: BalanceProvider; days: number }) => {
     if (
@@ -57,5 +82,6 @@ const getHistoryData = createServerFn({ method: "GET" })
 export const dashboardServerSource: DashboardDataSource = {
   overview: (input) => getOverviewData({ data: input }),
   daily: (input) => getUsageDailyData({ data: input }),
+  range: (input) => getUsageRangeData({ data: input }),
   history: (provider, days) => getHistoryData({ data: { provider, days } }),
 };

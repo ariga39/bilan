@@ -3,6 +3,8 @@ import type {
   BalanceProvider,
   OverviewResponse,
   UsageDailyResponse,
+  UsageRangeResponse,
+  UsageRangeWindow,
 } from "@bilan/shared";
 import { queryOptions } from "@tanstack/react-query";
 
@@ -13,9 +15,15 @@ export interface UsageInput {
   month: string;
 }
 
+export interface UsageRangeInput {
+  timezone: string;
+  window: UsageRangeWindow;
+}
+
 export interface DashboardDataSource {
   overview(input: UsageInput): Promise<OverviewResponse>;
   daily(input: UsageInput): Promise<UsageDailyResponse>;
+  range(input: UsageRangeInput): Promise<UsageRangeResponse>;
   history(provider: BalanceProvider, days: number): Promise<BalanceHistoryResponse>;
 }
 
@@ -32,6 +40,18 @@ export const usageDailyQueryOptions = (dataSource: DashboardDataSource, search: 
     queryFn: () => dataSource.daily({ timezone: search.tz, month: search.month }),
     staleTime: 60_000,
   });
+
+export const usageRangeQueryOptions = (
+  dataSource: DashboardDataSource,
+  search: DashboardSearch,
+) => {
+  const window = search.range ?? "24h";
+  return queryOptions({
+    queryKey: ["usage-range", search.tz, window],
+    queryFn: () => dataSource.range({ timezone: search.tz, window }),
+    staleTime: 60_000,
+  });
+};
 
 export const historyQueryOptions = (
   dataSource: DashboardDataSource,

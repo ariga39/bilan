@@ -8,10 +8,11 @@ import {
   buildPopulatedDaily,
   buildPopulatedHistory,
   buildPopulatedOverview,
+  buildPopulatedRange,
   FIXED_NOW,
   FIXTURE_MONTH,
 } from "@/stories/fixtures";
-import type { DashboardDataSource, UsageInput } from "../../src/query/dashboard";
+import type { DashboardDataSource, UsageInput, UsageRangeInput } from "../../src/query/dashboard";
 import { routeTree } from "../../src/routeTree.gen";
 
 function createRouterFor(
@@ -63,6 +64,7 @@ describe("shipped dashboard route", () => {
         return overview;
       },
       daily: async (input: UsageInput) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input: UsageRangeInput) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "overview");
@@ -91,6 +93,7 @@ describe("shipped dashboard route", () => {
       daily: async () => {
         throw new Error("daily unavailable");
       },
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "usage");
@@ -113,6 +116,7 @@ describe("shipped dashboard route", () => {
     const dataSource: DashboardDataSource = {
       overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
       daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "usage");
@@ -136,10 +140,43 @@ describe("shipped dashboard route", () => {
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
   });
 
+  it("switches rolling intervals through route search while keeping monthly history", async () => {
+    const rangeCalls: Array<UsageRangeInput> = [];
+    const dataSource: DashboardDataSource = {
+      overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
+      daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input) => {
+        rangeCalls.push(input);
+        return buildPopulatedRange(input.timezone, input.window);
+      },
+      history: async (provider) => buildPopulatedHistory(provider),
+    };
+    const { router, queryClient } = createRouterFor(dataSource, "usage");
+    rendered(router, queryClient);
+
+    expect(await screen.findByText("Rolling usage")).toBeTruthy();
+    expect(screen.getByText("Last 24 hours")).toBeTruthy();
+    expect(rangeCalls.map((call) => call.window)).toContain("24h");
+
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+
+    await waitFor(() => {
+      expect(rangeCalls.map((call) => call.window)).toContain("7d");
+    });
+    expect(router.state.location.search).toMatchObject({
+      tz: "UTC",
+      month: FIXTURE_MONTH,
+      range: "7d",
+    });
+    expect(await screen.findByText("Last 7 days")).toBeTruthy();
+    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
+  });
+
   it("redirects legacy usage deep links while retaining tz and month", async () => {
     const dataSource: DashboardDataSource = {
       overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
       daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const queryClient = new QueryClient({
@@ -169,6 +206,7 @@ describe("shipped dashboard route", () => {
         dailyCalls += 1;
         return buildPopulatedDaily(input.timezone, input.month);
       },
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => {
         historyCalls += 1;
         return buildPopulatedHistory(provider);
@@ -196,6 +234,7 @@ describe("shipped dashboard route", () => {
         throw new Error("usage load failed");
       },
       daily: async (input: UsageInput) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input: UsageRangeInput) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "usage");
@@ -212,6 +251,7 @@ describe("shipped dashboard route", () => {
     const dataSource: DashboardDataSource = {
       overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
       daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: (provider) =>
         new Promise((resolve) => {
           resolvers.push(() => {
@@ -252,6 +292,7 @@ describe("shipped dashboard route", () => {
         throw new Error("overview refresh failed");
       },
       daily: async (input: UsageInput) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input: UsageRangeInput) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => {
         if (!loadedHistory.has(provider)) {
           loadedHistory.add(provider);
@@ -289,6 +330,7 @@ describe("shipped dashboard route", () => {
       daily: async () => {
         throw new Error("daily unavailable");
       },
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildEmptyHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "overview");

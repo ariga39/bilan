@@ -1,9 +1,11 @@
 import {
   DEFAULT_TIMEZONE,
   currentMonthInTimeZone,
+  isUsageRangeWindow,
   isValidMonth,
   isValidTimeZone,
 } from "@bilan/shared";
+import type { UsageRangeWindow } from "@bilan/shared";
 import { z } from "zod";
 
 export type DashboardView = "overview" | "usage";
@@ -11,6 +13,7 @@ export type DashboardView = "overview" | "usage";
 export interface DashboardSearch {
   tz: string;
   month: string;
+  range?: UsageRangeWindow | undefined;
 }
 
 /** The overview route keeps `view` only to resolve legacy `/?view=usage` links. */
@@ -22,6 +25,7 @@ const rawSearchSchema = z.object({
   view: z.string().optional(),
   tz: z.string().optional(),
   month: z.string().optional(),
+  range: z.string().optional(),
 });
 
 type RawSearch = z.infer<typeof rawSearchSchema>;
@@ -32,7 +36,8 @@ function normalizeSearch(raw: RawSearch): DashboardSearch {
     raw.month !== undefined && isValidMonth(raw.month)
       ? raw.month
       : currentMonthInTimeZone(new Date(), tz);
-  return { tz, month };
+  const range = isUsageRangeWindow(raw.range) ? raw.range : undefined;
+  return range === undefined ? { tz, month } : { tz, month, range };
 }
 
 export function validateDashboardSearch(search: unknown): DashboardSearch {
@@ -46,7 +51,11 @@ export function validateOverviewSearch(search: unknown): OverviewSearch {
 }
 
 function searchString(search: DashboardSearch): string {
-  return new URLSearchParams({ tz: search.tz, month: search.month }).toString();
+  const params = new URLSearchParams({ tz: search.tz, month: search.month });
+  if (search.range !== undefined) {
+    params.set("range", search.range);
+  }
+  return params.toString();
 }
 
 export function usageHref(search: DashboardSearch): string {

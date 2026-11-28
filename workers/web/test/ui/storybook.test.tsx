@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildEmptyDaily,
   buildEmptyOverview,
+  buildEmptyRange,
   buildPopulatedDaily,
   buildPopulatedOverview,
+  buildPopulatedRange,
   FIXED_NOW,
   FIXTURE_MONTH,
 } from "@/stories/fixtures";
@@ -42,6 +44,23 @@ describe("Storybook fixtures", () => {
     );
     expect(visible.some((subject) => subject.account === "Go#4")).toBe(false);
     expect(JSON.stringify(projected)).not.toMatch(/key-fp-/u);
+  });
+
+  it("builds realistic rolling range fixtures with current-hour and cache-rate coverage", () => {
+    const hourly = buildPopulatedRange("Asia/Shanghai", "24h");
+    expect(hourly.granularity).toBe("hour");
+    expect(hourly.series).toHaveLength(2);
+    expect(hourly.range_end > hourly.current_hour_start).toBe(true);
+    expect(hourly.series[0]?.points).toHaveLength(24);
+    expect(hourly.series[0]?.points.at(-1)?.includes_current_hour).toBe(true);
+    expect(hourly.series[0]?.totals.cache_hit_rate).toBeGreaterThan(0);
+
+    const daily = buildPopulatedRange("UTC", "7d");
+    expect(daily.granularity).toBe("day");
+    expect(daily.series[0]?.points.length).toBeGreaterThan(0);
+    expect(daily.series[0]?.points.at(-1)?.includes_current_hour).toBe(true);
+
+    expect(buildEmptyRange("UTC", "30d").series).toEqual([]);
   });
 
   it.each([

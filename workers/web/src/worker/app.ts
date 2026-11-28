@@ -1,12 +1,19 @@
 import {
   DEFAULT_TIMEZONE,
   currentMonthInTimeZone,
+  isUsageRangeWindow,
   isValidMonth,
   isValidTimeZone,
 } from "@bilan/shared";
 import { Hono } from "hono";
 
-import { getBalanceHistory, getOverview, getUsageDaily, isBalanceProvider } from "./queries";
+import {
+  getBalanceHistory,
+  getOverview,
+  getUsageDaily,
+  getUsageRange,
+  isBalanceProvider,
+} from "./queries";
 import { quotaRoutes } from "./quota";
 import type { Env } from "./types";
 
@@ -49,6 +56,20 @@ app.get("/api/v1/usage/daily", async (context) => {
   const daily = await getUsageDaily(context.env.DB, usageQuery);
   context.header("cache-control", "no-store");
   return context.json(daily);
+});
+
+app.get("/api/v1/usage/range", async (context) => {
+  const timezone = context.req.query("tz") ?? DEFAULT_TIMEZONE;
+  if (!isValidTimeZone(timezone)) {
+    return context.json({ error: "invalid_usage_query" }, 400);
+  }
+  const window = context.req.query("window") ?? "24h";
+  if (!isUsageRangeWindow(window)) {
+    return context.json({ error: "invalid_usage_query" }, 400);
+  }
+  const range = await getUsageRange(context.env.DB, { timezone, window });
+  context.header("cache-control", "no-store");
+  return context.json(range);
 });
 
 app.get("/api/v1/balances/history", async (context) => {

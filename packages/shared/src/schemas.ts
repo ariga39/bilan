@@ -17,6 +17,7 @@ import type {
   QuotaWindow,
   UsageBreakdownRow,
   UsageDailyResponse,
+  UsageRangeResponse,
   UsageSourceFreshness,
 } from "./index";
 
@@ -216,4 +217,42 @@ export const balanceHistoryResponseSchema: z.ZodType<BalanceHistoryResponse> = z
   provider: balanceProviderSchema,
   days: z.number().int().positive(),
   series: z.array(balanceHistorySeriesSchema),
+});
+
+const usageRangePointSchema = z.object({
+  start: z.string(),
+  date: z.string(),
+  cache_hit_rate: z.number().nullable(),
+  is_partial: z.boolean(),
+  partial_columns: z.array(usageTokenColumnSchema),
+  includes_current_hour: z.boolean(),
+  ...usageCountersShape,
+});
+
+const usageRangeTotalsSchema = z.object({
+  cache_hit_rate: z.number().nullable(),
+  is_partial: z.boolean(),
+  partial_columns: z.array(usageTokenColumnSchema),
+  ...usageCountersShape,
+});
+
+export const usageRangeResponseSchema: z.ZodType<UsageRangeResponse> = z.object({
+  generated_at: z.string(),
+  timezone: z.string(),
+  window: z.enum(["24h", "7d", "30d"]),
+  granularity: z.enum(["hour", "day"]),
+  range_start: z.string(),
+  range_end: z.string(),
+  current_hour_start: z.string(),
+  bucket_attribution: z.enum(["exact", "approximate"]),
+  bucket_attribution_note: z.string().nullable(),
+  series: z.array(
+    z.object({
+      source: z.string(),
+      accounting_basis: z.string(),
+      unit_kind: z.string(),
+      points: z.array(usageRangePointSchema),
+      totals: usageRangeTotalsSchema,
+    }),
+  ),
 });

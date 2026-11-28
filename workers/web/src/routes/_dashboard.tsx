@@ -23,10 +23,11 @@ function DashboardLayout() {
     enabled: false,
   });
   const overviewFetching = useIsFetching({ queryKey: ["overview"] });
-  const routeFetching = useIsFetching({
-    queryKey: view === "usage" ? ["usage-daily"] : ["balance-history"],
-  });
-  const refreshing = overviewFetching + routeFetching > 0;
+  const dailyFetching = useIsFetching({ queryKey: ["usage-daily"] });
+  const rangeFetching = useIsFetching({ queryKey: ["usage-range"] });
+  const historyFetching = useIsFetching({ queryKey: ["balance-history"] });
+  const refreshing =
+    overviewFetching + (view === "usage" ? dailyFetching + rangeFetching : historyFetching) > 0;
 
   return (
     <div className="min-h-screen overflow-x-clip">
@@ -38,9 +39,12 @@ function DashboardLayout() {
           refreshing={refreshing}
           onRefresh={() => {
             void queryClient.invalidateQueries({ queryKey: ["overview"] });
-            void queryClient.invalidateQueries({
-              queryKey: view === "usage" ? ["usage-daily"] : ["balance-history"],
-            });
+            if (view === "usage") {
+              void queryClient.invalidateQueries({ queryKey: ["usage-daily"] });
+              void queryClient.invalidateQueries({ queryKey: ["usage-range"] });
+            } else {
+              void queryClient.invalidateQueries({ queryKey: ["balance-history"] });
+            }
           }}
         />
         <main className="flex min-w-0 flex-col gap-4">

@@ -3,10 +3,14 @@ import {
   DEFAULT_TIMEZONE,
   DELTA_WINDOW_DAYS,
   USAGE_TOKEN_COLUMNS,
+  bucketAttributionForHourlyRange,
   bucketAttributionForRange,
+  cacheHitRate,
   currentMonthInTimeZone,
   localDateInTimeZone,
   monthRangeUtc,
+  rollingHourRangeUtc,
+  usageRangeHours,
   utcSecondIso,
 } from "@bilan/shared";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -21,7 +25,12 @@ import type {
   OverviewResponse,
   ProducerHealth,
   UsageBreakdownRow,
+  UsageCounters,
   UsageDailyResponse,
+  UsageRangePoint,
+  UsageRangeResponse,
+  UsageRangeSeries,
+  UsageRangeWindow,
   UsageTokenColumn,
 } from "@bilan/shared";
 
@@ -100,6 +109,13 @@ interface UsageBucketRow extends UsageAggregateRow {
   bucket_start: string;
 }
 
+interface UsageRangeAggregateRow extends UsageCounters {
+  bucket_start: string;
+  source: string;
+  accounting_basis: string;
+  unit_kind: string;
+}
+
 interface SourceLatestUsageRow {
   source: string;
   latest: string | null;
@@ -116,7 +132,7 @@ const TOKEN_COUNTED_COLUMNS = {
   reasoning_tokens: "reasoning_counted",
 } as const;
 
-function withCompleteness<T extends UsageAggregateRow>(
+function withCompleteness<T extends UsageCounters>(
   row: T,
 ): T & { is_partial: boolean; partial_columns: Array<UsageTokenColumn> } {
   const partialColumns = USAGE_TOKEN_COLUMNS.filter(
@@ -127,6 +143,37 @@ function withCompleteness<T extends UsageAggregateRow>(
     partial_columns: [...partialColumns],
     is_partial: row.coverage_gaps > 0 || partialColumns.length > 0,
   };
+}
+
+function emptyUsageCounters(): UsageCounters {
+  return {
+    unit_count: 0,
+    coverage_gaps: 0,
+    input_tokens: null,
+    input_counted: 0,
+    cached_tokens: null,
+    cached_counted: 0,
+    uncached_tokens: null,
+    uncached_counted: 0,
+    cache_write_tokens: null,
+    cache_write_counted: 0,
+    output_tokens: null,
+    output_counted: 0,
+    reasoning_tokens: null,
+    reasoning_counted: 0,
+  };
+}
+
+function addUsageCounters(target: UsageCounters, source: UsageCounters): void {
+  target.unit_count += source.unit_count;
+  target.coverage_gaps += source.coverage_gaps;
+  for (const column of USAGE_TOKEN_COLUMNS) {
+    const value = source[column];
+    if (value !== null) {
+      target[column] = (target[column] ?? 0) + value;
+    }
+    target[TOKEN_COUNTED_COLUMNS[column]] += source[TOKEN_COUNTED_COLUMNS[column]];
+  }
 }
 
 const DAY_MS = 86_400_000;
@@ -503,6 +550,170 @@ async function loadDailyUsage(
     );
 
   return { timezone, month, ...attribution, rows };
+}
+
+async function loadRangeUsage(
+  db: D1Database,
+  timezone: string,
+  window: UsageRangeWindow,
+  now: Date,
+): Promise<UsageRangeResponse> {
+  const range = rollingHourRangeUtc(now, usageRangeHours(window));
+  const granularity = window === "24h" ? "hour" : "day";
+  const attribution =
+    granularity === "day"
+      ? bucketAttributionForHourlyRange(timezone, range)
+      : { bucket_attribution: "exact" as const, bucket_attribution_note: null };
+  // The range may contain hundreds of hours per source; reuse one formatter.
+  const dateFormatter = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const currentDate = dateFormatter.format(new Date(range.current_hour_start));
+  const result = await db
+    .prepare(
+      `SELECT bucket_start, source, accounting_basis, unit_kind,
+              SUM(unit_count) AS unit_count,
+              SUM(coverage_gaps) AS coverage_gaps,
+              SUM(input_tokens) AS input_tokens,
+              SUM(input_counted) AS input_counted,
+              SUM(cached_tokens) AS cached_tokens,
+              SUM(cached_counted) AS cached_counted,
+              SUM(uncached_tokens) AS uncached_tokens,
+              SUM(uncached_counted) AS uncached_counted,
+              SUM(cache_write_tokens) AS cache_write_tokens,
+              SUM(cache_write_counted) AS cache_write_counted,
+              SUM(output_tokens) AS output_tokens,
+              SUM(output_counted) AS output_counted,
+              SUM(reasoning_tokens) AS reasoning_tokens,
+              SUM(reasoning_counted) AS reasoning_counted
+       FROM usage_buckets
+       WHERE bucket_start >= ? AND bucket_start < ?
+         AND unit_count > 0
+       GROUP BY bucket_start, source, accounting_basis, unit_kind
+       ORDER BY bucket_start, source, accounting_basis, unit_kind`,
+    )
+    .bind(range.start, range.end)
+    .all<UsageRangeAggregateRow>();
+
+  interface PointAccumulator extends UsageCounters {
+    source: string;
+    accounting_basis: string;
+    unit_kind: string;
+    start: string;
+    date: string;
+    includes_current_hour: boolean;
+  }
+
+  const points = new Map<string, PointAccumulator>();
+  for (const row of result.results) {
+    const date = dateFormatter.format(new Date(row.bucket_start));
+    const seriesKey = `${row.source}\u0000${row.accounting_basis}\u0000${row.unit_kind}`;
+    const key =
+      granularity === "hour"
+        ? `${seriesKey}\u0000${row.bucket_start}`
+        : `${seriesKey}\u0000${date}`;
+    let point = points.get(key);
+    if (!point) {
+      point = {
+        source: row.source,
+        accounting_basis: row.accounting_basis,
+        unit_kind: row.unit_kind,
+        start: row.bucket_start,
+        date,
+        includes_current_hour:
+          granularity === "hour"
+            ? row.bucket_start === range.current_hour_start
+            : date === currentDate,
+        ...emptyUsageCounters(),
+      };
+      points.set(key, point);
+    }
+    if (row.bucket_start < point.start) {
+      point.start = row.bucket_start;
+    }
+    addUsageCounters(point, row);
+  }
+
+  interface SeriesAccumulator {
+    source: string;
+    accounting_basis: string;
+    unit_kind: string;
+    points: Array<UsageRangePoint>;
+    counters: UsageCounters;
+  }
+
+  const seriesByKey = new Map<string, SeriesAccumulator>();
+  for (const point of points.values()) {
+    const seriesKey = `${point.source}\u0000${point.accounting_basis}\u0000${point.unit_kind}`;
+    let series = seriesByKey.get(seriesKey);
+    if (!series) {
+      series = {
+        source: point.source,
+        accounting_basis: point.accounting_basis,
+        unit_kind: point.unit_kind,
+        points: [],
+        counters: emptyUsageCounters(),
+      };
+      seriesByKey.set(seriesKey, series);
+    }
+    const complete = withCompleteness(point);
+    series.points.push({
+      ...point,
+      cache_hit_rate: cacheHitRate(point),
+      is_partial: complete.is_partial,
+      partial_columns: complete.partial_columns,
+    });
+    addUsageCounters(series.counters, point);
+  }
+
+  const series: Array<UsageRangeSeries> = [...seriesByKey.values()]
+    .map((item) => {
+      const complete = withCompleteness(item.counters);
+      return {
+        source: item.source,
+        accounting_basis: item.accounting_basis,
+        unit_kind: item.unit_kind,
+        points: item.points.sort(
+          (left, right) =>
+            left.date.localeCompare(right.date) || left.start.localeCompare(right.start),
+        ),
+        totals: {
+          ...item.counters,
+          cache_hit_rate: cacheHitRate(item.counters),
+          is_partial: complete.is_partial,
+          partial_columns: complete.partial_columns,
+        },
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.source.localeCompare(right.source) ||
+        left.accounting_basis.localeCompare(right.accounting_basis) ||
+        left.unit_kind.localeCompare(right.unit_kind),
+    );
+
+  return {
+    generated_at: now.toISOString(),
+    timezone,
+    window,
+    granularity,
+    range_start: range.start,
+    range_end: range.end,
+    current_hour_start: range.current_hour_start,
+    ...attribution,
+    series,
+  };
+}
+
+export async function getUsageRange(
+  db: D1Database,
+  options: { timezone: string; window: UsageRangeWindow },
+  now: Date = new Date(),
+): Promise<UsageRangeResponse> {
+  return loadRangeUsage(db, options.timezone, options.window, now);
 }
 
 export async function getOverview(
