@@ -3,6 +3,8 @@ import type {
   BalanceProvider,
   OverviewResponse,
   UsageDailyResponse,
+  UsageRangeResponse,
+  UsageRangeWindow,
 } from "@bilan/shared";
 import { dashboardQuotaSubjects } from "@bilan/shared";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -16,15 +18,17 @@ import {
   buildEmptyDaily,
   buildEmptyHistory,
   buildEmptyOverview,
+  buildEmptyRange,
   buildPopulatedDaily,
   buildPopulatedHistory,
   buildPopulatedOverview,
+  buildPopulatedRange,
   FIXTURE_MONTH,
   FIXTURE_TIMEZONE,
 } from "./fixtures";
 import type { StorybookScenario } from "./scenarios";
 import { STORYBOOK_SCENARIOS, buildScenarioOverview } from "./scenarios";
-import type { DashboardDataSource, UsageInput } from "../../query/dashboard";
+import type { DashboardDataSource, UsageInput, UsageRangeInput } from "../../query/dashboard";
 import { routeTree } from "../../routeTree.gen";
 
 function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewResponse {
@@ -56,6 +60,12 @@ function dailyFor(input: UsageInput, scenario: StorybookScenario): UsageDailyRes
     : daily;
 }
 
+function rangeFor(input: UsageRangeInput, scenario: StorybookScenario): UsageRangeResponse {
+  return scenario === "empty"
+    ? buildEmptyRange(input.timezone, input.window)
+    : buildPopulatedRange(input.timezone, input.window);
+}
+
 function pending<T>(): Promise<T> {
   return new Promise<T>(() => {
     // Intentionally pending for the loading story.
@@ -71,6 +81,7 @@ function createDataSource(scenario: StorybookScenario): DashboardDataSource {
     return {
       overview: pending<OverviewResponse>,
       daily: pending<UsageDailyResponse>,
+      range: pending<UsageRangeResponse>,
       history: pending<BalanceHistoryResponse>,
     };
   }
@@ -78,12 +89,14 @@ function createDataSource(scenario: StorybookScenario): DashboardDataSource {
     return {
       overview: failure,
       daily: failure,
+      range: failure,
       history: failure,
     };
   }
   return {
     overview: async (input) => visibleQuotas(overviewFor(input, scenario)),
     daily: async (input) => dailyFor(input, scenario),
+    range: async (input) => rangeFor(input, scenario),
     history: async (provider: BalanceProvider) =>
       scenario === "empty" ? buildEmptyHistory(provider) : buildPopulatedHistory(provider),
   };
@@ -94,9 +107,10 @@ interface StoryArgs {
   view?: "overview" | "usage";
   timezone?: string;
   month?: string;
+  range?: UsageRangeWindow;
 }
 
-function StoryRouter({ scenario, view, timezone, month }: StoryArgs) {
+function StoryRouter({ scenario, view, timezone, month, range }: StoryArgs) {
   const queryClient = useMemo(
     () =>
       new QueryClient({
@@ -113,19 +127,17 @@ function StoryRouter({ scenario, view, timezone, month }: StoryArgs) {
         context: { queryClient, dataSource: createDataSource(scenario) },
         history: createMemoryHistory({
           initialEntries: [
-            view === "usage"
-              ? `/usage?tz=${encodeURIComponent(timezone ?? FIXTURE_TIMEZONE)}&month=${
-                  month ?? FIXTURE_MONTH
-                }`
-              : `/?tz=${encodeURIComponent(timezone ?? FIXTURE_TIMEZONE)}&month=${
-                  month ?? FIXTURE_MONTH
-                }`,
+            `${
+              view === "usage" ? "/usage" : "/"
+            }?tz=${encodeURIComponent(timezone ?? FIXTURE_TIMEZONE)}&month=${
+              month ?? FIXTURE_MONTH
+            }${range ? `&range=${range}` : ""}`,
           ],
         }),
         defaultPreload: "intent",
         defaultPreloadStaleTime: 0,
       }),
-    [month, queryClient, scenario, timezone, view],
+    [month, queryClient, range, scenario, timezone, view],
   );
 
   if (scenario === "loading") {
@@ -183,8 +195,12 @@ export const FundedProvider: Story = {
   args: { scenario: "funded-provider" },
 };
 export const Usage: Story = {
-  name: "Usage (populated)",
+  name: "Usage (rolling 24h and monthly history)",
   args: { scenario: "populated", view: "usage" },
+};
+export const UsageRolling30d: Story = {
+  name: "Usage (rolling 30d)",
+  args: { scenario: "populated", view: "usage", range: "30d" },
 };
 export const UsageMobile: Story = {
   name: "Usage (mobile)",

@@ -251,3 +251,95 @@ export interface UsageDailyResponse {
   bucket_attribution_note: string | null;
   rows: Array<DailyUsageRow>;
 }
+
+export const USAGE_RANGE_WINDOWS = ["24h", "7d", "30d"] as const;
+export type UsageRangeWindow = (typeof USAGE_RANGE_WINDOWS)[number];
+
+export const USAGE_RANGE_HOURS: Record<UsageRangeWindow, number> = {
+  "24h": 24,
+  "7d": 7 * 24,
+  "30d": 30 * 24,
+};
+
+export type UsageRangeGranularity = "hour" | "day";
+
+export function isUsageRangeWindow(value: unknown): value is UsageRangeWindow {
+  return typeof value === "string" && USAGE_RANGE_WINDOWS.some((candidate) => candidate === value);
+}
+
+export function usageRangeHours(window: UsageRangeWindow): number {
+  return USAGE_RANGE_HOURS[window];
+}
+
+export interface UsageRangePoint extends UsageCounters {
+  /** UTC hour start for hourly points; the first UTC hour in the local date for daily points. */
+  start: string;
+  /** Local calendar date used for daily points and chart labels. */
+  date: string;
+  cache_hit_rate: number | null;
+  is_partial: boolean;
+  partial_columns: Array<UsageTokenColumn>;
+  includes_current_hour: boolean;
+}
+
+export interface UsageRangeTotals extends UsageCounters {
+  cache_hit_rate: number | null;
+  is_partial: boolean;
+  partial_columns: Array<UsageTokenColumn>;
+}
+
+export interface UsageRangeSeries {
+  source: string;
+  accounting_basis: string;
+  unit_kind: string;
+  points: Array<UsageRangePoint>;
+  totals: UsageRangeTotals;
+}
+
+export interface UsageRangeResponse {
+  generated_at: string;
+  timezone: string;
+  window: UsageRangeWindow;
+  granularity: UsageRangeGranularity;
+  /** Inclusive UTC hour boundary of the first bucket in the range. */
+  range_start: string;
+  /** Exclusive UTC hour boundary after the current partial hour. */
+  range_end: string;
+  /** UTC hour containing the request instant; the range always includes it. */
+  current_hour_start: string;
+  bucket_attribution: BucketAttribution;
+  bucket_attribution_note: string | null;
+  series: Array<UsageRangeSeries>;
+}
+
+/**
+ * Cache hit rate is the weighted cached-token share of input tokens. It is
+ * unavailable unless both counters were reported over the same requests and
+ * the input denominator is positive, so missing coverage never becomes 0%.
+ */
+export function cacheHitRate(
+  counters: Pick<
+    UsageCounters,
+    | "unit_count"
+    | "coverage_gaps"
+    | "input_tokens"
+    | "input_counted"
+    | "cached_tokens"
+    | "cached_counted"
+  >,
+): number | null {
+  if (
+    counters.input_tokens === null ||
+    counters.cached_tokens === null ||
+    counters.input_tokens <= 0 ||
+    counters.input_counted <= 0 ||
+    counters.input_counted !== counters.cached_counted ||
+    // Every complete request has both counters. Equal partial counts alone
+    // do not establish that input and cache came from the same requests.
+    (counters.input_counted !== counters.unit_count &&
+      counters.input_counted !== counters.unit_count - counters.coverage_gaps)
+  ) {
+    return null;
+  }
+  return counters.cached_tokens / counters.input_tokens;
+}

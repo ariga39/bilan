@@ -1,10 +1,10 @@
-import type { MonthlyUsage, UsageDailyResponse } from "@bilan/shared";
+import type { MonthlyUsage, UsageDailyResponse, UsageRangeResponse } from "@bilan/shared";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UsageEntry } from "@/components/usage-entry";
 import { UsageSection } from "@/components/usage-section";
-import { buildPopulatedOverview } from "@/stories/fixtures";
+import { buildPopulatedOverview, buildPopulatedRange } from "@/stories/fixtures";
 
 afterEach(cleanup);
 
@@ -514,5 +514,144 @@ describe("Token usage dashboard section", () => {
     expect(onOpenUsage).toHaveBeenCalled();
     expect(screen.getByText(/This month · November 2026/u)).toBeTruthy();
     expect(screen.getByText(/Today 2026-11-27/u)).toBeTruthy();
+  });
+
+  it("shows rolling requests, token and cache trends without losing monthly history", () => {
+    const onWindowChange = vi.fn();
+    const rolling = buildPopulatedRange("Asia/Shanghai", "24h");
+
+    render(
+      <UsageSection
+        usage={usage}
+        daily={daily}
+        range={rolling}
+        rangeWindow="24h"
+        timezone="Asia/Shanghai"
+        month="2026-11"
+        generatedAt={GENERATED_AT}
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+        onWindowChange={onWindowChange}
+      />,
+    );
+
+    expect(screen.getByText("Rolling usage")).toBeTruthy();
+    expect(
+      screen.getByText(/Hour-based boundary · includes the current partial hour/u),
+    ).toBeTruthy();
+    expect(screen.getAllByText(/Hourly detail/u).length).toBeGreaterThan(0);
+
+    const selector = screen.getByRole("group", { name: "Rolling usage window" });
+    expect(within(selector).getByRole("button", { name: "24h" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    fireEvent.click(within(selector).getByRole("button", { name: "7d" }));
+    expect(onWindowChange).toHaveBeenCalledWith("7d");
+
+    expect(
+      screen.getByRole("img", {
+        name: "Requests trend for Codex · debitmetre-audit-v1 · request",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("img", {
+        name: "Input tokens trend for Codex · debitmetre-audit-v1 · request",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("img", {
+        name: "Output tokens trend for Codex · debitmetre-audit-v1 · request",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("img", {
+        name: "Cache hit rate trend for Codex · debitmetre-audit-v1 · request",
+      }),
+    ).toBeTruthy();
+
+    const codex = screen.getByRole("group", {
+      name: "Rolling usage for Codex · debitmetre-audit-v1 · request",
+    });
+    expect(within(codex).getAllByLabelText(/Cache hit rate \d/u).length).toBeGreaterThan(0);
+    expect(within(codex).getByText("Hourly detail")).toBeTruthy();
+
+    // The calendar month remains visible below the rolling interval.
+    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
+    expect(screen.getByText("Breakdown")).toBeTruthy();
+  });
+
+  it("keeps missing cache coverage unavailable while a measured zero stays 0%", () => {
+    const base = buildPopulatedRange("UTC", "24h");
+    const codex = base.series[0]!;
+    const openCode = base.series[1]!;
+    const missing: UsageRangeResponse = {
+      ...base,
+      series: [
+        {
+          ...codex,
+          totals: {
+            ...codex.totals,
+            cache_hit_rate: null,
+            cached_tokens: null,
+            cached_counted: 0,
+            unit_count: codex.totals.unit_count + 1,
+          },
+          points: codex.points.map((point) => ({ ...point, cache_hit_rate: null })),
+        },
+        {
+          ...openCode,
+          totals: { ...openCode.totals, cache_hit_rate: 0, cached_tokens: 0 },
+          points: openCode.points.map((point) => ({ ...point, cache_hit_rate: 0 })),
+        },
+      ],
+    };
+
+    render(
+      <UsageSection
+        usage={usage}
+        daily={daily}
+        range={missing}
+        rangeWindow="24h"
+        timezone="UTC"
+        month="2026-11"
+        generatedAt={GENERATED_AT}
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+        onWindowChange={() => undefined}
+      />,
+    );
+
+    const codexGroup = screen.getByRole("group", {
+      name: "Rolling usage for Codex · debitmetre-audit-v1 · request",
+    });
+    expect(
+      within(codexGroup).getAllByLabelText("Cache hit rate unavailable").length,
+    ).toBeGreaterThan(0);
+    expect(within(codexGroup).getAllByText(/^\d+\/\d+$/u).length).toBeGreaterThan(0);
+
+    const openCodeGroup = screen.getByRole("group", {
+      name: "Rolling usage for OpenCode Go · orihsus-audit-v1 · request",
+    });
+    expect(within(openCodeGroup).getByLabelText("Cache hit rate 0%")).toBeTruthy();
+  });
+
+  it("shows an explicit empty rolling interval without inventing usage", () => {
+    render(
+      <UsageSection
+        usage={usage}
+        daily={daily}
+        range={{ ...buildPopulatedRange("UTC", "7d"), series: [] }}
+        rangeWindow="7d"
+        timezone="UTC"
+        month="2026-11"
+        generatedAt={GENERATED_AT}
+        onTimezoneChange={() => undefined}
+        onMonthChange={() => undefined}
+        onWindowChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/No usage in this rolling last 7 days range/u)).toBeTruthy();
+    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
   });
 });

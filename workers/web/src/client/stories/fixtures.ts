@@ -1,4 +1,11 @@
-import { bucketAttributionForMonth } from "@bilan/shared";
+import {
+  bucketAttributionForHourlyRange,
+  bucketAttributionForMonth,
+  cacheHitRate,
+  localDateInTimeZone,
+  rollingHourRangeUtc,
+  usageRangeHours,
+} from "@bilan/shared";
 import type {
   BalanceHistoryPoint,
   BalanceHistoryResponse,
@@ -16,6 +23,10 @@ import type {
   UsageBreakdownRow,
   UsageCounters,
   UsageDailyResponse,
+  UsageRangePoint,
+  UsageRangeResponse,
+  UsageRangeSeries,
+  UsageRangeWindow,
   UsageTokenColumn,
 } from "@bilan/shared";
 
@@ -715,6 +726,197 @@ const DAILY_ROWS: Array<DailyUsageRow> = [
     reasoning: 2900,
   }),
 ];
+
+const RANGE_HOUR_MS = 3_600_000;
+
+function rangePoint(
+  start: string,
+  date: string,
+  values: CounterInput,
+  includesCurrentHour: boolean,
+): UsageRangePoint {
+  const countersValue = counters(values);
+  return {
+    ...countersValue,
+    start,
+    date,
+    cache_hit_rate: cacheHitRate(countersValue),
+    is_partial: false,
+    partial_columns: [],
+    includes_current_hour: includesCurrentHour,
+  };
+}
+
+function sumRangeCounters(points: ReadonlyArray<UsageRangePoint>): UsageCounters {
+  const totals = counters({ unitCount: 0, input: null });
+  for (const point of points) {
+    totals.unit_count += point.unit_count;
+    totals.coverage_gaps += point.coverage_gaps;
+    for (const column of [
+      "input_tokens",
+      "cached_tokens",
+      "uncached_tokens",
+      "cache_write_tokens",
+      "output_tokens",
+      "reasoning_tokens",
+    ] as const) {
+      if (point[column] !== null) {
+        totals[column] = (totals[column] ?? 0) + point[column];
+      }
+    }
+    totals.input_counted += point.input_counted;
+    totals.cached_counted += point.cached_counted;
+    totals.uncached_counted += point.uncached_counted;
+    totals.cache_write_counted += point.cache_write_counted;
+    totals.output_counted += point.output_counted;
+    totals.reasoning_counted += point.reasoning_counted;
+  }
+  return totals;
+}
+
+function rangeSeries(
+  source: string,
+  accountingBasis: string,
+  points: ReadonlyArray<UsageRangePoint>,
+): UsageRangeSeries {
+  const totals = sumRangeCounters(points);
+  return {
+    source,
+    accounting_basis: accountingBasis,
+    unit_kind: "request",
+    points: [...points],
+    totals: {
+      ...totals,
+      cache_hit_rate: cacheHitRate(totals),
+      is_partial: false,
+      partial_columns: [],
+    },
+  };
+}
+
+function hourlyRangeValues(source: "codex" | "opencode", index: number): CounterInput {
+  const requests = source === "codex" ? 32 + ((index * 7) % 19) : 44 + ((index * 11) % 23);
+  const inputPerRequest = source === "codex" ? 1800 : 2400;
+  const input = requests * inputPerRequest + (index % 4) * 350;
+  const cached = Math.round(input * (0.48 + (index % 5) * 0.04));
+  const output = requests * (source === "codex" ? 210 : 260) + (index % 3) * 40;
+  return {
+    unitCount: requests,
+    input,
+    cached,
+    uncached: input - cached,
+    cacheWrite: 0,
+    output,
+    reasoning: Math.round(output / 4),
+  };
+}
+
+function dailyRangeValues(source: "codex" | "opencode", index: number): CounterInput {
+  const requests = source === "codex" ? 780 + ((index * 137) % 610) : 1020 + ((index * 211) % 880);
+  const inputPerRequest = source === "codex" ? 1900 : 2550;
+  const input = requests * inputPerRequest + (index % 5) * 2400;
+  const cached = Math.round(input * (0.5 + (index % 4) * 0.05));
+  const output = requests * (source === "codex" ? 205 : 255) + (index % 6) * 120;
+  return {
+    unitCount: requests,
+    input,
+    cached,
+    uncached: input - cached,
+    cacheWrite: 0,
+    output,
+    reasoning: Math.round(output / 4),
+  };
+}
+
+function localDateSequence(start: string, end: string, timezone: string): Array<string> {
+  const endDate = localDateInTimeZone(new Date(Date.parse(end) - 1).toISOString(), timezone);
+  const dates: Array<string> = [];
+  for (
+    let day = Date.parse(`${localDateInTimeZone(start, timezone)}T00:00:00Z`);
+    day <= Date.parse(`${endDate}T00:00:00Z`);
+    day += DAY_MS
+  ) {
+    dates.push(new Date(day).toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+function rangeMetadata(
+  timezone: string,
+  window: UsageRangeWindow,
+): Pick<
+  UsageRangeResponse,
+  | "generated_at"
+  | "timezone"
+  | "window"
+  | "granularity"
+  | "range_start"
+  | "range_end"
+  | "current_hour_start"
+  | "bucket_attribution"
+  | "bucket_attribution_note"
+> {
+  const range = rollingHourRangeUtc(new Date(FIXED_NOW), usageRangeHours(window));
+  const granularity = window === "24h" ? "hour" : "day";
+  const attribution =
+    granularity === "day"
+      ? bucketAttributionForHourlyRange(timezone, range)
+      : { bucket_attribution: "exact" as const, bucket_attribution_note: null };
+  return {
+    generated_at: FIXED_NOW,
+    timezone,
+    window,
+    granularity,
+    range_start: range.start,
+    range_end: range.end,
+    current_hour_start: range.current_hour_start,
+    ...attribution,
+  };
+}
+
+export function buildPopulatedRange(
+  timezone: string,
+  window: UsageRangeWindow,
+): UsageRangeResponse {
+  const metadata = rangeMetadata(timezone, window);
+  const currentDate = localDateInTimeZone(metadata.current_hour_start, timezone);
+  const codexPoints: Array<UsageRangePoint> = [];
+  const openCodePoints: Array<UsageRangePoint> = [];
+
+  if (metadata.granularity === "hour") {
+    const start = Date.parse(metadata.range_start);
+    for (let index = 0; index < usageRangeHours(window); index += 1) {
+      const timestamp = new Date(start + index * RANGE_HOUR_MS);
+      const startIso = timestamp.toISOString().replace(".000Z", "Z");
+      const date = localDateInTimeZone(startIso, timezone);
+      const current = startIso === metadata.current_hour_start;
+      codexPoints.push(rangePoint(startIso, date, hourlyRangeValues("codex", index), current));
+      openCodePoints.push(
+        rangePoint(startIso, date, hourlyRangeValues("opencode", index), current),
+      );
+    }
+  } else {
+    const dates = localDateSequence(metadata.range_start, metadata.range_end, timezone);
+    dates.forEach((date, index) => {
+      const start = date === dates[0] ? metadata.range_start : `${date}T00:00:00Z`;
+      const current = date === currentDate;
+      codexPoints.push(rangePoint(start, date, dailyRangeValues("codex", index), current));
+      openCodePoints.push(rangePoint(start, date, dailyRangeValues("opencode", index), current));
+    });
+  }
+
+  return {
+    ...metadata,
+    series: [
+      rangeSeries("codex", "debitmetre-audit-v1", codexPoints),
+      rangeSeries("opencode", "orihsus-audit-v1", openCodePoints),
+    ],
+  };
+}
+
+export function buildEmptyRange(timezone: string, window: UsageRangeWindow): UsageRangeResponse {
+  return { ...rangeMetadata(timezone, window), series: [] };
+}
 
 function monthlyUsage(timezone: string, month: string): MonthlyUsage {
   const hasRows = month === FIXTURE_MONTH;

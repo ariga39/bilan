@@ -1,4 +1,4 @@
-import type { OverviewResponse, UsageDailyResponse } from "@bilan/shared";
+import type { OverviewResponse, UsageDailyResponse, UsageRangeResponse } from "@bilan/shared";
 import { currentMonthInTimeZone } from "@bilan/shared";
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +21,17 @@ async function daily(query = ""): Promise<UsageDailyResponse> {
   );
   expect(response.status).toBe(200);
   const body: UsageDailyResponse = await response.json();
+  return body;
+}
+
+async function range(query = ""): Promise<UsageRangeResponse> {
+  const response = await app.request(
+    `https://bilan-web.example/api/v1/usage/range${query}`,
+    {},
+    env,
+  );
+  expect(response.status).toBe(200);
+  const body: UsageRangeResponse = await response.json();
   return body;
 }
 
@@ -429,6 +440,297 @@ describe("GET /api/v1/usage/daily", () => {
       );
       expect(overviewResponse.status).toBe(400);
       expect(dailyResponse.status).toBe(400);
+    }
+  });
+});
+
+describe("GET /api/v1/usage/range", () => {
+  it("returns an hour-bounded 24h range including the current partial hour across a month boundary", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-01T00:30:00Z"));
+
+    // One hour before the inclusive start: outside the rolling window.
+    await seedUsageBucket({
+      bucketStart: "2026-11-30T00:00:00Z",
+      actorId: "machine-outside",
+      unitCount: 9,
+      inputTokens: 900,
+      inputCounted: 9,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-11-30T01:00:00Z",
+      actorId: "machine-a",
+      unitCount: 2,
+      inputTokens: 100,
+      inputCounted: 2,
+      cachedTokens: 40,
+      cachedCounted: 2,
+      outputTokens: 20,
+      outputCounted: 2,
+    });
+    // Current partial hour, included even though the bucket is not complete.
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "machine-b",
+      unitCount: 1,
+      inputTokens: 50,
+      inputCounted: 1,
+      cachedTokens: 10,
+      cachedCounted: 1,
+      outputTokens: 5,
+      outputCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      source: "opencode",
+      actorKind: "identity",
+      actorId: "laptop-key",
+      accountingBasis: "orihsus-audit-v1",
+      unitCount: 3,
+      inputTokens: 300,
+      inputCounted: 3,
+      cachedTokens: 150,
+      cachedCounted: 3,
+      outputTokens: 30,
+      outputCounted: 3,
+    });
+    // The exclusive end boundary.
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T01:00:00Z",
+      actorId: "machine-future",
+      unitCount: 7,
+      inputTokens: 700,
+      inputCounted: 7,
+    });
+
+    const body = await range("?tz=UTC&window=24h");
+
+    expect(body).toMatchObject({
+      timezone: "UTC",
+      window: "24h",
+      granularity: "hour",
+      range_start: "2026-11-30T01:00:00Z",
+      range_end: "2026-12-01T01:00:00Z",
+      current_hour_start: "2026-12-01T00:00:00Z",
+      bucket_attribution: "exact",
+    });
+    expect(body.series.map((series) => series.source).sort()).toEqual(["codex", "opencode"]);
+
+    const codex = body.series.find((series) => series.source === "codex");
+    expect(codex?.points.map((point) => point.start)).toEqual([
+      "2026-11-30T01:00:00Z",
+      "2026-12-01T00:00:00Z",
+    ]);
+    expect(codex?.points.map((point) => point.includes_current_hour)).toEqual([false, true]);
+    expect(codex?.totals).toMatchObject({
+      unit_count: 3,
+      input_tokens: 150,
+      input_counted: 3,
+      cached_tokens: 50,
+      cached_counted: 3,
+      output_tokens: 25,
+      is_partial: true,
+    });
+    expect(codex?.totals.cache_hit_rate).toBeCloseTo(1 / 3, 10);
+
+    const openCode = body.series.find((series) => series.source === "opencode");
+    expect(openCode?.totals).toMatchObject({
+      unit_count: 3,
+      input_tokens: 300,
+      cached_tokens: 150,
+      output_tokens: 30,
+      is_partial: true,
+    });
+    expect(openCode?.totals.cache_hit_rate).toBeCloseTo(0.5, 10);
+  });
+
+  it("groups 7d into local daily points while keeping the hour-based boundaries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-01T00:30:00Z"));
+
+    await seedUsageBucket({
+      bucketStart: "2026-11-24T00:00:00Z",
+      actorId: "machine-outside",
+      unitCount: 9,
+      inputTokens: 900,
+      inputCounted: 9,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-11-24T01:00:00Z",
+      actorId: "machine-a",
+      unitCount: 2,
+      inputTokens: 100,
+      inputCounted: 2,
+      cachedTokens: 50,
+      cachedCounted: 2,
+      outputTokens: 20,
+      outputCounted: 2,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-11-24T23:00:00Z",
+      actorId: "machine-b",
+      unitCount: 3,
+      inputTokens: 300,
+      inputCounted: 3,
+      cachedTokens: 100,
+      cachedCounted: 3,
+      outputTokens: 30,
+      outputCounted: 3,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "machine-c",
+      unitCount: 1,
+      inputTokens: 10,
+      inputCounted: 1,
+      cachedTokens: 0,
+      cachedCounted: 1,
+      outputTokens: 5,
+      outputCounted: 1,
+    });
+
+    const body = await range("?tz=UTC&window=7d");
+
+    expect(body.bucket_attribution).toBe("exact");
+    expect(body.granularity).toBe("day");
+    expect(body.range_start).toBe("2026-11-24T01:00:00Z");
+    expect(body.range_end).toBe("2026-12-01T01:00:00Z");
+    const codex = body.series[0];
+    expect(codex?.points.map((point) => point.date)).toEqual(["2026-11-24", "2026-12-01"]);
+    expect(codex?.points[0]).toMatchObject({
+      start: "2026-11-24T01:00:00Z",
+      unit_count: 5,
+      input_tokens: 400,
+      cached_tokens: 150,
+      output_tokens: 50,
+      includes_current_hour: false,
+    });
+    expect(codex?.points[0]?.cache_hit_rate).toBeCloseTo(0.375, 10);
+    expect(codex?.points[1]).toMatchObject({
+      date: "2026-12-01",
+      unit_count: 1,
+      includes_current_hour: true,
+    });
+    expect(codex?.points[1]?.cache_hit_rate).toBe(0);
+    vi.setSystemTime(new Date("2026-12-01T01:30:00Z"));
+    const later = await range("?tz=UTC&window=7d");
+    expect(later.series[0]?.points.at(-1)?.includes_current_hour).toBe(false);
+  });
+
+  it("weights cache rates and leaves missing, incompatible, and zero denominators unavailable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-01T00:30:00Z"));
+
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "weighted-a",
+      accountingBasis: "weighted-v1",
+      unitCount: 1,
+      inputTokens: 100,
+      inputCounted: 1,
+      cachedTokens: 80,
+      cachedCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "weighted-b",
+      accountingBasis: "weighted-v1",
+      unitCount: 1,
+      inputTokens: 300,
+      inputCounted: 1,
+      cachedTokens: 20,
+      cachedCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "measured-zero",
+      accountingBasis: "measured-zero-v1",
+      unitCount: 1,
+      inputTokens: 50,
+      inputCounted: 1,
+      cachedTokens: 0,
+      cachedCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "zero-denominator",
+      accountingBasis: "zero-denominator-v1",
+      unitCount: 1,
+      inputTokens: 0,
+      inputCounted: 1,
+      cachedTokens: 0,
+      cachedCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "missing-cache",
+      accountingBasis: "missing-cache-v1",
+      unitCount: 1,
+      inputTokens: 200,
+      inputCounted: 1,
+    });
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      actorId: "incompatible",
+      accountingBasis: "incompatible-v1",
+      unitCount: 3,
+      inputTokens: 300,
+      inputCounted: 3,
+      cachedTokens: 100,
+      cachedCounted: 1,
+    });
+
+    // Input and cache can each be measured on one of two different requests.
+    await seedUsageBucket({
+      bucketStart: "2026-12-01T00:00:00Z",
+      accountingBasis: "unpaired-v1",
+      unitCount: 2,
+      coverageGaps: 2,
+      inputTokens: 100,
+      inputCounted: 1,
+      cachedTokens: 50,
+      cachedCounted: 1,
+    });
+    const body = await range("?tz=UTC&window=24h");
+    const byBasis = new Map(body.series.map((series) => [series.accounting_basis, series.totals]));
+
+    expect(byBasis.get("unpaired-v1")?.cache_hit_rate).toBeNull();
+    const weighted = byBasis.get("weighted-v1");
+    expect(weighted).toMatchObject({
+      unit_count: 2,
+      input_tokens: 400,
+      cached_tokens: 100,
+      input_counted: 2,
+      cached_counted: 2,
+      is_partial: true,
+    });
+    expect(weighted?.cache_hit_rate).toBeCloseTo(0.25, 10);
+
+    expect(byBasis.get("measured-zero-v1")?.cache_hit_rate).toBe(0);
+    expect(byBasis.get("zero-denominator-v1")?.cache_hit_rate).toBeNull();
+    expect(byBasis.get("missing-cache-v1")).toMatchObject({
+      cache_hit_rate: null,
+      cached_tokens: null,
+      cached_counted: 0,
+      is_partial: true,
+    });
+    expect(byBasis.get("incompatible-v1")).toMatchObject({
+      cache_hit_rate: null,
+      cached_tokens: 100,
+      cached_counted: 1,
+      input_counted: 3,
+      is_partial: true,
+    });
+  });
+
+  it("rejects unknown windows and timezones", async () => {
+    for (const query of ["?tz=UTC&window=90d", "?tz=Mars/Base&window=24h"]) {
+      const response = await app.request(
+        `https://bilan-web.example/api/v1/usage/range${query}`,
+        {},
+        env,
+      );
+      expect(response.status).toBe(400);
     }
   });
 });

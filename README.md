@@ -89,7 +89,8 @@ instructions for adding a scenario are in [docs/STORYBOOK.md](docs/STORYBOOK.md)
   absence of read routes.
 - `bilan-web` worker-pool tests: balance overview/history behavior, timezone
   month and daily usage slicing (including non-whole-hour offset disclosure),
-  per-column completeness flags, latest-valid per-key quota selection, AGY and
+  hour-bounded rolling ranges with current-hour inclusion, weighted cache hit
+  rate availability, per-column completeness flags, latest-valid per-key quota selection, AGY and
   Codex quota subjects without AGY token usage, future-clock anomaly exclusion
   from windows and freshness, identity/machine usage separation, push-to-read
   integration over one D1 binding, and the absence of write routes.
@@ -178,6 +179,7 @@ Then open `http://127.0.0.1:8788` or query:
 ```sh
 curl "http://127.0.0.1:8788/api/v1/overview?tz=Asia%2FShanghai&month=2026-11"
 curl "http://127.0.0.1:8788/api/v1/usage/daily?tz=Asia%2FShanghai&month=2026-11"
+curl "http://127.0.0.1:8788/api/v1/usage/range?tz=Asia%2FShanghai&window=24h"
 curl "http://127.0.0.1:8788/api/v1/balances/history?provider=openrouter&days=30"
 ```
 

@@ -93,6 +93,54 @@ export interface BucketAttributionInfo {
   bucket_attribution_note: string | null;
 }
 
+export const HOUR_MS = 3_600_000;
+
+export interface HourRange {
+  start: string;
+  end: string;
+  current_hour_start: string;
+}
+
+/**
+ * A bounded UTC-hour range that always includes the partial hour containing
+ * `now`. `end` is exclusive, so `start` plus `hours` hourly buckets are read.
+ */
+export function rollingHourRangeUtc(now: Date, hours: number): HourRange {
+  if (!Number.isInteger(hours) || hours < 1) {
+    throw new Error("Invalid rolling hour range");
+  }
+  const currentHourMs = Math.floor(now.getTime() / HOUR_MS) * HOUR_MS;
+  const startMs = currentHourMs - (hours - 1) * HOUR_MS;
+  return {
+    start: utcSecondIso(new Date(startMs)),
+    end: utcSecondIso(new Date(currentHourMs + HOUR_MS)),
+    current_hour_start: utcSecondIso(new Date(currentHourMs)),
+  };
+}
+
+/**
+ * Daily grouping inside an hour-based range is approximate for timezones
+ * whose UTC offset is not a whole number of hours.
+ */
+export function bucketAttributionForHourlyRange(
+  timeZone: string,
+  range: Pick<HourRange, "start" | "end">,
+): BucketAttributionInfo {
+  const instants = [new Date(range.start), new Date(Date.parse(range.end) - HOUR_MS)];
+  const wholeHourOffsets = instants.every(
+    (instant) => utcOffsetMs(instant, timeZone) % HOUR_MS === 0,
+  );
+  if (wholeHourOffsets) {
+    return { bucket_attribution: "exact", bucket_attribution_note: null };
+  }
+  return {
+    bucket_attribution: "approximate",
+    bucket_attribution_note:
+      `Hourly UTC buckets are attributed by bucket_start. ${timeZone} has a non-whole-hour ` +
+      "UTC offset, so daily points inside this hour-based range are approximate.",
+  };
+}
+
 /** UTC instants for the inclusive start and exclusive end of a local month. */
 export function monthRangeUtc(month: string, timeZone: string): MonthRange {
   if (!isValidMonth(month) || !isValidTimeZone(timeZone)) {
