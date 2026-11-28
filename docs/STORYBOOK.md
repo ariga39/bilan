@@ -53,7 +53,8 @@ Storybook pins `Date` so relative ages and the default month do not drift.
 | `Anomalous` | A clock-anomaly warning on an otherwise current key                |
 | `Missing reset` | Windows whose reset time is not reported                       |
 | `Funded provider` | A balance with funded/credit values                          |
-| `Usage (populated)` | Today, monthly totals, mixed coverage and daily trends    |
+| `Usage (rolling 24h and monthly history)` | Current-hour-inclusive 24h requests/tokens/cache trends plus monthly history |
+| `Usage (rolling 30d)` | Daily rolling detail for the 30-day interval                 |
 | `Usage (mobile)` | Compact 390 × 844 usage header and first platform values     |
 | `Usage (sparse partial and unknown coverage)` | Partial and NULL token columns |
 | `Usage (empty historical month)` | A labelled historical range with no rows      |
@@ -68,9 +69,12 @@ current samples, a delayed DeepSeek balance, a stale OpenCode Go key, a failed
 producer, and a future-clock anomaly. Usage rows only exist for November 2026:
 selecting another month returns empty usage rows (and empty freshness metadata)
 for both the overview and daily responses, while producers, balances, and live
-quota windows stay populated. The usage stories open the dedicated `/usage`
-route directly, and exercise the sparse/partial/unknown fixture, the empty
-historical month, and the Asia/Kolkata approximation note. The nine OpenCode Go
+quota windows stay populated. The rolling range fixtures use the same fixed
+clock to generate hour-bounded 24h points (with the current hour flagged) and
+daily 7d/30d points, so interval switching, weighted cache rates, and empty
+range states stay deterministic offline. The usage stories open the dedicated
+`/usage` route directly, and exercise the sparse/partial/unknown fixture, the
+empty historical month, and the Asia/Kolkata approximation note. The nine OpenCode Go
 keys exercise the dashboard visibility rule: three recent keys are visible (one
 just under seven days, one restored by a recent failed attempt) and six older
 keys are omitted, including the exact seven-day boundary and a

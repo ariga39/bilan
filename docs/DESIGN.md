@@ -474,6 +474,9 @@ Keep v1 focused strictly on **seeing real, accurate data clearly** (zero manual-
   - **Monthly Usage** (Codex & OpenCode Go): totals grouped by `(source, accounting_basis, actor_kind, actor_id, model, effort)` with separate token columns, `unit_kind`, `unit_count`, `coverage_gaps`, and per-column completeness flags (`is_partial`). Uncollected sources (AGY) are omitted, never returned as `0`.
 - `GET /api/v1/usage/daily?tz=Asia/Shanghai&month=2026-11`:
   - Daily aggregated rows per source for simple trend display (never summing across incompatible `accounting_basis` or `unit_kind`).
+- `GET /api/v1/usage/range?tz=Asia/Shanghai&window=24h` (`24h` | `7d` | `30d`):
+  - A bounded UTC-hour range independent of the selected calendar month. It always includes the current partial hour; `range_start` is the first inclusive hour, `range_end` is exclusive, and `current_hour_start` names the partial hour. `24h` returns hourly points while `7d`/`30d` group the same hourly buckets into local daily points.
+  - Series stay split by `(source, accounting_basis, unit_kind)` and retain per-column counts, `NULL` counters, and `is_partial`. `cache_hit_rate` is weighted cached input / input tokens only when both counters cover the same requests and the input denominator is positive; missing or incompatible coverage and zero denominators stay `null` (unavailable), never a fabricated `0%`.
 - `GET /api/v1/balances/history?provider=openrouter&days=30`:
   - Balance time-series for sparklines/tables.
 
@@ -484,8 +487,9 @@ Keep v1 focused strictly on **seeing real, accurate data clearly** (zero manual-
 3. **Balances & history**:
    - OpenRouter & DeepSeek current balances (+ Net Balance Change; + Reported Usage Delta for OpenRouter). Empty balances collapse to one line and do not request history.
    - 30-day balance history loads after the first useful content; each currency keeps its own series and axis.
-4. **Token Usage Summary (Month / Timezone switchable)**: the Overview links to the dedicated Usage view.
-   - **Codex** (`debitmetre`, by machine/model/effort) & **OpenCode Go** (`orihsus`, by identity/model) breakdown tables with separate token columns, explicit partial/coverage-gap badges, and a daily view.
+4. **Token Usage Summary (Month / Timezone / Rolling interval switchable)**: the Overview links to the dedicated Usage view.
+   - **Rolling intervals (`24h` / `7d` / `30d`)**: hour-bounded windows that include the current partial hour, with requests, input/output tokens, weighted input-token cache hit rate, and hourly (`24h`) or daily (`7d`/`30d`) trends split by source and accounting basis. Missing/incompatible cache counters and zero denominators show unavailable, not `0%`.
+   - **Codex** (`debitmetre`, by machine/model/effort) & **OpenCode Go** (`orihsus`, by identity/model) calendar-month breakdown tables with separate token columns, explicit partial/coverage-gap badges, and a daily view retained below the rolling intervals.
    - AGY token usage is not shown (and never displayed as `0`).
 
 ---
