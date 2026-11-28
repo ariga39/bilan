@@ -429,7 +429,7 @@ Architectural stack decisions are fixed here so implementation stays consistent 
   - **React + TypeScript + Vite** + **TanStack Start** (file routes and URL search)
   - **TanStack Router** for the shared Overview/Usage navigation contract and **TanStack Query** for loader-prefetched, SSR-hydrated reads
   - **Tailwind CSS** + **shadcn/ui** (Radix UI primitives) + **lucide-react** icons
-  - **Recharts** for balance history and daily usage trend charts
+  - **Recharts** for balance history and rolling usage charts
 - **Cloudflare Build/Runtime**: **`@cloudflare/vite-plugin`** + `wrangler`; a custom Worker entry routes public `/api/*` through Hono while TanStack Start serves SSR. D1 remains server-only.
 - **Formatting, Linting & Testing (JS/TS)**:
   - **oxfmt** (formatter)
@@ -489,7 +489,7 @@ Keep v1 focused strictly on **seeing real, accurate data clearly** (zero manual-
    - 30-day balance history loads after the first useful content; each currency keeps its own series and axis.
 4. **Token Usage Summary (Month / Timezone / Rolling interval switchable)**: the Overview links to the dedicated Usage view.
    - **Rolling intervals (`24h` / `7d` / `30d`)**: hour-bounded windows that include the current partial hour, with requests, input/output tokens, weighted input-token cache hit rate, and hourly (`24h`) or daily (`7d`/`30d`) trends split by source and accounting basis. Missing/incompatible cache counters and zero denominators show unavailable, not `0%`.
-   - **Codex** (`debitmetre`, by machine/model/effort) & **OpenCode Go** (`orihsus`, by identity/model) calendar-month breakdown tables with separate token columns, explicit partial/coverage-gap badges, and a daily view retained below the rolling intervals.
+   - **Codex** (`debitmetre`, by machine/model/effort) & **OpenCode Go** (`orihsus`, by identity/model) calendar-month breakdown tables with separate token columns, explicit partial/coverage-gap badges, and daily detail available in the rolling usage section.
    - AGY token usage is not shown (and never displayed as `0`).
 
 ---

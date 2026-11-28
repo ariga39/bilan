@@ -8,7 +8,7 @@ import type {
 } from "@bilan/shared";
 import { dashboardQuotaSubjects } from "@bilan/shared";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
+import { Outlet, RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useMemo } from "react";
 
@@ -30,6 +30,9 @@ import type { StorybookScenario } from "./scenarios";
 import { STORYBOOK_SCENARIOS, buildScenarioOverview } from "./scenarios";
 import type { DashboardDataSource, UsageInput, UsageRangeInput } from "../../query/dashboard";
 import { routeTree } from "../../routeTree.gen";
+
+// Storybook owns the iframe document. Mount only the matched page inside its canvas.
+routeTree.update({ component: Outlet });
 
 function overviewFor(input: UsageInput, scenario: StorybookScenario): OverviewResponse {
   const base =
