@@ -74,7 +74,7 @@ export function TokenCell({ aggregate, mode }: { aggregate: TokenAggregate; mode
   const isPartial = isAggregatePartial(aggregate);
   return (
     <span
-      className="inline-flex items-baseline gap-1 tabular-nums"
+      className="inline-flex max-w-full flex-wrap items-baseline gap-x-1 tabular-nums"
       title={aggregateTitle(aggregate)}
     >
       <span>{formatMetric(aggregate.value, mode)}</span>
@@ -102,7 +102,11 @@ export function Summary({
   compact?: boolean;
 }) {
   return (
-    <div aria-label={label} className={cn("grid gap-3.5", groups.length > 1 && "lg:grid-cols-2")}>
+    <div
+      role="group"
+      aria-label={label}
+      className={cn("grid gap-3.5", groups.length > 1 && "lg:grid-cols-2")}
+    >
       {groups.map((group) => {
         const metered = groupMeteredCaption(group);
         const accent = sourceAccent(group.source);
@@ -152,7 +156,7 @@ export function Summary({
                   </dt>
                   <dd
                     className={cn(
-                      "mt-0.5 truncate font-bold tracking-tight text-starlight-mist tabular-nums",
+                      "mt-0.5 wrap-anywhere font-bold tracking-tight text-starlight-mist tabular-nums",
                       compact ? "text-lg sm:text-xl" : "text-xl sm:text-2xl",
                     )}
                     title={formatNumber(group.requests)}
@@ -167,7 +171,7 @@ export function Summary({
                   </dt>
                   <dd
                     className={cn(
-                      "mt-0.5 truncate font-semibold text-starlight-parchment",
+                      "mt-0.5 wrap-anywhere font-semibold text-starlight-parchment",
                       compact ? "text-base sm:text-lg" : "text-lg sm:text-xl",
                     )}
                   >
@@ -181,7 +185,7 @@ export function Summary({
                   </dt>
                   <dd
                     className={cn(
-                      "mt-0.5 truncate font-semibold text-starlight-blush",
+                      "mt-0.5 wrap-anywhere font-semibold text-starlight-blush",
                       compact ? "text-base sm:text-lg" : "text-lg sm:text-xl",
                     )}
                   >
@@ -191,15 +195,15 @@ export function Summary({
               </dl>
 
               <dl className="grid grid-cols-2 gap-2 rounded-xl border border-starlight-gold/10 bg-starlight-abyss/70 px-3 py-2 text-xs">
-                <div className="flex min-w-0 items-baseline justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2">
                   <dt className="text-[11px] text-muted-foreground">Cached</dt>
-                  <dd className="truncate font-medium text-starlight-teal-soft">
+                  <dd className="min-w-0 wrap-anywhere font-medium text-starlight-teal-soft">
                     <TokenCell aggregate={group.cached} mode={mode} />
                   </dd>
                 </div>
-                <div className="flex min-w-0 items-baseline justify-between gap-2 border-l border-starlight-gold/12 pl-2.5">
+                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 border-l border-starlight-gold/12 pl-2.5">
                   <dt className="text-[11px] text-muted-foreground">Reasoning</dt>
-                  <dd className="truncate font-medium text-starlight-lilac">
+                  <dd className="min-w-0 wrap-anywhere font-medium text-starlight-lilac">
                     <TokenCell aggregate={group.reasoning} mode={mode} />
                   </dd>
                 </div>
