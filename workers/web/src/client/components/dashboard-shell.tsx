@@ -1,6 +1,8 @@
 import { useQueryClient, useQueryErrorResetBoundary } from "@tanstack/react-query";
 import { Link, useRouter } from "@tanstack/react-router";
+import type { LucideIcon } from "lucide-react";
 import { RefreshCw, Sparkles } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -90,6 +92,36 @@ export function DashboardHeader({
         </div>
       </div>
     </header>
+  );
+}
+
+export function SectionLabel({
+  icon: Icon,
+  title,
+  meta,
+}: {
+  icon: LucideIcon;
+  title: string;
+  meta?: ReactNode;
+}) {
+  return (
+    <div className="mb-2.5 flex flex-wrap items-center gap-2">
+      <h2
+        style={{ fontFamily: "var(--font-display)" }}
+        className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-starlight-gold"
+      >
+        <Icon className="size-3.5" aria-hidden="true" />
+        {title}
+      </h2>
+      <span
+        aria-hidden="true"
+        className="h-px flex-1 bg-gradient-to-r from-starlight-gold/35 via-starlight-rose/25 to-transparent"
+      />
+      {meta ? <span className="text-xs text-muted-foreground">{meta}</span> : null}
+      <span aria-hidden="true" className="text-[10px] text-starlight-gold/65">
+        ☽ ✦
+      </span>
+    </div>
   );
 }
 

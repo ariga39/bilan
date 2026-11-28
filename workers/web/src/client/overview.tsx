@@ -3,32 +3,12 @@ import { Activity, AlertTriangle, CircleDollarSign, History } from "lucide-react
 
 import { BalanceCard } from "@/components/balance-card";
 import { BalanceHistoryChart } from "@/components/balance-history-chart";
+import { SectionLabel } from "@/components/dashboard-shell";
 import { HealthSummary } from "@/components/health-summary";
 import { QuotaOverview } from "@/components/quota-overview";
 import { UsageEntry } from "@/components/usage-entry";
 import { Card, CardContent } from "@/components/ui/card";
 import type { DashboardSearch } from "../search";
-
-function SectionLabel({ icon: Icon, title }: { icon: typeof Activity; title: string }) {
-  return (
-    <div className="mb-2 flex items-center gap-2">
-      <h2
-        style={{ fontFamily: "var(--font-display)" }}
-        className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-starlight-gold"
-      >
-        <Icon className="size-3.5" aria-hidden="true" />
-        {title}
-      </h2>
-      <span
-        aria-hidden="true"
-        className="h-px flex-1 bg-gradient-to-r from-starlight-gold/35 via-starlight-rose/25 to-transparent"
-      />
-      <span aria-hidden="true" className="text-[10px] text-starlight-gold/65">
-        ☽ ✦
-      </span>
-    </div>
-  );
-}
 
 function HistorySection({
   providers,
