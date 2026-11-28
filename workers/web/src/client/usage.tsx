@@ -1,9 +1,4 @@
-import type {
-  OverviewResponse,
-  UsageDailyResponse,
-  UsageRangeResponse,
-  UsageRangeWindow,
-} from "@bilan/shared";
+import type { OverviewResponse, UsageRangeResponse, UsageRangeWindow } from "@bilan/shared";
 
 import { UsageSection } from "@/components/usage-section";
 import type { DashboardSearch } from "../search";
@@ -11,11 +6,10 @@ import type { DashboardSearch } from "../search";
 export function UsageDashboard({
   search,
   overview,
-  daily,
   range,
-  dailyLoading = false,
-  dailyError = null,
+  overviewUpdating = false,
   rangeLoading = false,
+  rangeUpdating = false,
   rangeError = null,
   refreshError = null,
   onTimezoneChange,
@@ -24,11 +18,10 @@ export function UsageDashboard({
 }: {
   search: DashboardSearch;
   overview: OverviewResponse;
-  daily: UsageDailyResponse | null;
   range: UsageRangeResponse | null;
-  dailyLoading?: boolean;
-  dailyError?: string | null;
+  overviewUpdating?: boolean;
   rangeLoading?: boolean;
+  rangeUpdating?: boolean;
   rangeError?: string | null;
   refreshError?: string | null;
   onTimezoneChange: (timezone: string) => void;
@@ -36,10 +29,15 @@ export function UsageDashboard({
   onWindowChange: (window: UsageRangeWindow) => void;
 }) {
   const rangeWindow = search.range ?? "24h";
-  const selectedDaily =
-    daily && daily.timezone === search.tz && daily.month === search.month ? daily : null;
+  const selectedUsage =
+    (overview.usage.timezone === search.tz && overview.usage.month === search.month) ||
+    overviewUpdating
+      ? overview.usage
+      : null;
   const selectedRange =
-    range && range.timezone === search.tz && range.window === rangeWindow ? range : null;
+    range && ((range.timezone === search.tz && range.window === rangeWindow) || rangeUpdating)
+      ? range
+      : null;
 
   return (
     <>
@@ -53,20 +51,14 @@ export function UsageDashboard({
       ) : null}
 
       <UsageSection
-        usage={
-          overview.usage.timezone === search.tz && overview.usage.month === search.month
-            ? overview.usage
-            : null
-        }
-        daily={selectedDaily}
+        usage={selectedUsage}
         range={selectedRange}
         rangeWindow={rangeWindow}
         timezone={search.tz}
         month={search.month}
-        generatedAt={overview.generated_at}
-        dailyLoading={dailyLoading}
-        dailyError={dailyError}
+        isUpdating={overviewUpdating}
         rangeLoading={rangeLoading}
+        rangeUpdating={rangeUpdating}
         rangeError={rangeError}
         onTimezoneChange={onTimezoneChange}
         onMonthChange={onMonthChange}

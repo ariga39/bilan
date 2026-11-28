@@ -1,14 +1,10 @@
 /* oxlint-disable typescript/no-unsafe-assignment -- TanStack Router generated search types */
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { DashboardErrorNotice, DashboardPending } from "@/components/dashboard-shell";
 import { UsageDashboard } from "@/usage";
-import {
-  overviewQueryOptions,
-  usageDailyQueryOptions,
-  usageRangeQueryOptions,
-} from "../../query/dashboard";
+import { overviewQueryOptions, usageRangeQueryOptions } from "../../query/dashboard";
 import type { DashboardSearch } from "../../search";
 import { validateDashboardSearch } from "../../search";
 
@@ -21,8 +17,7 @@ export const Route = createFileRoute("/_dashboard/usage")({
   }),
   loader: async ({ context, deps }) => {
     await context.queryClient.query(overviewQueryOptions(context.dataSource, deps));
-    // Secondary usage series failures must not replace the route or navigation.
-    await context.queryClient.prefetchQuery(usageDailyQueryOptions(context.dataSource, deps));
+    // Secondary rolling usage failures must not replace the route or navigation.
     await context.queryClient.prefetchQuery(usageRangeQueryOptions(context.dataSource, deps));
   },
   headers: () => ({ "Cache-Control": "private, no-store" }),
@@ -32,9 +27,7 @@ export const Route = createFileRoute("/_dashboard/usage")({
 });
 
 function UsageError({ error }: { error: unknown }) {
-  return (
-    <DashboardErrorNotice error={error} queryKeys={["overview", "usage-daily", "usage-range"]} />
-  );
+  return <DashboardErrorNotice error={error} queryKeys={["overview", "usage-range"]} />;
 }
 
 function UsageRoute() {
@@ -43,24 +36,20 @@ function UsageRoute() {
   const navigate = useNavigate();
   const overview = useQuery({
     ...overviewQueryOptions(dataSource, search),
-    refetchInterval: 60_000,
-  });
-  const daily = useQuery({
-    ...usageDailyQueryOptions(dataSource, search),
+    placeholderData: keepPreviousData,
     refetchInterval: 60_000,
   });
   const range = useQuery({
     ...usageRangeQueryOptions(dataSource, search),
+    placeholderData: keepPreviousData,
     refetchInterval: 60_000,
   });
   const refreshError =
     overview.isError && overview.data
       ? "Overview refresh failed. Showing cached data."
-      : daily.isError && daily.data
-        ? "Daily usage refresh failed. Showing cached data."
-        : range.isError && range.data
-          ? "Rolling usage refresh failed. Showing cached data."
-          : null;
+      : range.isError && range.data
+        ? "Rolling usage refresh failed. Showing cached data."
+        : null;
 
   if (overview.data === undefined) {
     return <DashboardPending label="Loading usage…" />;
@@ -70,18 +59,13 @@ function UsageRoute() {
     <UsageDashboard
       search={search}
       overview={overview.data}
-      daily={daily.data ?? null}
       range={range.data ?? null}
-      dailyLoading={daily.isPending}
-      dailyError={
-        daily.isError && daily.data === undefined
-          ? "Daily usage could not be loaded. Monthly totals remain available."
-          : null
-      }
+      overviewUpdating={overview.isPlaceholderData}
       rangeLoading={range.isPending}
+      rangeUpdating={range.isPlaceholderData}
       rangeError={
         range.isError && range.data === undefined
-          ? "Rolling usage could not be loaded. Monthly history remains available."
+          ? "Rolling usage could not be loaded. Monthly breakdown remains available."
           : null
       }
       refreshError={refreshError}

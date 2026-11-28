@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -86,14 +86,14 @@ describe("shipped dashboard route", () => {
     expect(screen.queryByText("Dashboard data could not be loaded.")).toBeNull();
   });
 
-  it("keeps monthly usage and navigation when daily usage fails", async () => {
+  it("keeps monthly breakdown and navigation when rolling usage fails", async () => {
     const overview = buildPopulatedOverview("UTC", FIXTURE_MONTH);
     const dataSource: DashboardDataSource = {
       overview: async () => overview,
-      daily: async () => {
-        throw new Error("daily unavailable");
+      daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async () => {
+        throw new Error("rolling unavailable");
       },
-      range: async (input) => buildPopulatedRange(input.timezone, input.window),
       history: async (provider) => buildPopulatedHistory(provider),
     };
     const { router, queryClient } = createRouterFor(dataSource, "usage");
@@ -102,12 +102,10 @@ describe("shipped dashboard route", () => {
     expect(await screen.findByText("Token usage")).toBeTruthy();
     expect((await screen.findAllByText("machine-a")).length).toBeGreaterThan(0);
     expect(
-      (
-        await screen.findAllByText(
-          "Daily usage could not be loaded. Monthly totals remain available.",
-        )
-      ).length,
-    ).toBeGreaterThan(0);
+      await screen.findByText(
+        "Rolling usage could not be loaded. Monthly breakdown remains available.",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByText("Dashboard data could not be loaded.")).toBeNull();
     expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy();
   });
@@ -122,25 +120,22 @@ describe("shipped dashboard route", () => {
     const { router, queryClient } = createRouterFor(dataSource, "usage");
     rendered(router, queryClient);
 
-    expect(await screen.findByText("Today · 2026-11-27")).toBeTruthy();
+    expect(await screen.findByText("Monthly breakdown · November 2026")).toBeTruthy();
     expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("UTC");
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
-    const todaySummary = screen.getByLabelText("Today's usage summary");
-    expect(within(todaySummary).getByText("11")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2026-10" } });
 
     expect(await screen.findByText("No token usage for this month")).toBeTruthy();
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe("2026-10");
-    expect(screen.getByText("Today outside this range")).toBeTruthy();
 
     router.history.back();
 
-    expect(await screen.findByText("Today · 2026-11-27")).toBeTruthy();
+    expect(await screen.findByText("Monthly breakdown · November 2026")).toBeTruthy();
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
   });
 
-  it("switches rolling intervals through route search while keeping monthly history", async () => {
+  it("switches rolling intervals through route search while keeping monthly breakdown", async () => {
     const rangeCalls: Array<UsageRangeInput> = [];
     const dataSource: DashboardDataSource = {
       overview: async (input) => buildPopulatedOverview(input.timezone, input.month),
@@ -155,7 +150,7 @@ describe("shipped dashboard route", () => {
     rendered(router, queryClient);
 
     expect(await screen.findByText("Rolling usage")).toBeTruthy();
-    expect(screen.getByText("Last 24 hours")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "24h" }).getAttribute("aria-pressed")).toBe("true");
     expect(rangeCalls.map((call) => call.window)).toContain("24h");
 
     fireEvent.click(screen.getByRole("button", { name: "7d" }));
@@ -168,8 +163,45 @@ describe("shipped dashboard route", () => {
       month: FIXTURE_MONTH,
       range: "7d",
     });
-    expect(await screen.findByText("Last 7 days")).toBeTruthy();
-    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "7d" }).getAttribute("aria-pressed")).toBe("true");
+    });
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
+  });
+
+  it("keeps the usage page mounted without flashing a loader while switching timezone", async () => {
+    let resolveNextOverview: ((value: ReturnType<typeof buildPopulatedOverview>) => void) | null =
+      null;
+    const dataSource: DashboardDataSource = {
+      overview: (input) => {
+        if (input.timezone === "Asia/Shanghai") {
+          return new Promise((resolve) => {
+            resolveNextOverview = resolve;
+          });
+        }
+        return Promise.resolve(buildPopulatedOverview(input.timezone, input.month));
+      },
+      daily: async (input) => buildPopulatedDaily(input.timezone, input.month),
+      range: async (input) => buildPopulatedRange(input.timezone, input.window),
+      history: async (provider) => buildPopulatedHistory(provider),
+    };
+    const { router, queryClient } = createRouterFor(dataSource, "usage");
+    rendered(router, queryClient);
+
+    expect(await screen.findByText("Rolling usage")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Timezone"), { target: { value: "Asia/Shanghai" } });
+
+    await waitFor(() => {
+      expect(resolveNextOverview).not.toBeNull();
+    });
+    expect(screen.queryByText("Loading usage…")).toBeNull();
+    expect(screen.getByText("Rolling usage")).toBeTruthy();
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
+
+    resolveNextOverview!(buildPopulatedOverview("Asia/Shanghai", FIXTURE_MONTH));
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("Asia/Shanghai");
+    });
   });
 
   it("redirects legacy usage deep links while retaining tz and month", async () => {
@@ -191,13 +223,14 @@ describe("shipped dashboard route", () => {
     });
     rendered(router, queryClient);
 
-    expect(await screen.findByText("Today · 2026-11-27")).toBeTruthy();
+    expect(await screen.findByText("Monthly breakdown · November 2026")).toBeTruthy();
     expect(router.state.location.pathname).toBe("/usage");
     expect(router.state.location.search).toMatchObject({ tz: "UTC", month: FIXTURE_MONTH });
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe(FIXTURE_MONTH);
   });
 
   it("loads each route's own data without starting the other route's queries", async () => {
+    let rangeCalls = 0;
     let dailyCalls = 0;
     let historyCalls = 0;
     const dataSource: DashboardDataSource = {
@@ -206,7 +239,10 @@ describe("shipped dashboard route", () => {
         dailyCalls += 1;
         return buildPopulatedDaily(input.timezone, input.month);
       },
-      range: async (input) => buildPopulatedRange(input.timezone, input.window),
+      range: async (input) => {
+        rangeCalls += 1;
+        return buildPopulatedRange(input.timezone, input.window);
+      },
       history: async (provider) => {
         historyCalls += 1;
         return buildPopulatedHistory(provider);
@@ -216,6 +252,7 @@ describe("shipped dashboard route", () => {
     const overviewRouter = createRouterFor(dataSource, "overview");
     rendered(overviewRouter.router, overviewRouter.queryClient);
     expect(await screen.findByText("Balance history (30d)")).toBeTruthy();
+    expect(rangeCalls).toBe(0);
     expect(dailyCalls).toBe(0);
     expect(historyCalls).toBeGreaterThan(0);
     cleanup();
@@ -224,7 +261,8 @@ describe("shipped dashboard route", () => {
     const usageRouter = createRouterFor(dataSource, "usage");
     rendered(usageRouter.router, usageRouter.queryClient);
     expect(await screen.findByText("Token usage")).toBeTruthy();
-    expect(dailyCalls).toBeGreaterThan(0);
+    expect(rangeCalls).toBeGreaterThan(0);
+    expect(dailyCalls).toBe(0);
     expect(historyCalls).toBe(historyAfterOverview);
   });
 

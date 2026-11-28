@@ -1,4 +1,4 @@
-import type { MonthlyUsage, UsageDailyResponse, UsageRangeResponse } from "@bilan/shared";
+import type { MonthlyUsage, UsageRangeResponse } from "@bilan/shared";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -7,8 +7,6 @@ import { UsageSection } from "@/components/usage-section";
 import { buildPopulatedOverview, buildPopulatedRange } from "@/stories/fixtures";
 
 afterEach(cleanup);
-
-const GENERATED_AT = "2026-11-02T12:00:00Z";
 
 const usage: MonthlyUsage = {
   timezone: "Asia/Shanghai",
@@ -111,90 +109,13 @@ const usage: MonthlyUsage = {
   ],
 };
 
-const daily: UsageDailyResponse = {
-  timezone: "Asia/Shanghai",
-  month: "2026-11",
-  bucket_attribution: "exact",
-  bucket_attribution_note: null,
-  rows: [
-    {
-      source: "codex",
-      accounting_basis: "debitmetre-audit-v1",
-      unit_kind: "request",
-      date: "2026-11-01",
-      unit_count: 1,
-      coverage_gaps: 0,
-      input_tokens: 10,
-      input_counted: 1,
-      cached_tokens: 4,
-      cached_counted: 1,
-      uncached_tokens: 6,
-      uncached_counted: 1,
-      cache_write_tokens: 0,
-      cache_write_counted: 1,
-      output_tokens: 5,
-      output_counted: 1,
-      reasoning_tokens: 1,
-      reasoning_counted: 1,
-      is_partial: false,
-      partial_columns: [],
-    },
-    {
-      source: "codex",
-      accounting_basis: "debitmetre-audit-v1",
-      unit_kind: "request",
-      date: "2026-11-02",
-      unit_count: 5,
-      coverage_gaps: 0,
-      input_tokens: 50,
-      input_counted: 5,
-      cached_tokens: 10,
-      cached_counted: 5,
-      uncached_tokens: 40,
-      uncached_counted: 5,
-      cache_write_tokens: 0,
-      cache_write_counted: 5,
-      output_tokens: 25,
-      output_counted: 4,
-      reasoning_tokens: 3,
-      reasoning_counted: 5,
-      is_partial: true,
-      partial_columns: ["output_tokens"],
-    },
-    {
-      source: "opencode",
-      accounting_basis: "orihsus-audit-v1",
-      unit_kind: "request",
-      date: "2026-11-02",
-      unit_count: 2,
-      coverage_gaps: 0,
-      input_tokens: 120,
-      input_counted: 2,
-      cached_tokens: 80,
-      cached_counted: 2,
-      uncached_tokens: 40,
-      uncached_counted: 2,
-      cache_write_tokens: null,
-      cache_write_counted: 0,
-      output_tokens: 10,
-      output_counted: 2,
-      reasoning_tokens: 4,
-      reasoning_counted: 2,
-      is_partial: false,
-      partial_columns: [],
-    },
-  ],
-};
-
 describe("Token usage dashboard section", () => {
-  it("separates platform summaries, today's figures and daily details with partial counters", () => {
+  it("separates platform monthly breakdowns with partial counters and without Today or Daily charts", () => {
     render(
       <UsageSection
         usage={usage}
-        daily={daily}
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
@@ -203,7 +124,11 @@ describe("Token usage dashboard section", () => {
     expect(screen.getByText("Token usage")).toBeTruthy();
     expect(screen.getByLabelText<HTMLSelectElement>("Timezone").value).toBe("Asia/Shanghai");
     expect(screen.getByLabelText<HTMLInputElement>("Month").value).toBe("2026-11");
-    expect(screen.getByText("Breakdown")).toBeTruthy();
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
+
+    // Today and duplicate Daily requests charts are intentionally absent from /usage.
+    expect(screen.queryByText(/^Today · /u)).toBeNull();
+    expect(screen.queryByText("Daily requests")).toBeNull();
 
     const codexTable = screen.getByLabelText(
       "Monthly detail for Codex · debitmetre-audit-v1 · request",
@@ -234,26 +159,6 @@ describe("Token usage dashboard section", () => {
     expect(within(codexTable).getAllByText("0").length).toBeGreaterThan(0);
     expect(screen.queryByText("Partial")).toBeNull();
     expect(screen.getAllByText(/metered/u).length).toBeGreaterThan(0);
-
-    expect(screen.getByText("Today · 2026-11-02")).toBeTruthy();
-    const todaySummary = screen.getByLabelText("Today's usage summary");
-    expect(within(todaySummary).getByText("5")).toBeTruthy();
-    expect(within(todaySummary).getByText("4/5")).toBeTruthy();
-    // Codex keeps its per-column coverage basis; only Go's overall caption uses gaps.
-    expect(within(todaySummary).getByText("80% metered")).toBeTruthy();
-    expect(screen.getAllByText("This month · November 2026").length).toBeGreaterThan(0);
-
-    expect(screen.getByText("Daily requests")).toBeTruthy();
-    expect(
-      screen.getByRole("img", {
-        name: "Daily requests trend for Codex · debitmetre-audit-v1 · request",
-      }),
-    ).toBeTruthy();
-    expect(
-      screen.getByLabelText("Daily exact values for Codex · debitmetre-audit-v1 · request"),
-    ).toBeTruthy();
-    expect(screen.getByText("2026-11-01")).toBeTruthy();
-    expect(screen.getAllByText("2026-11-02").length).toBeGreaterThan(0);
   });
 
   it("uses coverage gaps for Go's overall caption while optional columns keep their coverage", () => {
@@ -301,26 +206,12 @@ describe("Token usage dashboard section", () => {
         },
       ],
     };
-    const optionalDaily: UsageDailyResponse = {
-      timezone: "Asia/Shanghai",
-      month: "2026-11",
-      bucket_attribution: "exact",
-      bucket_attribution_note: null,
-      rows: [
-        {
-          ...optionalUsage.rows[0]!,
-          date: "2026-11-02",
-        },
-      ],
-    };
 
     render(
       <UsageSection
         usage={optionalUsage}
-        daily={optionalDaily}
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
@@ -332,7 +223,7 @@ describe("Token usage dashboard section", () => {
     expect(screen.getAllByText("1/3").length).toBeGreaterThan(0);
   });
 
-  it("formats large token totals compactly by default and switches to exact numbers on toggle", () => {
+  it("formats large token totals compactly by default and switches to exact numbers across rolling and monthly", () => {
     const bigUsage: MonthlyUsage = {
       ...usage,
       rows: [
@@ -346,27 +237,29 @@ describe("Token usage dashboard section", () => {
         },
       ],
     };
+    const rolling = buildPopulatedRange("Asia/Shanghai", "24h");
     render(
       <UsageSection
         usage={bigUsage}
-        daily={daily}
+        range={rolling}
+        rangeWindow="24h"
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
+        onWindowChange={() => undefined}
       />,
     );
 
-    const monthSummary = screen.getByLabelText("This month usage summary");
-    expect(within(monthSummary).getByText("11.3B")).toBeTruthy();
-    expect(within(monthSummary).getByText("20.8M")).toBeTruthy();
-    expect(within(monthSummary).getByText("87.5K")).toBeTruthy();
+    const breakdownSummary = screen.getByRole("group", { name: "Monthly breakdown summary" });
+    expect(within(breakdownSummary).getAllByText("11.3B").length).toBeGreaterThan(0);
+    expect(within(breakdownSummary).getAllByText("20.8M").length).toBeGreaterThan(0);
+    expect(within(breakdownSummary).getAllByText("87.5K").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Exact" }));
-    expect(within(monthSummary).getByText("11,332,976,155")).toBeTruthy();
-    expect(within(monthSummary).getByText("20,763,309")).toBeTruthy();
-    expect(within(monthSummary).getByText("87,467")).toBeTruthy();
+    expect(within(breakdownSummary).getAllByText("11,332,976,155").length).toBeGreaterThan(0);
+    expect(within(breakdownSummary).getAllByText("20,763,309").length).toBeGreaterThan(0);
+    expect(within(breakdownSummary).getAllByText("87,467").length).toBeGreaterThan(0);
   });
 
   it("reports timezone and month changes to the dashboard", () => {
@@ -376,10 +269,8 @@ describe("Token usage dashboard section", () => {
     render(
       <UsageSection
         usage={usage}
-        daily={daily}
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={onTimezoneChange}
         onMonthChange={onMonthChange}
       />,
@@ -392,7 +283,7 @@ describe("Token usage dashboard section", () => {
     expect(onMonthChange).toHaveBeenCalledWith("2026-10");
   });
 
-  it("labels a historical range distinctly from today", () => {
+  it("shows an explicit empty state for a historical month without inventing token totals", () => {
     render(
       <UsageSection
         usage={{
@@ -404,23 +295,19 @@ describe("Token usage dashboard section", () => {
           data_age_seconds: null,
           source_freshness: [],
         }}
-        daily={{ ...daily, timezone: "UTC", month: "2026-10", rows: [] }}
         timezone="UTC"
         month="2026-10"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
     );
 
-    expect(screen.getAllByText(/Historical month · October 2026/u).length).toBeGreaterThan(0);
-    expect(screen.getByText("Today outside this range")).toBeTruthy();
-    expect(screen.queryByText(/^Today · /u)).toBeNull();
+    expect(screen.getByText("Monthly breakdown · October 2026")).toBeTruthy();
     expect(screen.getByText("No token usage for this month")).toBeTruthy();
-    expect(screen.getByText("No daily usage for this month.")).toBeTruthy();
+    expect(screen.queryByText(/^0$/u)).toBeNull();
   });
 
-  it("discloses approximate hour-bucket boundaries for non-whole-hour offsets", () => {
+  it("discloses approximate hour-bucket boundaries once at the top for non-whole-hour offsets", () => {
     const note =
       "Hourly UTC buckets are attributed by bucket_start. Asia/Kolkata has a non-whole-hour UTC offset, so month and day boundaries are approximate.";
 
@@ -432,17 +319,17 @@ describe("Token usage dashboard section", () => {
           bucket_attribution: "approximate",
           bucket_attribution_note: note,
         }}
-        daily={{
-          ...daily,
-          timezone: "Asia/Kolkata",
+        range={{
+          ...buildPopulatedRange("Asia/Kolkata", "24h"),
           bucket_attribution: "approximate",
           bucket_attribution_note: note,
         }}
+        rangeWindow="24h"
         timezone="Asia/Kolkata"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
+        onWindowChange={() => undefined}
       />,
     );
 
@@ -452,49 +339,25 @@ describe("Token usage dashboard section", () => {
     expect(screen.getByText(/Asia\/Kolkata has a non-whole-hour/u)).toBeTruthy();
   });
 
-  it("shows an explicit empty state without inventing token totals", () => {
-    render(
-      <UsageSection
-        usage={{
-          ...usage,
-          rows: [],
-          latest_bucket_start: null,
-          data_age_seconds: null,
-          source_freshness: [],
-        }}
-        daily={{ ...daily, timezone: "UTC", rows: [] }}
-        timezone="UTC"
-        month="2026-11"
-        generatedAt={GENERATED_AT}
-        onTimezoneChange={() => undefined}
-        onMonthChange={() => undefined}
-      />,
-    );
-
-    expect(screen.getByText("No token usage for this month")).toBeTruthy();
-    expect(screen.getByText("No daily usage for this month.")).toBeTruthy();
-    expect(screen.queryByText(/^0$/u)).toBeNull();
-  });
-
-  it("keeps monthly totals visible when the daily series fails", () => {
+  it("keeps monthly breakdown visible when rolling usage fails", () => {
     render(
       <UsageSection
         usage={usage}
-        daily={null}
+        range={null}
+        rangeWindow="24h"
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
-        dailyError="Daily usage could not be loaded. Monthly totals remain available."
+        rangeError="Rolling usage could not be loaded. Monthly breakdown remains available."
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
+        onWindowChange={() => undefined}
       />,
     );
 
-    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
     expect(
-      screen.getAllByText("Daily usage could not be loaded. Monthly totals remain available.")
-        .length,
-    ).toBeGreaterThan(0);
+      screen.getByText("Rolling usage could not be loaded. Monthly breakdown remains available."),
+    ).toBeTruthy();
     expect(screen.queryByText("Usage could not be loaded")).toBeNull();
   });
 
@@ -516,19 +379,17 @@ describe("Token usage dashboard section", () => {
     expect(screen.getByText(/Today 2026-11-27/u)).toBeTruthy();
   });
 
-  it("shows rolling requests, token and cache trends without losing monthly history", () => {
+  it("shows rolling requests, token and cache trends alongside monthly breakdown", () => {
     const onWindowChange = vi.fn();
     const rolling = buildPopulatedRange("Asia/Shanghai", "24h");
 
     render(
       <UsageSection
         usage={usage}
-        daily={daily}
         range={rolling}
         rangeWindow="24h"
         timezone="Asia/Shanghai"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
         onWindowChange={onWindowChange}
@@ -536,10 +397,6 @@ describe("Token usage dashboard section", () => {
     );
 
     expect(screen.getByText("Rolling usage")).toBeTruthy();
-    expect(
-      screen.getByText(/Hour-based boundary · includes the current partial hour/u),
-    ).toBeTruthy();
-    expect(screen.getAllByText(/Hourly detail/u).length).toBeGreaterThan(0);
 
     const selector = screen.getByRole("group", { name: "Rolling usage window" });
     expect(within(selector).getByRole("button", { name: "24h" }).getAttribute("aria-pressed")).toBe(
@@ -573,11 +430,9 @@ describe("Token usage dashboard section", () => {
       name: "Rolling usage for Codex · debitmetre-audit-v1 · request",
     });
     expect(within(codex).getAllByLabelText(/Cache hit rate \d/u).length).toBeGreaterThan(0);
-    expect(within(codex).getByText("Hourly detail")).toBeTruthy();
 
-    // The calendar month remains visible below the rolling interval.
-    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
-    expect(screen.getByText("Breakdown")).toBeTruthy();
+    // Monthly breakdown remains visible below the rolling interval.
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
   });
 
   it("keeps missing cache coverage unavailable while a measured zero stays 0%", () => {
@@ -609,12 +464,10 @@ describe("Token usage dashboard section", () => {
     render(
       <UsageSection
         usage={usage}
-        daily={daily}
         range={missing}
         rangeWindow="24h"
         timezone="UTC"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
         onWindowChange={() => undefined}
@@ -639,12 +492,10 @@ describe("Token usage dashboard section", () => {
     render(
       <UsageSection
         usage={usage}
-        daily={daily}
         range={{ ...buildPopulatedRange("UTC", "7d"), series: [] }}
         rangeWindow="7d"
         timezone="UTC"
         month="2026-11"
-        generatedAt={GENERATED_AT}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
         onWindowChange={() => undefined}
@@ -652,6 +503,6 @@ describe("Token usage dashboard section", () => {
     );
 
     expect(screen.getByText(/No usage in this rolling last 7 days range/u)).toBeTruthy();
-    expect(screen.getAllByText(/This month · November 2026/u).length).toBeGreaterThan(0);
+    expect(screen.getByText("Monthly breakdown · November 2026")).toBeTruthy();
   });
 });
