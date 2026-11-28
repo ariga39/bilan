@@ -815,10 +815,8 @@ describe("B5 multi-host acceptance", () => {
     const usageHtml = renderToStaticMarkup(
       <UsageSection
         usage={overview.usage}
-        daily={daily}
         timezone={TIMEZONE}
         month={MONTH}
-        generatedAt={overview.generated_at}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,

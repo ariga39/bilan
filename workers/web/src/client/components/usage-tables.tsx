@@ -1,11 +1,9 @@
 import { ChevronDown, Layers } from "lucide-react";
 
-import { SectionLabel } from "@/components/dashboard-shell";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatNumber } from "@/lib/format";
-import { sourceLabel } from "@/lib/usage";
+import { monthLabel, sourceLabel } from "@/lib/usage";
 import type {
-  DailyUsageGroup,
   MonthlyUsageGroup,
   NumberMode,
   TokenAggregate,
@@ -90,185 +88,6 @@ export function TokenCell({ aggregate, mode }: { aggregate: TokenAggregate; mode
   );
 }
 
-export function Summary({
-  groups,
-  label,
-  mode,
-  compact = false,
-}: {
-  groups: ReadonlyArray<UsageGroupFields>;
-  label: string;
-  mode: NumberMode;
-  compact?: boolean;
-}) {
-  return (
-    <div
-      role="group"
-      aria-label={label}
-      className={cn("grid gap-3.5", groups.length > 1 && "lg:grid-cols-2")}
-    >
-      {groups.map((group) => {
-        const metered = groupMeteredCaption(group);
-        const accent = sourceAccent(group.source);
-        return (
-          <Card
-            key={group.key}
-            className={cn("min-w-0 gap-0 overflow-hidden", compact ? "py-3.5" : "py-4")}
-          >
-            <span
-              aria-hidden="true"
-              className={cn(
-                "pointer-events-none absolute inset-x-6 top-0 h-[2px] bg-gradient-to-r",
-                accent.accentLine,
-              )}
-            />
-            <CardContent className="space-y-3 px-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div
-                  className="flex min-w-0 items-center gap-2"
-                  title={`${group.accountingBasis} · ${group.unitKind}`}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={cn("size-2 shrink-0 rounded-full", accent.dot)}
-                  />
-                  <h3
-                    style={{ fontFamily: "var(--font-display)" }}
-                    className={cn("truncate text-sm font-semibold tracking-wide", accent.title)}
-                  >
-                    {sourceLabel(group.source)}
-                  </h3>
-                </div>
-                {metered ? (
-                  <span
-                    className="rounded-full border border-starlight-gold/20 bg-starlight-void/80 px-2 py-0.5 text-[11px] text-starlight-violet-muted"
-                    title={metered.title}
-                  >
-                    {metered.text}
-                  </span>
-                ) : null}
-              </div>
-
-              <dl className="grid grid-cols-3 gap-2.5">
-                <div className="min-w-0 rounded-xl border border-starlight-gold/15 bg-starlight-void/80 px-3 py-2">
-                  <dt className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                    Requests
-                  </dt>
-                  <dd
-                    className={cn(
-                      "mt-0.5 wrap-anywhere font-bold tracking-tight text-starlight-mist tabular-nums",
-                      compact ? "text-lg sm:text-xl" : "text-xl sm:text-2xl",
-                    )}
-                    title={formatNumber(group.requests)}
-                  >
-                    {formatMetric(group.requests, mode)}
-                  </dd>
-                </div>
-
-                <div className="min-w-0 rounded-xl border border-starlight-gold/15 bg-starlight-void/80 px-3 py-2">
-                  <dt className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                    Input
-                  </dt>
-                  <dd
-                    className={cn(
-                      "mt-0.5 wrap-anywhere font-semibold text-starlight-parchment",
-                      compact ? "text-base sm:text-lg" : "text-lg sm:text-xl",
-                    )}
-                  >
-                    <TokenCell aggregate={group.input} mode={mode} />
-                  </dd>
-                </div>
-
-                <div className="min-w-0 rounded-xl border border-starlight-gold/15 bg-starlight-void/80 px-3 py-2">
-                  <dt className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                    Output
-                  </dt>
-                  <dd
-                    className={cn(
-                      "mt-0.5 wrap-anywhere font-semibold text-starlight-blush",
-                      compact ? "text-base sm:text-lg" : "text-lg sm:text-xl",
-                    )}
-                  >
-                    <TokenCell aggregate={group.output} mode={mode} />
-                  </dd>
-                </div>
-              </dl>
-
-              <dl className="grid grid-cols-2 gap-2 rounded-xl border border-starlight-gold/10 bg-starlight-abyss/70 px-3 py-2 text-xs">
-                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2">
-                  <dt className="text-[11px] text-muted-foreground">Cached</dt>
-                  <dd className="min-w-0 wrap-anywhere font-medium text-starlight-teal-soft">
-                    <TokenCell aggregate={group.cached} mode={mode} />
-                  </dd>
-                </div>
-                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 border-l border-starlight-gold/12 pl-2.5">
-                  <dt className="text-[11px] text-muted-foreground">Reasoning</dt>
-                  <dd className="min-w-0 wrap-anywhere font-medium text-starlight-lilac">
-                    <TokenCell aggregate={group.reasoning} mode={mode} />
-                  </dd>
-                </div>
-              </dl>
-            </CardContent>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
-export function DailyDetailTable({ group, mode }: { group: DailyUsageGroup; mode: NumberMode }) {
-  return (
-    <div className="max-w-full overflow-x-auto rounded-xl border border-starlight-gold/15 bg-starlight-abyss/75">
-      <table
-        className="w-full text-xs sm:text-sm"
-        aria-label={`Daily exact values for ${sourceLabel(group.source)} · ${group.accountingBasis} · ${group.unitKind}`}
-      >
-        <thead className="bg-starlight-night/90 text-left text-[11px] uppercase tracking-wider text-starlight-gold/75">
-          <tr>
-            <th className="px-3 py-2 font-medium">Date</th>
-            <th className="px-3 py-2 text-right font-medium">Requests</th>
-            {TOKEN_COLUMNS.map((column) => (
-              <th key={column.value} className="px-3 py-2 text-right font-medium">
-                {column.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {group.rows.map((row) => (
-            <tr
-              key={`${group.key}-${row.date}`}
-              className="border-t border-starlight-gold/10 transition-colors hover:bg-starlight-violet/10"
-            >
-              <td className="px-3 py-2 font-mono text-xs text-starlight-violet-muted">
-                {row.date}
-              </td>
-              <td
-                className="px-3 py-2 text-right font-medium text-starlight-mist tabular-nums"
-                title={formatNumber(row.unit_count)}
-              >
-                {formatMetric(row.unit_count, mode)}
-              </td>
-              {TOKEN_COLUMNS.map((column) => (
-                <td key={column.value} className="px-3 py-2 text-right text-foreground/90">
-                  <TokenCell
-                    aggregate={{
-                      value: row[column.value],
-                      counted: row[column.counted],
-                      units: row.unit_count,
-                    }}
-                    mode={mode}
-                  />
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 export function MonthlyDetailTable({
   group,
   mode,
@@ -344,72 +163,135 @@ export function MonthlyDetailTable({
 
 export function MonthlyBreakdown({
   groups,
+  month,
   mode,
+  onMonthChange,
 }: {
   groups: ReadonlyArray<MonthlyUsageGroup>;
+  month: string;
   mode: NumberMode;
+  onMonthChange: (month: string) => void;
 }) {
   return (
-    <section className="min-w-0">
-      <SectionLabel icon={Layers} title="Breakdown" />
-      {groups.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-starlight-gold/20 bg-starlight-dusk/55 px-4 py-6 text-center text-sm text-muted-foreground">
-          No breakdown rows for this month.
+    <Card className="min-w-0 gap-3 py-4">
+      <CardHeader className="px-4 pb-0">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <CardTitle
+            style={{ fontFamily: "var(--font-display)" }}
+            className="flex items-center gap-2 text-sm tracking-[0.1em] text-starlight-parchment sm:text-base"
+          >
+            <span className="flex size-6 items-center justify-center rounded-full border border-violet-300/40 bg-violet-400/15 text-violet-200">
+              <Layers className="size-3.5" aria-hidden="true" />
+            </span>
+            Monthly breakdown · {monthLabel(month)}
+          </CardTitle>
+
+          <div>
+            <label className="sr-only" htmlFor="usage-month">
+              Month
+            </label>
+            <input
+              id="usage-month"
+              aria-label="Month"
+              type="month"
+              className="h-8 rounded-full border border-starlight-gold/30 bg-starlight-night/90 px-3 text-xs text-foreground shadow-xs outline-none transition-colors [color-scheme:dark] hover:border-starlight-gold/50 focus-visible:ring-2 focus-visible:ring-ring"
+              value={month}
+              onChange={(event) => {
+                if (event.target.value) {
+                  onMonthChange(event.target.value);
+                }
+              }}
+            />
+          </div>
         </div>
-      ) : (
-        <div className="space-y-3">
-          {groups.map((group) => {
-            const metered = groupMeteredCaption(group);
-            const accent = sourceAccent(group.source);
-            return (
-              <Card key={group.key} className="min-w-0 gap-0 overflow-hidden py-0">
-                <details className="group">
-                  <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-4 py-3.5 transition-colors hover:bg-starlight-violet/10 [&::-webkit-details-marker]:hidden">
-                    <div className="flex min-w-0 items-center gap-2.5">
-                      <ChevronDown
-                        aria-hidden="true"
-                        className="size-4 shrink-0 text-starlight-gold/75 transition-transform duration-200 group-open:rotate-180"
-                      />
-                      <span
-                        aria-hidden="true"
-                        className={cn("size-2 shrink-0 rounded-full", accent.dot)}
-                      />
-                      <span
-                        style={{ fontFamily: "var(--font-display)" }}
-                        className={cn("text-sm font-semibold tracking-wide", accent.title)}
+      </CardHeader>
+
+      <CardContent className="px-4">
+        {groups.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-starlight-gold/20 bg-starlight-abyss/60 px-4 py-8 text-center">
+            <p className="font-medium text-starlight-parchment">No token usage for this month</p>
+          </div>
+        ) : (
+          <div className="space-y-3" role="group" aria-label="Monthly breakdown summary">
+            {groups.map((group) => {
+              const metered = groupMeteredCaption(group);
+              const accent = sourceAccent(group.source);
+              return (
+                <div
+                  key={group.key}
+                  className="relative min-w-0 overflow-hidden rounded-xl border border-starlight-gold/18 bg-starlight-void/80"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "pointer-events-none absolute inset-x-4 top-0 h-[2px] bg-gradient-to-r",
+                      accent.accentLine,
+                    )}
+                  />
+                  <details open className="group">
+                    <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-3.5 py-3 transition-colors hover:bg-starlight-violet/10 [&::-webkit-details-marker]:hidden">
+                      <div
+                        className="flex min-w-0 items-center gap-2"
+                        title={`${group.accountingBasis} · ${group.unitKind}`}
                       >
-                        {sourceLabel(group.source)}
-                      </span>
-                      <span className="rounded-full border border-starlight-gold/15 bg-starlight-void/80 px-2 py-0.5 text-[11px] text-muted-foreground">
-                        {group.rows.length} {group.rows.length === 1 ? "row" : "rows"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <span
-                        className="rounded-full border border-starlight-gold/15 bg-starlight-void/80 px-2.5 py-0.5 font-medium text-starlight-mist tabular-nums"
-                        title={formatNumber(group.requests)}
-                      >
-                        {formatMetric(group.requests, mode)} req
-                      </span>
-                      {metered ? (
+                        <ChevronDown
+                          aria-hidden="true"
+                          className="size-4 shrink-0 text-starlight-gold/75 transition-transform duration-200 group-open:rotate-180"
+                        />
                         <span
-                          className="rounded-full border border-starlight-gold/15 bg-starlight-abyss/70 px-2 py-0.5 text-[11px] text-starlight-violet-muted"
-                          title={metered.title}
+                          aria-hidden="true"
+                          className={cn("size-2 shrink-0 rounded-full", accent.dot)}
+                        />
+                        <span
+                          style={{ fontFamily: "var(--font-display)" }}
+                          className={cn("text-sm font-semibold tracking-wide", accent.title)}
                         >
-                          {metered.text}
+                          {sourceLabel(group.source)}
                         </span>
-                      ) : null}
+                        {metered ? (
+                          <span
+                            className="rounded-full border border-starlight-gold/15 bg-starlight-abyss/70 px-2 py-0.5 text-[10px] text-starlight-violet-muted"
+                            title={metered.title}
+                          >
+                            {metered.text}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <span
+                          className="rounded-full border border-starlight-gold/15 bg-starlight-abyss/80 px-2.5 py-0.5"
+                          title={formatNumber(group.requests)}
+                        >
+                          <strong className="font-semibold text-starlight-mist tabular-nums">
+                            {formatMetric(group.requests, mode)}
+                          </strong>{" "}
+                          req
+                        </span>
+                        <span className="rounded-full border border-starlight-gold/15 bg-starlight-abyss/80 px-2.5 py-0.5">
+                          In{" "}
+                          <strong className="font-medium text-starlight-parchment">
+                            <TokenCell aggregate={group.input} mode={mode} />
+                          </strong>
+                        </span>
+                        <span className="rounded-full border border-starlight-gold/15 bg-starlight-abyss/80 px-2.5 py-0.5">
+                          Out{" "}
+                          <strong className="font-medium text-starlight-blush">
+                            <TokenCell aggregate={group.output} mode={mode} />
+                          </strong>
+                        </span>
+                      </div>
+                    </summary>
+                    <div className="border-t border-starlight-gold/12 px-3.5 pt-3 pb-3.5">
+                      <MonthlyDetailTable group={group} mode={mode} />
                     </div>
-                  </summary>
-                  <div className="border-t border-starlight-gold/12 px-4 pt-3 pb-4">
-                    <MonthlyDetailTable group={group} mode={mode} />
-                  </div>
-                </details>
-              </Card>
-            );
-          })}
-        </div>
-      )}
-    </section>
+                  </details>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

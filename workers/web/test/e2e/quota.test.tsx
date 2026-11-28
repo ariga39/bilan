@@ -586,9 +586,9 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     const usagePageResponse = await httpCall(`${webUrl}/usage?tz=UTC&month=${usageMonth}`);
     expect(usagePageResponse.status, usagePageResponse.body).toBe(200);
     expect(usagePageResponse.body).toContain("Token usage");
+    expect(usagePageResponse.body).toContain("Rolling usage");
     expect(usagePageResponse.body).toContain("Requests");
-    expect(usagePageResponse.body).toContain("Daily requests");
-    expect(usagePageResponse.body).toContain(usageDay);
+    expect(usagePageResponse.body).toContain("Monthly breakdown");
     expect(usagePageResponse.body).toContain("machine-a");
     expect(usagePageResponse.body).toContain("laptop-key");
     expect(usagePageResponse.body).not.toContain("Something went wrong");
@@ -628,24 +628,20 @@ describe("B3/B4 shipper to dashboard E2E", () => {
     const usageHtml = renderToStaticMarkup(
       <UsageSection
         usage={overview.usage}
-        daily={parsedDaily.data}
         timezone="UTC"
         month={usageMonth}
-        generatedAt={overview.generated_at}
         onTimezoneChange={() => undefined}
         onMonthChange={() => undefined}
       />,
     );
     expect(usageHtml).toContain("Token usage");
+    expect(usageHtml).toContain("Monthly breakdown");
     expect(usageHtml).toContain("Monthly detail for Codex · debitmetre-audit-v1 · request");
     expect(usageHtml).toContain("Monthly detail for OpenCode Go · orihsus-audit-v1 · request");
-    expect(usageHtml).toContain("Daily requests");
-    expect(usageHtml).toContain("Daily values (");
     expect(usageHtml).toContain("machine-a");
     expect(usageHtml).toContain("laptop-key");
     expect(usageHtml).toContain(">Identity<");
     expect(usageHtml).toContain(">Machine<");
-    expect(usageHtml.indexOf("Requests")).toBeLessThan(usageHtml.indexOf("Breakdown"));
   });
 
   it("renders visible and >=7d hidden OpenCode keys from the shipped SSR overview", async () => {

@@ -23,11 +23,9 @@ function DashboardLayout() {
     enabled: false,
   });
   const overviewFetching = useIsFetching({ queryKey: ["overview"] });
-  const dailyFetching = useIsFetching({ queryKey: ["usage-daily"] });
   const rangeFetching = useIsFetching({ queryKey: ["usage-range"] });
   const historyFetching = useIsFetching({ queryKey: ["balance-history"] });
-  const refreshing =
-    overviewFetching + (view === "usage" ? dailyFetching + rangeFetching : historyFetching) > 0;
+  const refreshing = overviewFetching + (view === "usage" ? rangeFetching : historyFetching) > 0;
 
   return (
     <div className="min-h-screen overflow-x-clip">
@@ -40,7 +38,6 @@ function DashboardLayout() {
           onRefresh={() => {
             void queryClient.invalidateQueries({ queryKey: ["overview"] });
             if (view === "usage") {
-              void queryClient.invalidateQueries({ queryKey: ["usage-daily"] });
               void queryClient.invalidateQueries({ queryKey: ["usage-range"] });
             } else {
               void queryClient.invalidateQueries({ queryKey: ["balance-history"] });
