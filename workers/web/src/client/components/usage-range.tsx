@@ -167,7 +167,7 @@ function TrendChart({
               strokeWidth={1.8}
               fill={`url(#${gradientId})`}
               connectNulls={false}
-              dot={false}
+              dot={{ r: 2, fill: color, strokeWidth: 0 }}
               isAnimationActive={false}
             />
           </AreaChart>
@@ -177,7 +177,21 @@ function TrendChart({
   );
 }
 
-function RangeDetailTable({ series, mode }: { series: UsageRangeSeries; mode: NumberMode }) {
+function RangeDetailTable({
+  series,
+  mode,
+  range,
+}: {
+  series: UsageRangeSeries;
+  mode: NumberMode;
+  range: UsageRangeResponse;
+}) {
+  const hour = new Intl.DateTimeFormat("en-GB", {
+    timeZone: range.timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "shortOffset",
+  });
   return (
     <details className="rounded-lg border border-starlight-gold/18 bg-starlight-abyss/80 px-2.5 py-1.5 text-xs">
       <summary className="cursor-pointer font-medium text-muted-foreground">
@@ -203,6 +217,7 @@ function RangeDetailTable({ series, mode }: { series: UsageRangeSeries; mode: Nu
               <tr key={`${series.source}-${point.start}`} className="border-t">
                 <td className="px-3 py-1.5 font-mono text-xs">
                   {point.date}
+                  {range.granularity === "hour" ? " " + hour.format(new Date(point.start)) : ""}
                   {point.includes_current_hour ? " (partial hour)" : ""}
                 </td>
                 <td
@@ -375,7 +390,7 @@ function RangeSeriesCard({
       </div>
 
       <div className="mt-2">
-        <RangeDetailTable series={series} mode={mode} />
+        <RangeDetailTable series={series} mode={mode} range={range} />
       </div>
     </div>
   );

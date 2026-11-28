@@ -126,7 +126,7 @@ export function bucketAttributionForHourlyRange(
   timeZone: string,
   range: Pick<HourRange, "start" | "end">,
 ): BucketAttributionInfo {
-  const instants = [new Date(range.start), new Date(Date.parse(range.end) - 1)];
+  const instants = [new Date(range.start), new Date(Date.parse(range.end) - HOUR_MS)];
   const wholeHourOffsets = instants.every(
     (instant) => utcOffsetMs(instant, timeZone) % HOUR_MS === 0,
   );

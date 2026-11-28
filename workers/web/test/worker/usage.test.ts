@@ -591,6 +591,7 @@ describe("GET /api/v1/usage/range", () => {
 
     const body = await range("?tz=UTC&window=7d");
 
+    expect(body.bucket_attribution).toBe("exact");
     expect(body.granularity).toBe("day");
     expect(body.range_start).toBe("2026-11-24T01:00:00Z");
     expect(body.range_end).toBe("2026-12-01T01:00:00Z");
@@ -611,6 +612,9 @@ describe("GET /api/v1/usage/range", () => {
       includes_current_hour: true,
     });
     expect(codex?.points[1]?.cache_hit_rate).toBe(0);
+    vi.setSystemTime(new Date("2026-12-01T01:30:00Z"));
+    const later = await range("?tz=UTC&window=7d");
+    expect(later.series[0]?.points.at(-1)?.includes_current_hour).toBe(false);
   });
 
   it("weights cache rates and leaves missing, incompatible, and zero denominators unavailable", async () => {

@@ -571,7 +571,6 @@ async function loadRangeUsage(
     month: "2-digit",
     day: "2-digit",
   });
-  const currentDate = dateFormatter.format(new Date(range.current_hour_start));
   const result = await db
     .prepare(
       `SELECT bucket_start, source, accounting_basis, unit_kind,
@@ -623,10 +622,7 @@ async function loadRangeUsage(
         unit_kind: row.unit_kind,
         start: row.bucket_start,
         date,
-        includes_current_hour:
-          granularity === "hour"
-            ? row.bucket_start === range.current_hour_start
-            : date === currentDate,
+        includes_current_hour: false,
         ...emptyUsageCounters(),
       };
       points.set(key, point);
@@ -634,6 +630,7 @@ async function loadRangeUsage(
     if (row.bucket_start < point.start) {
       point.start = row.bucket_start;
     }
+    point.includes_current_hour ||= row.bucket_start === range.current_hour_start;
     addUsageCounters(point, row);
   }
 
